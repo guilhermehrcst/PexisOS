@@ -30,6 +30,7 @@ import argparse
 import hashlib
 import json
 import os
+import stat
 import sys
 import tempfile
 from collections.abc import Callable, Sequence
@@ -76,11 +77,14 @@ def main(argv: Sequence[str], decoder_factory: DecoderFactory = load_cantools_de
     can.add_argument("--max-rows", type=int, default=defaults.max_rows)
     can.add_argument("--max-dbc-kb", type=int, default=defaults.max_dbc_bytes >> 10)
     can.add_argument("--max-messages", type=int, default=defaults.max_messages)
+    can.add_argument("--max-signals-per-message", type=int, default=defaults.max_signals_per_message)
+    can.add_argument("--max-signals", type=int, default=defaults.max_signals)
     args = parser.parse_args(list(argv))
     try:
         limits = ReplayLimits(max_frames_bytes=args.max_frames_mb << 20, max_line_bytes=args.max_line_bytes,
                               max_rows=args.max_rows, max_dbc_bytes=args.max_dbc_kb << 10,
-                              max_messages=args.max_messages)
+                              max_messages=args.max_messages, max_signals_per_message=args.max_signals_per_message,
+                              max_signals=args.max_signals)
         dbc, frames, out, summary = (Path(p) for p in (args.dbc, args.frames, args.out, args.summary))
         _check_destinations(out, summary, (dbc, frames))
     except ValueError as exc:
@@ -88,7 +92,8 @@ def main(argv: Sequence[str], decoder_factory: DecoderFactory = load_cantools_de
     command = ["pexislink", "lab", "can-replay", "--dbc", "<dbc>", "--frames", "<frames>", "--out", "<out>",
                "--summary", "<summary>", "--max-frames-mb", str(args.max_frames_mb), "--max-line-bytes",
                str(args.max_line_bytes), "--max-rows", str(args.max_rows), "--max-dbc-kb", str(args.max_dbc_kb),
-               "--max-messages", str(args.max_messages)]
+               "--max-messages", str(args.max_messages), "--max-signals-per-message",
+               str(args.max_signals_per_message), "--max-signals", str(args.max_signals)]
     return _run(dbc, frames, out, summary, limits, command, decoder_factory)
 
 
@@ -106,10 +111,10 @@ def _run(dbc: Path, frames: Path, out: Path, summary: Path, limits: ReplayLimits
     try:
         with no_device_access():
             with open_input(dbc, limits.max_dbc_bytes, "DBC") as source:
-                raw = source.read()
+                raw = source.read(limits.max_dbc_bytes + 1)  # never more than the cap, even if it grew
                 dbc_sha = source.finish()
             try:
-                text = raw.decode("utf-8")
+                text = raw.removeprefix(b"\xef\xbb\xbf").decode("utf-8")
             except UnicodeDecodeError:
                 raise ReplayError("invalid_dbc", "the DBC is not valid UTF-8") from None
             decoder = decoder_factory(text, limits)
@@ -128,13 +133,15 @@ def _run(dbc: Path, frames: Path, out: Path, summary: Path, limits: ReplayLimits
             "command": command,
             "limits": {"max_frames_bytes": limits.max_frames_bytes, "max_line_bytes": limits.max_line_bytes,
                        "max_rows": limits.max_rows, "max_dbc_bytes": limits.max_dbc_bytes,
-                       "max_messages": limits.max_messages},
+                       "max_messages": limits.max_messages, "max_signals": limits.max_signals,
+                       "max_signals_per_message": limits.max_signals_per_message},
             "inputs": {"dbc": {"sha256": dbc_sha, "bytes": len(raw)},
                        "frames": {"sha256": frames_sha, "bytes": frames_bytes, "utf8_bom": report["utf8_bom"],
                                   "final_newline": report["final_newline"]}},
             "dbc_schema": dbc_schema(decoder),
             "frames": {"rows": report["rows"], "status_counts": {s: statuses[s] for s in STATUSES},
-                       "timestamp_order": report["order"], "distinct_unknown_ids": report["distinct_unknown_ids"]},
+                       "timestamp_order": report["order"], "distinct_unknown_ids": report["distinct_unknown_ids"],
+                       "distinct_unknown_ids_capped": report["distinct_unknown_ids_capped"]},
             "records": {"count": records.count, "sha256": records.sha.hexdigest(), "bytes": records.bytes},
         }
         manifest_file.write_text(json.dumps(payload, indent=2, sort_keys=True, allow_nan=False) + "\n")
@@ -157,10 +164,14 @@ def _run(dbc: Path, frames: Path, out: Path, summary: Path, limits: ReplayLimits
             summary.unlink()  # a stale summary must never pair with new records
         records.commit()
         manifest_file.commit()
-    except OSError as exc:
+    except OSError as exc:  # records may already be in place without a summary: an interrupted run
         records.discard()
         manifest_file.discard()
         return _fail("output_write_error", f"cannot commit output: {exc.strerror or 'error'}")
+    except BaseException:
+        records.discard()
+        manifest_file.discard()
+        raise
     print(f"can-replay: {sum(statuses.values())} frame(s): "
           + ", ".join(f"{s} {statuses[s]}" for s in STATUSES), file=sys.stderr)
     return 0
@@ -191,8 +202,12 @@ class _Pending:
 
     def __init__(self, target: Path) -> None:
         self.target = target
+        try:  # keep an existing file's permissions (the summary is removed before its rename)
+            self.mode: int | None = stat.S_IMODE(os.stat(target).st_mode)
+        except FileNotFoundError:
+            self.mode = None
         descriptor, name = tempfile.mkstemp(dir=os.path.dirname(os.path.abspath(target)),
-                                            prefix=f".{target.name}.", suffix=".tmp")
+                                            prefix=".pexislink-", suffix=".tmp")  # short: long targets fit
         self.temporary = Path(name)
         self.handle: IO[bytes] = os.fdopen(descriptor, "wb")
         self.sha = hashlib.sha256()
@@ -215,9 +230,12 @@ class _Pending:
         self.handle.close()
 
     def commit(self) -> None:
-        mask = os.umask(0)
-        os.umask(mask)
-        os.chmod(self.temporary, 0o666 & ~mask)  # mkstemp creates 0600
+        mode = self.mode
+        if mode is None:
+            mask = os.umask(0)
+            os.umask(mask)
+            mode = 0o666 & ~mask  # mkstemp creates 0600
+        os.chmod(self.temporary, mode)
         os.replace(self.temporary, self.target)
         _fsync_directory(self.target)
 

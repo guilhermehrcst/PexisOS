@@ -478,5 +478,131 @@ class StreamingTests(LabCase):
         self.assertLess(large, small * 1.5 + 256 * 1024, (small, large))
 
 
+class ReviewRegressionTests(LabCase):
+    """Independent adversarial review of aaac4dd. Each test failed on aaac4dd."""
+
+    def rogue(self, action, swallow=True):
+        class Rogue(StubDecoder):
+            def decode(self, message, data):
+                if swallow:
+                    try:
+                        action()
+                    except Exception:
+                        pass
+                else:
+                    action()
+                return super().decode(message, data)
+        return lambda text, limits: Rogue()
+
+    def assert_guard(self, factory):
+        write_inputs(self.inputs, CLEAN_ROWS[:1])
+        code, stderr = self.run_lab(factory=factory)
+        self.assertEqual(code, 11, stderr)
+        self.assertNotIn("Traceback", stderr)
+        self.assert_no_output()
+
+    def test_F1_an_uncaught_refusal_exits_11_without_traceback(self):
+        def factory(text, limits):
+            socket.socket(socket.AF_INET, socket.SOCK_STREAM)  # not caught by anyone
+            return StubDecoder()
+        self.assert_guard(factory)
+
+    @unittest.skipUnless(os.path.isdir("/dev/shm") and os.access("/dev/shm", os.W_OK), "no writable /dev/shm")
+    def test_F1_regular_files_under_dev_shm_are_inputs_not_devices(self):
+        shm = Path(tempfile.mkdtemp(dir="/dev/shm"))
+        try:
+            dbc, frames = write_inputs(shm)
+            code, stderr = self.run_lab(dbc=dbc, frames=frames)
+            self.assertEqual(code, 0, stderr)
+        finally:
+            for child in shm.iterdir():
+                child.unlink()
+            shm.rmdir()
+
+    def test_F2_name_resolution_is_refused(self):
+        self.assert_guard(self.rogue(lambda: socket.getaddrinfo("localhost", 80)))
+        self.assert_guard(self.rogue(lambda: socket.gethostbyname("localhost")))
+
+    def test_F2_device_paths_spelled_differently_are_refused(self):
+        self.assert_guard(self.rogue(lambda: open("//dev/null", "rb")))
+        self.assert_guard(self.rogue(lambda: open("/./dev/null", "rb")))
+
+        def via_chdir():
+            cwd = os.getcwd()
+            os.chdir("/dev")
+            try:
+                open("null", "rb")
+            finally:
+                os.chdir(cwd)
+        self.assert_guard(self.rogue(via_chdir))
+
+    def test_F2_a_thread_left_running_fails_the_run(self):
+        import threading
+        stop = threading.Event()
+
+        def start():
+            threading.Thread(target=stop.wait, daemon=True).start()
+        try:
+            self.assert_guard(self.rogue(start))
+        finally:
+            stop.set()
+
+    def test_F2_more_process_entry_points_are_refused(self):
+        self.assert_guard(self.rogue(lambda: os.system("true")))
+        self.assert_guard(self.rogue(lambda: os.posix_spawn("/bin/true", ["true"], {})))
+
+    def test_F3_a_dbc_with_too_many_signals_is_rejected_before_parsing(self):
+        lines = [SYNTHETIC_DBC, "BO_ 1793 SYNTH_WIDE: 8 SYNTH"]
+        lines += [f" SG_ wide{i} : 0|1@1+ (1,0) [0|1] \"\" SYNTH" for i in range(600)]
+        write_inputs(self.inputs, dbc="\n".join(lines) + "\n")
+        called = []
+        code, stderr = self.run_lab(factory=lambda text, limits: called.append(1) or
+                                    canreplay.load_cantools_decoder(text, limits))
+        self.assertEqual(code, 4, stderr)
+        self.assertIn("per-message limit", stderr)
+        write_inputs(self.inputs)
+        self.assertEqual(self.run_lab("--max-signals", "3",
+                                      factory=canreplay.load_cantools_decoder)[0], 4)
+
+    def test_F4_interrupt_during_commit_leaves_no_temporary_file(self):
+        write_inputs(self.inputs)
+        real_commit = lab_cli._Pending.commit
+
+        def commit(pending):
+            if pending.target == self.summary:
+                raise KeyboardInterrupt
+            real_commit(pending)
+
+        with mock.patch.object(lab_cli._Pending, "commit", commit), self.assertRaises(KeyboardInterrupt):
+            self.run_lab()
+        self.assertEqual(sorted(p.name for p in self.outdir.iterdir()), ["records.jsonl"])
+
+    def test_F5_capped_unknown_id_count_is_flagged(self):
+        write_inputs(self.inputs, [f"2026-01-01T00:00:00Z,0x{0x400 + i:03X},0,00" for i in range(10)])
+        with mock.patch.object(canreplay, "_UNKNOWN_ID_CAP", 3):
+            self.run_lab()
+        frames = json.loads(self.summary.read_text())["frames"]
+        self.assertEqual((frames["distinct_unknown_ids"], frames["distinct_unknown_ids_capped"]), (3, True))
+
+    def test_F6_line_limit_counts_content_bytes_only(self):
+        row = "2026-01-01T00:00:00.000000+01:00,0x00000123,1,7B008000"  # 54 bytes, longer than the header
+        for final in (True, False):
+            for newline in ("\n", "\r\n"):
+                write_inputs(self.inputs, frames=frames_csv([row], newline=newline, final_newline=final))
+                self.assertEqual(self.run_lab("--max-line-bytes", str(len(row)))[0], 0)
+                self.assertEqual(self.run_lab("--max-line-bytes", str(len(row) - 1))[0], 9)
+        write_inputs(self.inputs, frames=b"\xef\xbb\xbf" + frames_csv(["2026-01-01T00:00:00Z,0x123,0,00"]))
+        self.assertEqual(self.run_lab("--max-line-bytes", "48")[0], 0)  # header is 48 content bytes
+
+    def test_F9_long_output_names_and_existing_permissions(self):
+        write_inputs(self.inputs)
+        long_out = self.outdir / ("r" * 200 + ".jsonl")
+        self.assertEqual(self.run_lab(out=long_out)[0], 0)
+        self.summary.write_text("old")
+        os.chmod(self.summary, 0o600)
+        self.assertEqual(self.run_lab()[0], 0)
+        self.assertEqual(os.stat(self.summary).st_mode & 0o777, 0o600)
+
+
 if __name__ == "__main__":
     unittest.main()

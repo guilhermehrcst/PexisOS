@@ -113,6 +113,30 @@ class RealCantoolsTests(unittest.TestCase):
         self.assertNotIn("SYNTH", stderr)
         self.assertFalse(self.out.exists())
 
+    def test_review_F7_duplicate_names_and_empty_dbc_are_rejected_silently(self):
+        duplicate_name = SYNTHETIC_DBC.replace("SYNTH_EMPTY", "SYNTH_STD")
+        empty = 'VERSION ""\n\nNS_ :\n\nBS_:\n\nBU_: SYNTH\n'
+        for text in (duplicate_name, empty):
+            self.dbc.write_text(text, encoding="utf-8")
+            code, stderr = self.run_real()
+            self.assertEqual(code, 4, stderr)
+            self.assertNotIn("SYNTH_STD", stderr)
+
+    def test_review_F8_values_beyond_double_range_are_decode_errors(self):
+        huge = SYNTHETIC_DBC.replace("BO_ 1792 SYNTH_EMPTY: 0 SYNTH",
+                                     'BO_ 1792 SYNTH_HUGE: 8 SYNTH\n SG_ huge : 0|64@1+ (1e300,0) [0|0] "" SYNTH')
+        self.dbc.write_text(huge, encoding="utf-8")
+        self.frames.write_bytes(self.frames.read_bytes().replace(b"0x700,0,\n", b"0x700,0,FFFFFFFFFFFFFFFF\n"))
+        code, stderr = self.run_real()
+        self.assertEqual(code, 0, stderr)
+        last = json.loads(self.out.read_text().splitlines()[-1])
+        self.assertEqual((last["status"], last["error"]), ("decode_error", "value_out_of_range"))
+
+    def test_review_F9_dbc_bom_is_accepted_like_the_frame_bom(self):
+        self.dbc.write_bytes(b"\xef\xbb\xbf" + self.dbc.read_bytes())
+        code, stderr = self.run_real()
+        self.assertEqual(code, 0, stderr)
+
     def test_fresh_process_imports_cantools_under_the_guard(self):
         """In a new interpreter the cantools import itself runs inside no_device_access()."""
         env = {**os.environ, "PYTHONPATH": str(SRC)}

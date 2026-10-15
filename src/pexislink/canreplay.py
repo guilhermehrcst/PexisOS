@@ -35,6 +35,8 @@ import os
 import re
 import stat
 import sys
+import threading
+import warnings
 from collections import Counter
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
@@ -60,6 +62,9 @@ _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 _MAX_STANDARD_ID = 0x7FF
 _MAX_EXTENDED_ID = 0x1FFFFFFF
 _CHUNK = 1 << 20
+_UNKNOWN_ID_CAP = 100_000
+_MESSAGE_LINE = re.compile(r"[ \t]*BO_[ \t]")
+_SIGNAL_LINE = re.compile(r"[ \t]*SG_[ \t]")
 
 
 # --------------------------------------------------------------- errors
@@ -93,6 +98,8 @@ class ReplayLimits:
     max_rows: int = 5_000_000
     max_dbc_bytes: int = 4 * 1024 ** 2
     max_messages: int = 10_000
+    max_signals_per_message: int = 512  # cantools' strict parse is quadratic in signals per message
+    max_signals: int = 50_000
 
     def __post_init__(self) -> None:
         for name, value in asdict(self).items():
@@ -232,17 +239,17 @@ def iter_frames(source: InputFile, limits: ReplayLimits, report: dict[str, Any])
     line_number = 0
     rows = 0
     while True:
-        raw = source.readline(limits.max_line_bytes + 1)
+        raw = source.readline(limits.max_line_bytes + 6)  # room for a BOM and CRLF around the content
         if not raw:
             break
         line_number += 1
-        if len(raw) > limits.max_line_bytes:
-            raise ReplayError("line_too_long", "a line is longer than the line limit", line_number)
         if line_number == 1 and raw.startswith(b"\xef\xbb\xbf"):
             report["utf8_bom"] = True
             raw = raw[3:]
         report["final_newline"] = raw.endswith(b"\n")
         body = raw[:-2] if raw.endswith(b"\r\n") else raw[:-1] if raw.endswith(b"\n") else raw
+        if len(body) > limits.max_line_bytes:  # content bytes, excluding BOM and line terminator
+            raise ReplayError("line_too_long", "a line is longer than the line limit", line_number)
         if b"\r" in body or b"\x00" in body:
             raise ReplayError("invalid_line", "stray carriage return or NUL byte", line_number)
         try:
@@ -308,8 +315,25 @@ class _CantoolsDecoder:
         return result
 
 
+def _prescan_dbc(text: str, limits: ReplayLimits) -> None:
+    """Cheap line count before parsing: bounds cantools' quadratic strict-mode parse time."""
+    messages = signals = in_message = 0
+    for line in text.splitlines():
+        if _MESSAGE_LINE.match(line):
+            messages += 1
+            in_message = 0
+        elif _SIGNAL_LINE.match(line):
+            signals += 1
+            in_message += 1
+            if in_message > limits.max_signals_per_message:
+                raise ReplayError("invalid_dbc", "a DBC message has more signals than the per-message limit")
+    if messages > limits.max_messages or signals > limits.max_signals:
+        raise ReplayError("invalid_dbc", "the DBC has more messages or signals than the limits")
+
+
 def load_cantools_decoder(dbc_text: str, limits: ReplayLimits) -> Decoder:
     """Parse a DBC with the optional cantools package. Raises ``ReplayError``."""
+    _prescan_dbc(dbc_text, limits)
     try:
         import cantools  # type: ignore[import-not-found]  # optional; only here, never at package import time
         import cantools.database  # type: ignore[import-not-found]
@@ -326,6 +350,10 @@ def load_cantools_decoder(dbc_text: str, limits: ReplayLimits) -> Decoder:
     messages: dict[tuple[int, bool], MessageSpec] = {}
     if len(database.messages) > limits.max_messages:
         raise ReplayError("invalid_dbc", "the DBC has more messages than the message limit")
+    if not database.messages:
+        raise ReplayError("invalid_dbc", "the DBC defines no message")
+    if len({m.name for m in database.messages}) != len(database.messages):
+        raise ReplayError("invalid_dbc", "two DBC messages share a name")
     for native in database.messages:
         key = (int(native.frame_id), bool(native.is_extended_frame))
         if key in messages:
@@ -348,13 +376,20 @@ def _quiet(name: str) -> Iterator[None]:
     def drop(record: logging.LogRecord) -> bool:
         return not (record.name == name or record.name.startswith(name + "."))
 
+    logger = logging.getLogger(name)
+    saved = logger.propagate, logger.handlers[:]
+    null = logging.NullHandler()
+    logger.propagate, logger.handlers = False, [null]  # also bypasses handlers on child loggers' parents
     handlers = [logging.lastResort, *logging.getLogger().handlers]
     for handler in handlers:
         if handler is not None:
             handler.addFilter(drop)
     try:
-        yield
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            yield
     finally:
+        logger.propagate, logger.handlers = saved
         for handler in handlers:
             if handler is not None:
                 handler.removeFilter(drop)
@@ -406,6 +441,8 @@ def _signals(message: MessageSpec, values: Mapping[str, object]) -> list[dict[st
             raise DecodeFailure("unsupported_value_type")
         if isinstance(value, float) and not math.isfinite(value):
             raise DecodeFailure("nonfinite_value")
+        if isinstance(value, int) and abs(value) > sys.float_info.max:
+            raise DecodeFailure("value_out_of_range")  # would read as Infinity in IEEE-double JSON readers
         out.append({"name": name, "value": value, "unit": units[name]})
     return out
 
@@ -414,8 +451,8 @@ def _signals(message: MessageSpec, values: Mapping[str, object]) -> list[dict[st
 
 _BLOCKED_EVENTS = ("socket.__new__", "socket.connect", "socket.bind", "socket.sendto", "socket.sendmsg",
                    "subprocess.Popen", "os.system", "os.exec", "os.posix_spawn", "os.spawn", "os.fork",
-                   "os.forkpty", "os.startfile", "ctypes.dlopen", "ctypes.dlsym")
-_DEVICE_PREFIXES = ("/dev/", "/sys/class/net", "\\\\.\\")
+                   "os.forkpty", "os.startfile", "ctypes.dlopen", "ctypes.dlsym",
+                   "socket.getaddrinfo", "socket.gethostbyname", "socket.gethostbyaddr", "socket.getnameinfo")
 _guard = {"active": False, "violations": 0}
 _hook_installed = False
 
@@ -429,11 +466,26 @@ def _audit(event: str, args: tuple[Any, ...]) -> None:
         return
     blocked = event.startswith(_BLOCKED_EVENTS)
     if event == "open" and args and isinstance(args[0], (str, bytes, os.PathLike)):
-        path = os.fsdecode(args[0]) if not isinstance(args[0], int) else ""
-        blocked = path.startswith(_DEVICE_PREFIXES)
+        blocked = _is_device(os.fsdecode(args[0]))
     if blocked:
         _guard["violations"] += 1
         raise SafetyViolation(event)
+
+
+def _is_device(path: str) -> bool:
+    """Refuse anything that is not a regular file or directory, and device trees by path.
+
+    The path is made absolute against the current directory and resolved, so '//dev/x',
+    '/./dev/x' or a chdir('/dev') do not bypass it. A path relative to a ``dir_fd`` cannot be
+    seen by an audit hook (documented gap)."""
+    try:
+        resolved = os.path.realpath(path)
+        mode = os.stat(resolved).st_mode
+    except (OSError, ValueError):
+        return False  # does not exist (yet): nothing to reach; creating files is not a device access
+    if stat.S_ISREG(mode) or stat.S_ISDIR(mode):
+        return False
+    return True
 
 
 @contextmanager
@@ -448,13 +500,19 @@ def no_device_access() -> Iterator[None]:
     if not _hook_installed:
         sys.addaudithook(_audit)
         _hook_installed = True
+    threads_before = {id(thread) for thread in threading.enumerate()}
     _guard.update(active=True, violations=0)
     try:
         yield
+    except SafetyViolation:  # an uncaught refusal is a guard failure, never a traceback
+        _guard["violations"] += 1
     finally:
         _guard["active"] = False
+    # A thread started during the replay could act after the guard switched off: fail closed.
+    if any(id(thread) not in threads_before and thread.is_alive() for thread in threading.enumerate()):
+        _guard["violations"] += 1
     if _guard["violations"]:
-        raise ReplayError("safety_guard", "replay code attempted device, network or process access")
+        raise ReplayError("safety_guard", "replay code attempted device, network, process or thread activity")
 
 
 # --------------------------------------------------------------- replay
@@ -482,7 +540,7 @@ def replay(frames: InputFile, decoder: Decoder, limits: ReplayLimits,
             order["exact_duplicate_of_previous"] += 1
         record = assess(frame, index, decoder, position)
         statuses[record["status"]] += 1
-        if record["status"] == "unknown_message" and len(unknown) <= limits.max_messages:
+        if record["status"] == "unknown_message" and len(unknown) < _UNKNOWN_ID_CAP:
             unknown.add((frame.arbitration_id, frame.is_extended_id))
         write(record)
         previous = frame
@@ -490,6 +548,7 @@ def replay(frames: InputFile, decoder: Decoder, limits: ReplayLimits,
     report["rows"] = index
     report["order"] = dict(sorted(order.items()))
     report["distinct_unknown_ids"] = len(unknown)
+    report["distinct_unknown_ids_capped"] = len(unknown) >= _UNKNOWN_ID_CAP
     return statuses
 
 
