@@ -118,12 +118,13 @@ class MissingInputTests(PreflightCase):
         self.assertEqual(overlap["train__test"], "not_checked")
         self.assertEqual(overlap["train__validation"]["status"], "verified_local")
 
-    def test_unrecognized_entries_are_counted_and_unsafe_names_withheld(self):
+    def test_unrecognized_entries_are_counted_not_named(self):
         write_dataset(self.data)
-        (self.data / "notes.txt").write_text("x")
+        (self.data / "truck_ABC123_owner_smith.csv").write_text("x")
         (self.data / "private name\x1b.csv").write_text("x")
         manifest = run_preflight(self.data, PreflightLimits(), ["test"])
-        self.assertEqual(manifest["input_directory"]["unrecognized_entries"], ["<name withheld>", "notes.txt"])
+        self.assertEqual(manifest["input_directory"]["unrecognized_entries"], 2)
+        self.assertNotIn("smith", json.dumps(manifest))
 
     def test_symlink_and_directory_are_not_followed(self):
         write_dataset(self.data, omit=(TRAIN_OPS, "test_labels.csv"))
@@ -224,16 +225,18 @@ class RowLevelTests(PreflightCase):
 
     def test_missing_and_invalid_feature_cells_are_counted_per_column(self):
         big = "9" * 70
-        rows = ["900001,1,,1_000,nan", "900001,2,5, 5,inf", f"900001,3,9007199254740993,{big},1e400"]
+        rows = ["900001,1,,1_000,nan", "900001,2,5, 5,inf", f"900001,3,9007199254740993,{big},1e400",
+                "900001,4,6,1e-400,0"]
         report = self.train(overrides={TRAIN_OPS: ops(rows)})
         columns = report["features"]["columns"]
         self.assertEqual(report["check"], "pass")  # cell problems are reported, rows are not rejected
         self.assertEqual(columns["synthetic_counter_a"]["missing"], 1)
-        self.assertEqual(columns["synthetic_counter_a"]["integer_precision_lost"], 1)
+        self.assertEqual(columns["synthetic_counter_a"]["precision_lost_beyond_2pow53"], 1)
         self.assertEqual(columns["synthetic_bin_b_0"]["non_numeric"], 2)
         self.assertEqual(columns["synthetic_bin_b_0"]["number_too_long"], 1)
+        self.assertEqual(columns["synthetic_bin_b_0"]["underflow"], 1)
         self.assertEqual(columns["synthetic_bin_b_1"]["nonfinite"], 3)
-        self.assertEqual(columns["synthetic_bin_b_1"]["min"], None)
+        self.assertEqual(columns["synthetic_bin_b_1"]["min"], 0.0)
 
     def test_time_order_is_checked_per_vehicle_without_sorting(self):
         rows = ["900001,1,1,0,0", "900001,3,2,0,0", "900001,3,3,0,0",  # duplicate key at line 4
@@ -380,22 +383,133 @@ class ParserUnitTests(unittest.TestCase):
     def test_parse_number(self):
         self.assertEqual(parse_number("1.5e3"), (1500.0, None))
         self.assertEqual(parse_number("-0"), (-0.0, None))
+        self.assertEqual(parse_number("0e-400"), (0.0, None))
         for cell, issue in (("", "missing"), ("abc", "non_numeric"), ("1_0", "non_numeric"),
                             (" 1", "non_numeric"), ("١", "non_numeric"), ("NaN", "nonfinite"),
                             ("-inf", "nonfinite"), ("1e999", "nonfinite"), ("1" * 65, "number_too_long"),
-                            ("0x10", "non_numeric")):
+                            ("0x10", "non_numeric"), ("1e-400", "underflow"), ("0.5e-400", "underflow")):
             self.assertEqual(parse_number(cell), (None, issue), cell)
 
     def test_precision_lost(self):
         self.assertTrue(precision_lost("9007199254740993", 9007199254740992.0))
         self.assertFalse(precision_lost("9007199254740992", 9007199254740992.0))
-        self.assertFalse(precision_lost("1e300", 1e300))
+        self.assertTrue(precision_lost("9007199254740993.0", 9007199254740992.0))
+        self.assertTrue(precision_lost("9.007199254740993e15", 9007199254740992.0))
+        self.assertFalse(precision_lost("1e16", 1e16))
+        self.assertFalse(precision_lost("123.25", 123.25))
 
     def test_limits_are_validated(self):
         with self.assertRaises(ValueError):
             PreflightLimits(max_rows=0)
         with self.assertRaises(ValueError):
             PreflightLimits(max_vehicles=True)
+
+
+class ReviewRegressionTests(PreflightCase):
+    """Findings of the independent adversarial review (docs/COMPONENT-X-PREFLIGHT.md §8).
+    Each test failed on the first implementation (46aacf6)."""
+
+    def test_H1_headerless_outcome_file_fails_and_reports_no_names(self):
+        manifest = self.preflight(overrides={"validation_labels.csv": b"910001,3\n910002,0\n",
+                                             "train_tte.csv": b"900001,510,1\n"})
+        for name in ("validation_labels.csv", "train_tte.csv"):
+            report = manifest["files"][name]
+            self.assertEqual(report["fatal"]["code"], "unexpected_header", name)
+            self.assertNotIn("header", report)
+        self.assertEqual(manifest["overall"]["status"], "fail")
+        text = json.dumps(manifest)
+        self.assertNotIn("910001", text)
+        self.assertNotIn("900001", text)
+
+    def test_H2_a_record_spanning_lines_is_bounded(self):
+        body = b'1,"xy\n' + b'xy","xy\n' * 10_000  # one record of ~90 kB, every line short
+        data = ops([]) + body
+        report = self.train(overrides={TRAIN_OPS: data})
+        self.assertEqual(report["fatal"]["code"], "record_too_long")
+        tracemalloc.start()
+        try:
+            report = self.train(overrides={TRAIN_OPS: ops([]) + b'1,"xy\n' + b'xy","xy\n' * 200_000})
+            peak = tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+        self.assertEqual(report["fatal"]["code"], "record_too_long")
+        self.assertLess(peak, 4 * 1024 * 1024)
+
+    def test_M1_specification_values_are_not_kept_verbatim(self):
+        rows = [f"{900000 + i},{'v' * 60_000}{i}" for i in range(200)]  # 200 distinct 60 kB values
+        data = csv_text(("vehicle_id", "synthetic_spec_0"), rows).encode()
+        tracemalloc.start()
+        try:
+            report = self.preflight(overrides={"train_specifications.csv": data})["files"]["train_specifications.csv"]
+            peak = tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+        self.assertEqual(report["columns"]["synthetic_spec_0"]["distinct_values"], 200)
+        self.assertLess(peak, len(data) // 2)
+
+    def test_M2_time_order_defects_block(self):
+        rows = ["900001,5,1,0,0", "900001,5,2,0,0", "900001,2,3,0,0"]
+        write_dataset(self.data, overrides={TRAIN_OPS: ops(rows)})
+        code, manifest, _ = self.run_cli()
+        self.assertEqual(code, 3)
+        self.assertEqual(manifest["files"][TRAIN_OPS]["blocking"], ["time_step_order"])
+        self.assertIn(f"{TRAIN_OPS}: time_step_order", manifest["overall"]["blocking_issues"])
+
+    def test_L1_outcome_line_count(self):
+        def lines(data):
+            report = self.preflight(overrides={"test_labels.csv": data})["files"]["test_labels.csv"]
+            return report.get("physical_lines_after_header"), report["blocking"]
+        self.assertEqual(lines(b"vehicle_id,class_label"), (0, ["no_data_rows"]))
+        self.assertEqual(lines(b"vehicle_id,class_label\n"), (0, ["no_data_rows"]))
+        self.assertEqual(lines(b"vehicle_id,class_label\n920001,0"), (1, []))
+        self.assertEqual(lines(b"vehicle_id,class_label\n920001,0\n\n\n"), (3, []))  # blank lines are lines
+
+    def test_L2_time_step_beyond_float_precision_is_rejected(self):
+        rows = ["900001,9007199254740992,1,0,0", "900001,9007199254740993,1,0,0"]
+        report = self.train(overrides={TRAIN_OPS: ops(rows)})
+        self.assertEqual(report["rows"]["issues"]["time_step_precision_lost"]["first_lines"], [3])
+        self.assertEqual(report["time_step"]["duplicate_keys"]["adjacent_equal"], 0)
+
+    def test_L3_overflowing_gap_has_its_own_bucket(self):
+        # Through the CLI an infinite gap is now unreachable: time steps >= 2**53 must be exact
+        # and at most 64 characters (L2). The bucket function stays defensive.
+        self.assertEqual(componentx._delta_bucket(float("inf")), "overflow")
+        self.assertEqual(componentx._delta_bucket(3.0), "[2^1,2^2)")
+        big = str(2 ** 200)  # exact, 61 digits: accepted, finite gap
+        report = self.train(overrides={TRAIN_OPS: ops([f"900001,-{big},1,0,0", f"900001,{big},1,0,0"])})
+        self.assertEqual(report["time_step"]["positive_delta_histogram"], {"[2^201,2^202)": 1})
+
+    def test_L5_field_limit_is_named(self):
+        big = "1" * 140_000
+        report = self.train(overrides={TRAIN_OPS: ops([f'900001,1,"{big}",0,0'])},
+                            limits=PreflightLimits(max_line_bytes=1 << 20))
+        self.assertEqual(report["fatal"]["code"], "field_too_large")
+
+    def test_L6_empty_data_files_block(self):
+        report = self.train(overrides={TRAIN_OPS: ops([])})
+        self.assertEqual(report["blocking"], ["no_data_rows"])
+        self.assertEqual(report["check"], "fail")
+
+    def test_L6_claim_mismatches_are_listed(self):
+        manifest = self.preflight()
+        self.assertIn(f"{TRAIN_OPS}: data_rows", manifest["overall"]["publisher_claim_mismatches"])
+
+    def test_L7_unread_entries_have_accurate_claims_and_codes(self):
+        write_dataset(self.data, omit=(TRAIN_OPS,))
+        (self.data / TRAIN_OPS).symlink_to(self.root / "nowhere.csv")
+        report = run_preflight(self.data, PreflightLimits(), ["t"])["files"][TRAIN_OPS]
+        self.assertEqual(report["fatal"]["code"], "symlink_not_followed")
+        self.assertEqual(report["publisher_claims"]["note"], "file present but not read; nothing compared")
+
+    def test_L10_read_error_fails_one_file_not_the_run(self):
+        write_dataset(self.data)
+        def failing(*args):
+            raise OSError(5, "Input/output error")
+
+        with mock.patch.object(componentx, "_check_operational", failing):
+            manifest = run_preflight(self.data, PreflightLimits(), ["t"])
+        self.assertEqual(manifest["files"][TRAIN_OPS]["fatal"]["code"], "read_error")
+        self.assertEqual(manifest["files"]["test_labels.csv"]["check"], "metadata_only")
 
 
 if __name__ == "__main__":

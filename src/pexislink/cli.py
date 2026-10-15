@@ -183,11 +183,14 @@ def _dataset(argv: list[str]) -> int:
     pre.add_argument("--max-rows", type=int, default=defaults.max_rows)
     pre.add_argument("--max-vehicles", type=int, default=defaults.max_vehicles)
     pre.add_argument("--max-columns", type=int, default=defaults.max_columns)
+    pre.add_argument("--max-dir-entries", type=int, default=defaults.max_dir_entries)
+    pre.add_argument("--max-categories", type=int, default=defaults.max_categories)
     args = parser.parse_args(argv)
     try:
         limits = PreflightLimits(max_file_bytes=args.max_file_mb << 20,
                                  max_line_bytes=args.max_line_bytes, max_rows=args.max_rows,
-                                 max_vehicles=args.max_vehicles, max_columns=args.max_columns)
+                                 max_vehicles=args.max_vehicles, max_columns=args.max_columns,
+                                 max_dir_entries=args.max_dir_entries, max_categories=args.max_categories)
         input_dir = Path(args.input_dir)
         if not input_dir.is_dir():
             raise ValueError(f"input directory does not exist or is not a directory: {args.input_dir}")
@@ -201,7 +204,8 @@ def _dataset(argv: list[str]) -> int:
     command = ["pexislink", "dataset", "preflight", "--source", args.source, "--input-dir", "<input-dir>",
                "--out", "<out>", "--max-file-mb", str(args.max_file_mb), "--max-line-bytes",
                str(args.max_line_bytes), "--max-rows", str(args.max_rows), "--max-vehicles",
-               str(args.max_vehicles), "--max-columns", str(args.max_columns)]
+               str(args.max_vehicles), "--max-columns", str(args.max_columns), "--max-dir-entries",
+               str(args.max_dir_entries), "--max-categories", str(args.max_categories)]
     started = time.perf_counter()
     try:
         manifest = run_preflight(input_dir, limits, command)
@@ -209,6 +213,9 @@ def _dataset(argv: list[str]) -> int:
         manifest_file.discard()
         print(f"error: {exc}", file=sys.stderr)
         return 2
+    except BaseException:  # e.g. Ctrl-C: leave no temporary file behind
+        manifest_file.discard()
+        raise
     try:
         manifest_file.commit(manifest, sort_keys=True)
     except (OSError, ValueError) as exc:

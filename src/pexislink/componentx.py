@@ -31,6 +31,7 @@ local paths: only counts, line numbers, column names, byte lengths and hashes.
 from __future__ import annotations
 
 import csv
+import errno
 import hashlib
 import math
 import os
@@ -38,6 +39,7 @@ import platform
 import re
 import stat
 from collections import Counter
+from decimal import Decimal, InvalidOperation
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, BinaryIO, Iterator
@@ -161,8 +163,6 @@ class PreflightLimits:
 
 _COLUMN_NAME = re.compile(r"[A-Za-z0-9_.-]{1,64}", re.ASCII)
 _VEHICLE_ID = re.compile(r"[A-Za-z0-9_.-]{1,64}", re.ASCII)
-_DIGITS = re.compile(r"[+-]?[0-9]+", re.ASCII)
-_SAFE_FILE_NAME = re.compile(r"[A-Za-z0-9_.-]{1,128}", re.ASCII)
 _EXACT_FLOAT_INT = 2 ** 53
 _MAX_NUMBER_CHARS = 64
 _SAMPLE_LINES = 5
@@ -199,12 +199,20 @@ def parse_number(cell: str) -> tuple[float | None, str | None]:
         return None, "non_numeric"
     if not math.isfinite(value):  # 'nan', 'inf' and overflow such as '1e400'
         return None, "nonfinite"
+    if value == 0.0 and any(digit in cell.partition("e")[0].partition("E")[0] for digit in "123456789"):
+        return None, "underflow"  # '1e-400' would otherwise become 0
     return value, None
 
 
 def precision_lost(cell: str, value: float) -> bool:
-    """True when an integer literal cannot be represented exactly as a float."""
-    return abs(value) >= _EXACT_FLOAT_INT and _DIGITS.fullmatch(cell) is not None and int(cell) != int(value)
+    """True when a literal of magnitude >= 2**53 is not exactly the float it parses to
+    (any notation: '9007199254740993', '9007199254740993.0', '9.007199254740993e15')."""
+    if abs(value) < _EXACT_FLOAT_INT:
+        return False
+    try:
+        return Decimal(cell) != Decimal(value)
+    except InvalidOperation:  # parse_number accepted it, so this should not happen
+        return True
 
 
 class _HashedFile:
@@ -219,6 +227,7 @@ class _HashedFile:
         self.lines = 0
         self.bom = False
         self.final_newline = True
+        self.record_bytes = 0  # bytes of the CSV record being assembled (quoted fields may span lines)
 
     def _consume(self, raw: bytes) -> None:
         self.sha.update(raw)
@@ -244,6 +253,9 @@ class _HashedFile:
                 raw = raw[3:]
             if b"\x00" in raw:
                 raise _FileFailure("nul_byte", self.lines)
+            self.record_bytes += len(raw)
+            if self.record_bytes > self.max_line_bytes:
+                raise _FileFailure("record_too_long", self.lines)
             try:
                 yield raw.decode("utf-8")
             except UnicodeDecodeError:
@@ -278,6 +290,7 @@ class _Column:
     missing: int = 0
     non_numeric: int = 0
     nonfinite: int = 0
+    underflow: int = 0
     number_too_long: int = 0
     precision_lost: int = 0
     candidate_decreases: int = 0
@@ -286,7 +299,7 @@ class _Column:
 
     def to_json(self) -> dict[str, Any]:
         return {"missing": self.missing, "non_numeric": self.non_numeric, "nonfinite": self.nonfinite,
-                "number_too_long": self.number_too_long, "integer_precision_lost": self.precision_lost,
+                "underflow": self.underflow, "number_too_long": self.number_too_long, "precision_lost_beyond_2pow53": self.precision_lost,
                 "candidate_decreases": self.candidate_decreases, "min": self.minimum, "max": self.maximum}
 
 
@@ -310,12 +323,16 @@ def _csv_rows(source: _HashedFile) -> Iterator[list[str]]:
     reader = csv.reader(source.text_lines(), strict=True)
     try:
         for row in reader:
+            source.record_bytes = 0  # the reader yields as soon as a record is complete
             yield row
-    except csv.Error:
-        raise _FileFailure("csv_syntax", source.lines) from None
+    except csv.Error as exc:
+        code = "field_too_large" if "field limit" in str(exc) else "csv_syntax"
+        raise _FileFailure(code, source.lines) from None
 
 
 def _delta_bucket(delta: float) -> str:
+    if not math.isfinite(delta):
+        return "overflow"
     exponent = math.frexp(delta)[1]  # delta in [2**(e-1), 2**e)
     return f"[2^{exponent - 1},2^{exponent})"
 
@@ -358,6 +375,8 @@ def _check_operational(source: _HashedFile, limits: PreflightLimits, report: dic
             issues.add("invalid_vehicle_id", line)
             continue
         time_value, problem = parse_number(row[time_at])
+        if time_value is not None and precision_lost(row[time_at], time_value):
+            time_value, problem = None, "precision_lost"
         if time_value is None:
             rejected += 1
             issues.add(f"time_step_{problem}", line)
@@ -393,7 +412,14 @@ def _check_operational(source: _HashedFile, limits: PreflightLimits, report: dic
                 continue
             value, problem = parse_number(cell)
             if value is None:
-                setattr(column, problem or "non_numeric", getattr(column, problem or "non_numeric") + 1)
+                if problem == "nonfinite":
+                    column.nonfinite += 1
+                elif problem == "underflow":
+                    column.underflow += 1
+                elif problem == "number_too_long":
+                    column.number_too_long += 1
+                else:
+                    column.non_numeric += 1
                 continue
             if value >= _EXACT_FLOAT_INT or value <= -_EXACT_FLOAT_INT:
                 column.precision_lost += precision_lost(cell, value)
@@ -429,7 +455,7 @@ def _check_operational(source: _HashedFile, limits: PreflightLimits, report: dic
 
 
 def _bucket_order(label: str) -> int:
-    return int(label[3:label.index(",")])
+    return 1 << 20 if label == "overflow" else int(label[3:label.index(",")])
 
 
 def _check_specifications(source: _HashedFile, limits: PreflightLimits, report: dict[str, Any],
@@ -441,7 +467,7 @@ def _check_specifications(source: _HashedFile, limits: PreflightLimits, report: 
     vid_at = header.index("vehicle_id")
     others = [i for i in range(width) if i != vid_at]
     missing = Counter[str]()
-    values: dict[str, set[str]] = {header[i]: set() for i in others}
+    values: dict[str, set[bytes]] = {header[i]: set() for i in others}
     over_cap: set[str] = set()
     issues = _Issues()
     seen: set[str] = set()
@@ -473,7 +499,7 @@ def _check_specifications(source: _HashedFile, limits: PreflightLimits, report: 
             if cell == "":
                 missing[name] += 1
             elif name not in over_cap:
-                values[name].add(cell)
+                values[name].add(hashlib.blake2b(cell.encode(), digest_size=16).digest())  # fixed size
                 if len(values[name]) > limits.max_categories:
                     over_cap.add(name)
                     values[name].clear()
@@ -486,8 +512,12 @@ def _check_specifications(source: _HashedFile, limits: PreflightLimits, report: 
     vehicles_out.update(seen)
 
 
-def _check_outcome(source: _HashedFile, report: dict[str, Any]) -> None:
-    """Metadata only: decode the header line, then hash the rest undecoded."""
+def _check_outcome(source: _HashedFile, expected: ExpectedFile, report: dict[str, Any]) -> None:
+    """Metadata only: decode the header line, then hash the rest undecoded.
+
+    The first line is accepted as a header only if it names every column the
+    publisher describes; otherwise a headerless file would put a vehicle ID and
+    a label into the manifest as "column names"."""
     first = next(source.raw_lines(), None)
     if first is None:
         raise _FileFailure("empty_file", 1)
@@ -498,14 +528,18 @@ def _check_outcome(source: _HashedFile, report: dict[str, Any]) -> None:
         names = next(csv.reader([first.decode("utf-8")], strict=True), [])
     except (UnicodeDecodeError, csv.Error):
         raise _FileFailure("invalid_header", 1) from None
-    if not names or any(_COLUMN_NAME.fullmatch(name) is None for name in names):
-        raise _FileFailure("unsupported_column_name", 1)
+    if (not names or any(_COLUMN_NAME.fullmatch(name) is None for name in names) or len(set(names)) != len(names)
+            or any(name not in names for name in expected.column_names)):
+        raise _FileFailure("unexpected_header", 1)  # names are not reported: they may be data
     report["header"] = {"columns": len(names), "names": names}
+    header_bytes = source.bytes
     source.drain()
-    data_lines = source.lines - 1
-    report["physical_lines_after_header"] = data_lines
+    after = source.lines - 1
+    if source.bytes > header_bytes and not source.final_newline:
+        after += 1  # an unterminated last line
+    report["physical_lines_after_header"] = after
     report["label_policy"] = ("outcome values were not decoded; only the header, byte length, SHA-256 "
-                              "and physical line count were read")
+                              "and physical line count (blank lines included) were read")
 
 
 def _sniff(handle: BinaryIO) -> str:
@@ -528,54 +562,77 @@ def _open_regular(path: Path) -> tuple[int, os.stat_result]:
 
 
 def check_file(path: Path, name: str, limits: PreflightLimits, vehicles_out: set[str]) -> dict[str, Any]:
-    """Preflight one local file. Never raises for content problems: they are reported."""
+    """Preflight one local file. Never raises for content or read problems: they are reported.
+
+    ``blocking`` lists every reason the file fails: a structural ``fatal``, rejected
+    rows, an ordering defect in the ``(vehicle_id, time_step)`` key, or no data rows.
+    """
     expected = EXPECTED[name]
     report: dict[str, Any] = {"status": "verified_local", "split": expected.split, "role": expected.role,
-                              "check": "fail", "fatal": None}
+                              "check": "fail", "fatal": None, "blocking": []}
     try:
         descriptor, info = _open_regular(path)
     except _FileFailure as failure:
         report.update(status="not_checked", fatal={"code": failure.code, "line": None})
-        return report
     except OSError as exc:
-        report.update(status="not_checked", fatal={"code": "unreadable", "line": None, "errno": exc.errno})
-        return report
+        code = "symlink_not_followed" if exc.errno == errno.ELOOP else "unreadable"
+        report.update(status="not_checked", fatal={"code": code, "line": None, "errno": exc.errno})
+    else:
+        _read_file(descriptor, info, expected, limits, report, vehicles_out)
+    if report["fatal"]:
+        report["blocking"].insert(0, report["fatal"]["code"])
+        vehicles_out.clear()  # a failed file contributes no vehicle set to split checks
+    report["check"] = ("fail" if report["blocking"]
+                       else "metadata_only" if expected.role == "outcome" else "pass")
+    report["publisher_claims"] = _claims(expected, report)
+    return report
+
+
+def _read_file(descriptor: int, info: os.stat_result, expected: ExpectedFile, limits: PreflightLimits,
+               report: dict[str, Any], vehicles_out: set[str]) -> None:
     with os.fdopen(descriptor, "rb") as handle:
         report["bytes"] = info.st_size
         if info.st_size > limits.max_file_bytes:
             report.update(sha256={"status": "not_checked", "reason": "file larger than max_file_bytes"},
                           fatal={"code": "file_too_large", "line": None})
-            report["publisher_claims"] = _claims(expected, report)
-            return report
+            return
         source = _HashedFile(handle, limits.max_line_bytes)
-        report["content_type"] = _sniff(handle)
         try:
-            if report["content_type"] != "text/csv":
-                raise _FileFailure("unsupported_compression", None)
-            if expected.role == "operational":
-                _check_operational(source, limits, report, vehicles_out)
-            elif expected.role == "specifications":
-                _check_specifications(source, limits, report, vehicles_out)
-            else:
-                _check_outcome(source, report)
-            report["check"] = "metadata_only" if expected.role == "outcome" else "pass"
-        except _FileFailure as failure:
-            report["fatal"] = {"code": failure.code, "line": failure.line}
-            vehicles_out.clear()  # a failed file contributes no vehicle set to split checks
-        source.drain()
+            report["content_type"] = _sniff(handle)
+            try:
+                if report["content_type"] != "text/csv":
+                    raise _FileFailure("unsupported_compression", None)
+                if expected.role == "operational":
+                    _check_operational(source, limits, report, vehicles_out)
+                elif expected.role == "specifications":
+                    _check_specifications(source, limits, report, vehicles_out)
+                else:
+                    _check_outcome(source, expected, report)
+            except _FileFailure as failure:
+                report["fatal"] = {"code": failure.code, "line": failure.line}
+            source.drain()
+            changed = source.bytes != info.st_size or os.fstat(handle.fileno()).st_size != info.st_size
+        except OSError as exc:  # e.g. EIO mid-read: this file fails, the run continues
+            report["fatal"] = {"code": "read_error", "line": None, "errno": exc.errno}
+            report["sha256"] = {"status": "not_checked", "reason": "read error"}
+            return
         report["sha256"] = source.sha.hexdigest()
         report["bytes_read"] = source.bytes
         report["physical_lines"] = source.lines
         report["utf8_bom"] = source.bom
         report["final_newline"] = source.final_newline
-        if source.bytes != info.st_size or os.fstat(handle.fileno()).st_size != info.st_size:
-            report["check"] = "fail"
-            report["fatal"] = {"code": "file_changed_during_read", "line": None}
-            vehicles_out.clear()
-        elif report["check"] == "pass" and report["rows"]["rejected"]:
-            report["check"] = "fail"
-    report["publisher_claims"] = _claims(expected, report)
-    return report
+    if changed:
+        report["fatal"] = {"code": "file_changed_during_read", "line": None}
+    if report["fatal"]:
+        return
+    rows = report.get("rows") or {}
+    if rows.get("rejected"):
+        report["blocking"].append("rejected_rows")
+    time_step = report.get("time_step") or {}
+    if time_step.get("backwards_steps") or (time_step.get("duplicate_keys") or {}).get("adjacent_equal"):
+        report["blocking"].append("time_step_order")  # duplicate or backwards (vehicle_id, time_step) keys
+    if (rows and not rows.get("data_rows")) or report.get("physical_lines_after_header") == 0:
+        report["blocking"].append("no_data_rows")
 
 
 def _compare(claim: int | None, observed: int | None) -> dict[str, Any] | None:
@@ -592,11 +649,12 @@ def _claims(expected: ExpectedFile, report: dict[str, Any]) -> dict[str, Any]:
     header = report.get("header") or {}
     rows_observed = (report.get("rows") or {}).get("data_rows") if complete else None
     if complete and expected.role == "outcome":
-        lines = report["physical_lines_after_header"]
-        rows_observed = lines if report["final_newline"] else lines + 1
+        rows_observed = report["physical_lines_after_header"]  # physical lines, blank lines included
     claims: dict[str, Any] = {"evidence": expected.evidence}
-    if not present:
+    if report.get("status") == "not_available":
         claims["note"] = "file not available locally; nothing compared"
+    elif not present:
+        claims["note"] = "file present but not read; nothing compared"
     for key, claim, observed in (
         ("data_rows", expected.rows, rows_observed),
         ("distinct_vehicles", expected.vehicles,
@@ -718,11 +776,11 @@ def run_preflight(input_dir: Path, limits: PreflightLimits, command: list[str]) 
         if expected.role != "outcome":
             ok = files[name].get("fatal") is None and files[name]["status"] == "verified_local"
             vehicle_sets[f"{expected.split}:{expected.role}"] = vehicles if ok else None
-    unrecognized = sorted(name for name in present if name not in EXPECTED)
-    blocking = sorted(f"{name}: {report['fatal']['code']}" for name, report in files.items()
-                      if report.get("fatal"))
-    blocking += sorted(f"{name}: rejected_rows" for name, report in files.items()
-                       if report.get("fatal") is None and (report.get("rows") or {}).get("rejected"))
+    unrecognized = sum(1 for name in present if name not in EXPECTED)
+    blocking = [f"{name}: {reason}" for name, report in files.items() for reason in report.get("blocking", ())]
+    mismatches = sorted(f"{name}: {key}" for name, report in files.items()
+                        for key, value in report["publisher_claims"].items()
+                        if isinstance(value, dict) and value.get("match") is False)
     missing = sorted(name for name, report in files.items() if report["status"] == "not_available")
     status = "fail" if blocking else ("incomplete" if missing else "pass")
     return {
@@ -737,13 +795,15 @@ def run_preflight(input_dir: Path, limits: PreflightLimits, command: list[str]) 
         "input_directory": {
             "path": "not recorded (privacy)",
             "entries": len(entries),
-            "unrecognized_entries": sorted(n if _SAFE_FILE_NAME.fullmatch(n) else "<name withheld>"
-                                           for n in unrecognized),
+            "unrecognized_entries": unrecognized,  # a count: local file names may identify people or vehicles
         },
         "files": files,
         "split_checks": _split_checks(vehicle_sets),
         "overall": {"status": status, "blocking_issues": blocking, "missing_expected_files": missing,
-                    "meaning": "pass: every expected file present and structurally clean; incomplete: no "
-                               "blocking issue but expected files missing; fail: at least one blocking issue. "
-                               "None of these is a statement about predictive value."},
+                    "publisher_claim_mismatches": mismatches,
+                    "meaning": "pass: every expected file present, structurally clean, with data rows and an "
+                               "ordered, duplicate-free (vehicle_id, time_step) key; incomplete: no blocking issue "
+                               "but expected files missing; fail: at least one blocking issue. Publisher-claim "
+                               "mismatches are listed but do not block (the claims are unverified). None of these "
+                               "is a statement about predictive value."},
     }

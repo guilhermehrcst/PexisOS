@@ -68,18 +68,22 @@ classes, public download endpoints, and the licence of version 3.
 ```bash
 pexislink dataset preflight --source component-x-v3 --input-dir DIR --out MANIFEST.json \
     [--max-file-mb 2048] [--max-line-bytes 65536] [--max-rows 5000000] \
-    [--max-vehicles 100000] [--max-columns 1024]
+    [--max-vehicles 100000] [--max-columns 1024] [--max-dir-entries 10000] [--max-categories 256]
 ```
 
-Files are recognised by exact name, top level of `DIR` only. Symbolic links, devices,
-directories and FIFOs are not followed or read. Every file is read once, in a
-stream; its SHA-256 covers every byte even when parsing stops early.
+Files are recognised by exact name, top level of `DIR` only. Symbolic links are not
+followed (`symlink_not_followed`). Directories, devices and FIFOs are opened
+non-blocking only to be identified with `fstat` and are never read
+(`not_a_regular_file`). Every regular file is read once, in a stream; its SHA-256
+covers every byte even when parsing stops early, except when the file exceeds
+`--max-file-mb` (then it is not read and `sha256` is `not_checked`) or a read error
+occurs.
 
 | Role | Files | Checks |
 |---|---|---|
-| operational | `*_operational_readouts.csv` | strict UTF-8 (BOM noted), no NUL, bounded line length, strict CSV quoting, header (safe names, unique, `vehicle_id` and `time_step` present), field count, vehicle-id syntax, strict numbers (no `nan`/`inf`/overflow/`1_000`/non-ASCII digits/blanks; nothing coerced to 0), per vehicle in file order: backwards `time_step`, duplicate `(vehicle_id, time_step)`, non-contiguous vehicle rows, positive gap histogram (powers of two, no unit assumed); per column: missing, non-numeric, non-finite, over-long, integers beyond 2^53, min, max, and *candidate* decreases within a vehicle's contiguous rows |
-| specifications | `*_specifications.csv` | as above for structure; duplicate `vehicle_id`; per column missing count and number of distinct values (capped) |
-| outcome | `train_tte.csv`, `validation_labels.csv`, `test_labels.csv` | **metadata only**: header line, byte length, SHA-256, physical line count. Values are never decoded (a test feeds invalid UTF-8 after the header to prove it) |
+| operational | `*_operational_readouts.csv` | strict UTF-8 (BOM noted), no NUL, bounded line length and bounded record length (a quoted field spanning lines counts towards one record), strict CSV quoting, header (safe names, unique, `vehicle_id` and `time_step` present), field count, vehicle-id syntax, strict numbers (no `nan`/`inf`/overflow/underflow to 0/`1_000`/non-ASCII digits/blanks; nothing coerced to 0), `time_step` rejected if beyond 2^53 and not exactly representable, per vehicle in file order: backwards `time_step`, duplicate `(vehicle_id, time_step)`, non-contiguous vehicle rows, positive gap histogram (powers of two, no unit assumed); per column: missing, non-numeric, non-finite, underflow, over-long, values beyond 2^53 not exactly representable, min, max, and *candidate* decreases within a vehicle's contiguous rows |
+| specifications | `*_specifications.csv` | as above for structure; duplicate `vehicle_id`; per column missing count and number of distinct values (capped; values are kept only as 16-byte digests) |
+| outcome | `train_tte.csv`, `validation_labels.csv`, `test_labels.csv` | **metadata only**: header line, byte length, SHA-256, physical line count after the header (blank lines included; not a parsed row count). The first line is accepted as a header only if it names every column the publisher describes (otherwise `unexpected_header`, and no names are reported, since a headerless file's first line is data). Values are never decoded (a test feeds invalid UTF-8 after the header to prove it) |
 
 Across files: vehicle-ID overlap between the train, validation and test operational
 files, and operational-versus-specification coverage per split, as counts. Label
@@ -98,9 +102,12 @@ compared.
 
 | Situation | Effect |
 |---|---|
-| A file fails structurally (encoding, CSV syntax, header, limits, compression, changed while read) | that file `check: fail` with `fatal: {code, line}`; it contributes no vehicle set; manifest still written; exit 3 |
-| A row is rejected (field count, vehicle id, `time_step`) | counted with the first 5 line numbers; the file fails; exit 3 |
+| A file fails structurally (encoding, CSV syntax, header, limits, compression, symlink, not a regular file, read error, changed while read) | that file `check: fail` with `fatal: {code, line}`; it contributes no vehicle set; manifest still written; exit 3 |
+| A row is rejected (field count, vehicle id, `time_step`) | counted with the first 5 line numbers; `blocking: rejected_rows`; exit 3 |
+| A duplicate or backwards `(vehicle_id, time_step)` key | counted; `blocking: time_step_order`; exit 3 |
+| A data file with no data rows | `blocking: no_data_rows`; exit 3 |
 | A feature cell is missing or invalid | counted per column; the row is kept; not blocking |
+| A publisher claim does not match (rows, vehicles, columns, bytes) | listed in `overall.publisher_claim_mismatches`; not blocking, because the claims are unverified |
 | Expected files absent, nothing blocking | `overall: incomplete`, exit 4 |
 | All nine expected files present and clean | `overall: pass`, exit 0 (a structural statement only) |
 | Bad arguments, missing input directory, manifest inside the input directory | exit 2, no manifest |
@@ -120,8 +127,9 @@ publisher claim, split checks, limits, the command (paths replaced by placeholde
 the PexisLink version, a SHA-256 of the package sources, the git HEAD read from
 files, and the Python version.
 
-It contains **no row values, no vehicle identifiers and no local paths**. Time and
-peak memory go to stderr only, so they do not break determinism.
+It contains **no row values, no vehicle identifiers, no local paths and no names of
+unrecognised local files** (only their count). Time and peak memory go to stderr
+only, so they do not break determinism.
 
 ## 5. Resources (synthetic data, this container: 4 CPUs, 16 GB RAM)
 
@@ -130,13 +138,15 @@ shape (107 columns). With 200,000 rows and 4,000 vehicles (124 MiB):
 
 | Python | Time | Peak RSS |
 |---|---|---|
-| 3.11.17 | 13.0 s | 19.5 MB |
-| 3.12.3 | 11.6 s | 21.7 MB |
-| 3.13.16 | 15.8 s | 21.7 MB |
+| 3.11.17 | 14.1 s | 19.1 MB |
+| 3.12.3 | 12.9 s | 21.7 MB |
+| 3.13.16 | 16.3 s | 21.6 MB |
 
-Memory is bounded by vehicles and columns, not rows (tested with `tracemalloc`).
+Memory is bounded by vehicles, columns and the configured limits, not by rows or
+file size (tested with `tracemalloc`, including a single record spanning 200,000
+lines and specification values of 60 kB each).
 Linear extrapolation to the described training file (1.12 M rows, about 1.14 GB):
-roughly 65-90 s and a peak RSS in the tens of MB, single core. This is an
+roughly 70-95 s and a peak RSS in the tens of MB, single core. This is an
 extrapolation from synthetic data, not a measurement on the real file.
 
 **Download feasibility.** About 1.54 GiB of disk and no meaningful RAM are needed.
@@ -162,8 +172,11 @@ hash it); run the preflight; only then, with authorisation, the operational file
 - Column names must match `[A-Za-z0-9_.-]{1,64}`; others fail the file. Vehicle IDs
   must match the same pattern.
 - Files are matched by exact name; a renamed file is reported as unrecognised.
-- Rejecting any row fails the file. That is deliberately strict; a real file with a
-  few malformed rows will need a documented decision, not a silent filter.
+- Rejecting any row, or any duplicate or backwards key, fails the file. That is
+  deliberately strict; a real file with a few malformed rows or unsorted vehicles
+  will need a documented decision, not a silent filter or sort.
+- `time_step` values beyond 2^53 that are not exactly representable as a float are
+  rejected, and numeric literals are limited to 64 characters.
 - The git HEAD does not reveal uncommitted changes; `package_sources_sha256` covers
   the code actually run.
 - Cross-split overlap needs every split's vehicle IDs in memory (bounded by
@@ -171,3 +184,32 @@ hash it); run the preflight; only then, with authorisation, the operational file
 - No checksum from the publisher was found to compare against.
 - Synthetic fixtures follow the *described* layout; they cannot reveal problems the
   description does not mention.
+
+## 8. Independent adversarial review
+
+A separate reviewer with no part in writing the code attacked the first
+implementation (`46aacf6`). Every finding below was reproduced, has a regression
+test in `ReviewRegressionTests` that fails on `46aacf6`, and is fixed.
+
+| ID | Severity | Finding | Fix |
+|---|---|---|---|
+| H1 | High | A headerless outcome file put a vehicle ID and a label value into the manifest as "column names", and the run passed | the header must name every described column, else `unexpected_header` with no names reported |
+| H2 | High | One CSV record spanning many short lines had no size bound (memory about 8× file size) | record length bounded by `--max-line-bytes` (`record_too_long`) |
+| M1 | Medium | Specification category sets kept raw values (memory up to file size) | 16-byte digests |
+| M2 | Medium | Duplicate or backwards keys did not block a `pass` | `blocking: time_step_order` |
+| L1 | Low | Outcome line count off by one for header-only files | corrected; documented as physical lines, blank lines included |
+| L2 | Low | Distinct `time_step` values beyond 2^53 became false duplicates | rejected as `time_step_precision_lost` |
+| L3 | Low | An infinite gap fell in a wrong histogram bucket | `overflow` bucket (now unreachable through input, kept defensive) |
+| L4 | Low | `1e-400` silently became 0; precision loss detected only for pure-digit literals | `underflow`; exact `Decimal` comparison for any notation |
+| L5 | Low | A field above the csv module's limit was reported as `csv_syntax` | `field_too_large` |
+| L6 | Low | Header-only data files passed; claim mismatches were not surfaced | `no_data_rows` blocks; mismatches listed in `overall` |
+| L7 | Low | Unread entries had no claims block; a symlink showed only `errno 40` | accurate note; `symlink_not_followed` |
+| L8 | Low | The no-process spy ran the preflight on no expected file; `os.system`-style calls were not checked | spy runs on the synthetic dataset; AST check for `os` process functions |
+| L9 | Low | Two limits were not configurable | `--max-dir-entries`, `--max-categories` |
+| L10 | Low | A read error aborted the whole run; Ctrl-C left a temporary file | per-file `read_error`; temporary file discarded |
+| L11 | Low | Names of unrecognised local files were written to the manifest | count only |
+
+The reviewer also confirmed: determinism across runs and Python versions, exit codes,
+FIFO and symlink handling, byte-range arithmetic for the rounded publisher sizes, limit
+boundaries (N allowed, N+1 fails), strict number parsing, and that the manifest cannot be
+written inside the input directory (also via `..` or a symlink).

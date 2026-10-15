@@ -75,9 +75,12 @@ class LayeringTests(unittest.TestCase):
             self.assertEqual(main(["detect", "--reference", str(examples / "baseline.csv"),
                                    "--observations", str(examples / "observations.csv")]), 0)
             import tempfile
+
+            from componentx_fixtures import write_dataset  # synthetic files: every reading path runs
             with tempfile.TemporaryDirectory() as tmp:
+                data = write_dataset(Path(tmp) / "data")
                 self.assertEqual(main(["dataset", "preflight", "--source", "component-x-v3", "--input-dir",
-                                       str(examples), "--out", str(Path(tmp) / "m.json")]), 4)
+                                       str(data), "--out", str(Path(tmp) / "m.json")]), 0)
 
     def test_no_network_or_subprocess_in_the_package(self):
         forbidden = {"socket", "urllib", "http", "subprocess", "requests", "ftplib", "smtplib", "ctypes"}
@@ -91,6 +94,15 @@ class LayeringTests(unittest.TestCase):
                 else:
                     continue
                 self.assertEqual(used & forbidden, set(), f"{path.name} imports {used & forbidden}")
+
+    def test_no_process_creation_through_os(self):
+        spawning = {"system", "popen", "fork", "forkpty", "posix_spawn", "posix_spawnp", "startfile",
+                    "spawnl", "spawnle", "spawnlp", "spawnlpe", "spawnv", "spawnve", "spawnvp", "spawnvpe",
+                    "execl", "execle", "execlp", "execlpe", "execv", "execve", "execvp", "execvpe"}
+        for path in PACKAGE.glob("*.py"):
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "os":
+                    self.assertNotIn(node.attr, spawning, f"{path.name} uses os.{node.attr}")
 
 
 if __name__ == "__main__":
