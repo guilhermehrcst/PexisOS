@@ -80,6 +80,29 @@ class TelemetryTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "missing CSV columns"):
                 read_samples(path)
 
+    def test_rejects_unterminated_quoted_csv_field(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "truncated.csv"
+            path.write_text(
+                "timestamp,vehicle_id,engine_rpm,speed_kmh,coolant_temp_c\n"
+                '2026-10-02T08:00:00Z,demo-001,2000,60,"90\n',
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "malformed CSV"):
+                read_samples(path)
+
+    def test_bucket_jitter_is_known_v01_limitation(self):
+        # Historical v0.1 comparator: bucket transitions reset sample streaks.
+        # v0.2 replaces this with a duration-based evidence rule.
+        baseline = [sample(1, i, 90, rpm=1999) for i in range(5)]
+        baseline += [sample(1, i + 5, 90, rpm=2000) for i in range(5)]
+        observations = [sample(2, 0, 104, rpm=1999),
+                        sample(2, 1, 104, rpm=2000)]
+        self.assertEqual(
+            [a.status for a in analyze(baseline, observations)],
+            ["suspected_anomaly", "suspected_anomaly"],
+        )
+
     def test_cli_prints_three_json_lines(self):
         output = io.StringIO()
         with redirect_stdout(output):

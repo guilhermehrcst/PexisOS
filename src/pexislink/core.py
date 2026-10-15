@@ -79,7 +79,7 @@ def read_samples(path: str | Path, *, max_bytes: int = DEFAULT_MAX_FILE_BYTES) -
     Input is bounded to ``max_bytes`` and every CSV structure error surfaces as
     ``ValueError`` (audit findings F-09, F-10, F-11).
     """
-    reader = csv.DictReader(io.StringIO(read_bounded_text(path, max_bytes), newline=""))
+    reader = csv.DictReader(io.StringIO(read_bounded_text(path, max_bytes), newline=""), strict=True)
     samples: list[Sample] = []
     try:
         fieldnames = reader.fieldnames or ()
