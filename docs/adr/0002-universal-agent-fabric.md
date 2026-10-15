@@ -1,4 +1,4 @@
-# ADR 0002 (Proposed): PexisLink Everywhere / Universal Agent Fabric
+# ADR 0002 (Proposed): Provider-neutral PexisLink Agent/Device Infrastructure
 
 - **Status:** PROPOSED, pending owner and engineering review
 - **Date:** 2026-10-15
@@ -7,7 +7,11 @@
 
 ## 1. Why this exists
 
-PexisLink started as **offline vehicle telemetry and anomaly research**. The proposed long-term ambition is larger: a **permissioned agent fabric** in which heterogeneous *physical and digital entities* can be represented by agents that observe authorized signals, keep bounded context and assist their owners. This includes vehicles, appliances, robots, factory equipment, satellites (future separately qualified research), computers, mobile applications, servers, business services and software workflows.
+PexisLink started as **offline vehicle telemetry and anomaly research**. The long-term goal is **not to build a consumer app or a competing AI assistant**. It is to become a **vendor-neutral, open-source infrastructure component** that developers and potentially AI labs such as OpenAI and Anthropic can adopt to connect their own models and agents to authorized physical and digital capabilities.
+
+Adoption by OpenAI, Anthropic or any other organization is **an aspiration, not an existing partnership, endorsement, integration contract, or commitment**. First earn that possibility with reliable code, security, interoperability, tests, open governance and upstream contributions.
+
+The proposed long-term ambition is a **permissioned agent fabric** in which heterogeneous *physical and digital entities* can be represented by agents that observe authorized signals, keep bounded context and assist their owners. This includes vehicles, appliances, robots, factory equipment, satellites (future separately qualified research), computers, mobile applications, servers, business services and software workflows.
 
 **"An agent for everything" is not "install an LLM on everything".** An entity can have a small deterministic agent, an optional local model, or an agent hosted on an owner-controlled gateway/remote system. Some entities cannot run code or expose telemetry at all; integrations exist only when documented interfaces and owner authorization are available.
 
@@ -40,31 +44,54 @@ The core abstractions should be independent from a specific transport, hardware 
 
 Placement is a deployment detail. **Entity identity and authorization cannot be inferred from where the agent runs.**
 
-### Mobile-first control plane: one phone, many agent locations
+### Developer-first infrastructure, not a PexisLink consumer product
 
-**Product requirement:** the end user should be able to observe, organize and, where explicitly permitted, manage their enrolled physical and digital entities from **one mobile interface**. Tentative experience name: **PexisLink Mobile**. This is the *control plane and user experience*, not the universal place where inference, collection, or all agents must run.
+**Primary users are application, device, infrastructure and agent-framework developers**. The deliverables are reusable libraries, a specification, permissively usable local adapters, a reference MCP server, integration examples and conformance tests. An app with a PexisLink logo is **not** the intended product. End-user control may be supplied by Claude, ChatGPT, an OEM's interface or the customer's own application.
 
-- **Phone:** single owner-scoped dashboard for devices/services grouped by place and type; time of last verified observation; agent status and permissions; explainable alerts; history; and an optional natural-language assistant for querying **authorized** observations. The app must distinguish unavailable, stale and insufficient evidence rather than invent live state.
-- **Agent runtime:** stays on a compatible host, owner-controlled gateway or authorized remote connector, with independent resource budgets. Basic permitted monitoring should continue when the phone is offline, closed or powered down; the phone is not a single point of failure.
-- **Connectivity:** same-LAN/local connections can function without cloud where the relevant local agents/gateway are reachable. Control from outside that LAN requires a **separate authorized connection** (e.g. an authenticated relay or user-provisioned VPN). A phone cannot reach arbitrary offline or non-networked equipment by magic.
-- **Authorization:** explicit enrollment/pairing, owner verification as feasible, per-entity principals and shared-household/team roles, least-privilege and revocation, short-lived scoped credentials, safe handling of reconnects. A mobile biometric gate may protect sensitive *UI actions* but is not a replacement for server/agent-side authorization.
-- **Action safety:** Stage 0 is **read-only**. Future low-risk operations (for example requesting a status refresh from an authorized API) require a separately reviewed capability policy. High-impact actions require confirmed intent and an independent policy check; an LLM cannot grant itself permissions. Vehicle actuators, safety interlocks and spacecraft control are out of scope.
-- **Privacy and usability:** minimize data leaving the owner's control; offer configurable retention/export/delete controls, explicit offline and synchronization state, accessible mobile-first interactions, and transparency on which device/connector produced each observation.
+The **Model Context Protocol (MCP)** already standardizes how AI applications access tools and context. OpenAI's Agents SDK/Responses API and Anthropic's Claude API support MCP servers; see:
 
-**Proposed navigation:** Overview, Enrolled Entities, Alerts/Activity, Assistant, Permissions/Settings. This is a product direction, **not a shipped app or implemented API**.
+- https://openai.github.io/openai-agents-python/mcp/
+- https://developers.openai.com/api/docs/guides/tools-connectors-mcp
+- https://platform.claude.com/docs/en/agents-and-tools/mcp-connector
+- https://modelcontextprotocol.io/
 
-#### Mobile-facing proof of concept (after the offline agent contracts)
+**Do not fork or replace MCP.** The missing specialization PexisLink would explore is an **edge/physical-world capability substrate** behind MCP: identity and provenance for physical/digital entities, typed observations, permissions, bounded local execution, interoperability adapters, reliable abstention/stale-data semantics and audit. MCP is the external model-facing interface; PexisLink's **internal API is model/provider-independent**. An optional later A2A adapter is justified only if real cross-agent delegation is required, not as MVP scaffolding.
 
-Create a lightweight **mobile-responsive, read-only** viewer for **the same three synthetic domain fixtures** (virtual appliance, CAN replay, software service) from the core PoC. It may start as an installable PWA if platform constraints allow; evaluate a native iOS/Android application only when required capabilities such as local pairing or background integration justify native APIs. Neither a PWA nor a native app may circumvent iOS/Android background execution, platform permissions or network constraints.
+\`\`\`text
+  Claude / OpenAI agents / other model and app clients
+                       |
+              standard MCP tool API
+                       |
+            PexisLink MCP adapter
+                       |
+          identity + scoped policy gate
+                       |
+       typed observations + local audit
+                       |
+  explicitly enrolled, read-only domain adapters
+    (synthetic sensors / recorded CAN / local service)
+\`\`\`
 
-Acceptance examples:
+**First minimal read-only MCP tool candidates** (names are provisional; freeze only after conformance review):
 
-1. One screen shows all three synthetic entities using the same versioned event contract, per-entity provenance and **last observed** time; no cross-entity data mixing.
-2. Offline browsing of previously authorized cached data clearly displays **stale/offline** status. It must not claim to show real-time data when disconnected.
-3. An unenrolled entity, expired token or revoked permission is denied even if a user asks the natural-language assistant to override policy.
-4. Closing the app does not stop an independently running local replay/agent, and reopening does not silently backfill missing observations as verified.
-5. The mobile frontend does **not** add device discovery, remote shell, background scanning, CAN transmission, MQTT publish or arbitrary command execution in the MVP.
+- \`pexislink.list_entities\`: list enrolled pseudonymous entities visible to the caller, with pagination and no network discovery.
+- \`pexislink.describe_entity\`: return declared sensor/capability schemas and last-observed timestamps, never manufacture real-time status.
+- \`pexislink.read_observations\`: read a bounded window of authenticated or synthetic observations for one authorized entity; surface provenance, freshness and quality.
+- \`pexislink.explain_assessment\`: retrieve a bounded, existing evidence-backed interpretation or abstention; do not add an unvalidated diagnosis.
+- \`pexislink.list_capabilities\`: report supported/authorized read-only capabilities; support is not permission, and there are no write/actuator capabilities in the MVP.
 
+**Provider compatibility:** test the same MCP server with independent open-source MCP clients and the relevant OpenAI/Anthropic SDK adapters. These tests can validate protocol compatibility **without paid inference or claiming corporate adoption**. Test a real API integration only when the owner supplies authorization/credentials and expressly approves external data flow; do not publish any secret. Anthropic's hosted connector currently requires a reachable remote HTTP server for direct Messages API use, so start with local protocol/SDK conformance and do not expose a private device gateway to the public internet as a shortcut.
+
+**Mobile is downstream.** Third parties may create mobile control applications backed by these contracts, including an authorized owner's single-phone view. An official PexisLink Mobile app, consumer dashboard, chat companion, SaaS account system and app-store launch are **removed from the core roadmap**. A minimal developer diagnostics UI is acceptable if indispensable for debugging.
+
+### Evidence required for meaningful ecosystem adoption
+
+1. A small, well-documented interface that solves a **specific problem MCP alone does not solve**, first with repeatable heterogeneous synthetic fixtures.
+2. Portable CPU-only installation, bounded memory and predictable latency; no surprise cloud/network access or heavy model dependency.
+3. Fail-closed capability enforcement and tests for revoked, expired, unknown or cross-entity access, including prompt-injection attempts to escalate permissions.
+4. Versioned schemas, reproducible examples, pinned integration test matrix for OpenAI/Anthropic MCP-compatible clients and clear transitive-license documentation.
+5. Public independent review, responsible vulnerability disclosure, independent maintainers/contributors and a credible migration/deprecation policy.
+6. Only then engage AI labs, SDK maintainers and standards communities with data and an upstream-ready contribution. There is no guaranteed adoption or funding.
 
 
 ## 3. Minimum event contract (proposed, not yet an implemented API)
@@ -127,6 +154,8 @@ Build a **local, offline, deterministic synthetic proof of concept** with **thre
 
 The PoC **does not** need three different machine-learning models. Start with one deterministic rule or descriptive summarizer per context. Model inference, cross-agent coordination, energy optimization and live hardware are separate research problems.
 
+The shared read-only observations must also be exposed through **one optional local MCP server**. Run independent transport/client conformance tests against that server (MCP protocol and, if feasible, OpenAI and Anthropic SDK integrations) without deploying to a real appliance or using paid models. Record incompatibilities honestly. The protocol-facing adapter must not be imported by the existing v0.1-v0.3 core on ordinary runs.
+
 ### Measurable gates
 
 1. **Offline / no effects:** all tests use local files; no sockets, CAN devices, subprocess, external commands or hardware writes.
@@ -163,6 +192,8 @@ Only build a separate `pexislink_agents` module/package after the event and poli
 - **Self-discovering / automatically installing agent swarm:** rejected for consent, security and operational safety reasons.
 - **Rewrite current detector now:** rejected because it would destroy scientific baselines and blur immature interfaces.
 - **Full IoT platform from day one:** rejected as overengineering; reuse permitted protocols and existing open implementations where justified.
+- **Consumer-first PexisLink Mobile application:** rejected because we are building reusable infrastructure for independent AI providers and developers, not an app brand or competing assistant.
+- **New universal agent communication protocol instead of MCP:** rejected because interoperability with existing MCP hosts is the objective; extend the domain semantics behind established protocols.
 
 ## 8. Open questions for the first review
 
@@ -171,5 +202,7 @@ Only build a separate `pexislink_agents` module/package after the event and poli
 3. Which *first* authorized real integration provides meaningful measurements without complex hardware or privileged APIs?
 4. How do we version typed observation schemas without leaking vendor-specific models into the universal core?
 5. What is the latency/memory ceiling for a gateway on low-end hardware, and when does a separate agent process become justified?
+6. What precisely does the PexisLink runtime add beyond a basic MCP server, and can an independent developer verify the distinction in minutes?
+7. Which OpenAI and Anthropic client/SDK combinations must form the versioned compatibility gate without requiring the companies' direct endorsement?
 
 **Decision gate:** Approve or revise this direction before authorizing code. Issue #8 is the sole architecture tracker for PexisLink Everywhere.
