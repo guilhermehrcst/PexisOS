@@ -130,6 +130,51 @@ class StuckSensorTests(unittest.TestCase):
         self.assertEqual((result[-1].status, result[-1].reasons), ("confirmed_anomaly", ("above_absolute_limit",)))
 
 
+class SensorIntegrityStateTests(unittest.TestCase):
+    """Sensor-integrity review. Invariant A: while a frozen-sensor suspicion is
+    unresolved, no reading may be reported normal, nor assessed by the relative
+    barrier. Invariant D: the absolute barrier still evaluates every plausible
+    reading, so a hot reading stays an (unconfirmed, qualified) alarm."""
+
+    FROZEN = alternating(DAY, 20) + [row(DAY + 600, 90)] + steady(DAY + 600 + 7200, 6, 90)  # suspected at the end
+
+    def test_single_plausible_outlier_is_not_normal(self):
+        # 93 C is 2.5 C from the 90.5 C reference median, inside the 4 C threshold:
+        # before the fix this reading came out "normal" while the state was still stuck.
+        result = run(REFERENCE, self.FROZEN + [row(DAY + 8010, 93), row(DAY + 8040, 90)])
+        self.assertEqual([(a.status, a.reasons) for a in result[-2:]],
+                         [("insufficient_evidence", ("coolant_stuck_suspected",))] * 2)
+
+    def test_relative_barrier_waits_for_explicit_recovery(self):
+        tail = [row(DAY + 8010, 94.5), row(DAY + 8040, 95), row(DAY + 8070, 92)]
+        result = run(REFERENCE, self.FROZEN + tail)[-3:]
+        self.assertEqual(result[0].reasons, ("coolant_stuck_suspected",))   # 1st deviation: still suspected
+        self.assertEqual(result[1].reasons, ("above_reference",))           # 2nd consecutive: recovered
+        self.assertEqual(result[2].status, "normal")
+
+    def test_absolute_barrier_stays_observable_during_suspicion(self):
+        result = run(REFERENCE, self.FROZEN + [row(DAY + 8010, 120), row(DAY + 8040, 90)])
+        hot = result[-2]
+        self.assertEqual((hot.status, hot.reasons), ("suspected_anomaly", ("above_absolute_limit",)))
+        self.assertIn("coolant_stuck_suspected", hot.quality)
+        self.assertIsNone(hot.reference_c)                                   # no relative evidence used
+        self.assertEqual(result[-1].reasons, ("coolant_stuck_suspected",))
+
+    def test_no_normal_while_any_vehicle_is_suspected_in_random_streams(self):
+        from test_quality import oracle_flags, random_stuck_rows
+        reference = alternating(0, 40) + alternating(0, 40, vehicle="a") + alternating(0, 40, vehicle="b",
+                                                                                       low=88, high=89)
+        for seed in range(200):
+            rows = random_stuck_rows(random.Random(seed), start_s=DAY)
+            result = run(reference, rows)
+            with self.subTest(seed=seed):
+                for assessment, suspected in zip(result, oracle_flags(rows, FOCUSED)):
+                    if suspected:
+                        self.assertNotEqual(assessment.status, "normal")
+                        self.assertNotIn("above_reference", assessment.reasons)
+                        self.assertNotIn("below_reference", assessment.reasons)
+
+
 class SensorValidityTests(unittest.TestCase):
     """F-04 counterpart: sentinels are sensor problems, not engine anomalies."""
 

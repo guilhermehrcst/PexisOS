@@ -8253,13 +8253,13 @@
           "anomaly_events": 0,
           "conditions": {
             "unreliable_sensor": {
-              "coverage": 0.2573,
+              "coverage": 0.2572,
               "false_alerts": 0,
               "false_alerts_per_1000h": 0.0,
               "rows": 30589
             }
           },
-          "coverage": 0.2573,
+          "coverage": 0.2572,
           "delays_by_kind": {},
           "detected": 0,
           "eligible_exposure_h": 205.78,
@@ -8308,13 +8308,13 @@
           "anomaly_events": 0,
           "conditions": {
             "unreliable_sensor": {
-              "coverage": 0.2573,
+              "coverage": 0.2572,
               "false_alerts": 0,
               "false_alerts_per_1000h": 0.0,
               "rows": 30589
             }
           },
-          "coverage": 0.2573,
+          "coverage": 0.2572,
           "delays_by_kind": {},
           "detected": 0,
           "eligible_exposure_h": 205.78,
@@ -8363,13 +8363,13 @@
           "anomaly_events": 0,
           "conditions": {
             "unreliable_sensor": {
-              "coverage": 0.2573,
+              "coverage": 0.2572,
               "false_alerts": 0,
               "false_alerts_per_1000h": 0.0,
               "rows": 30589
             }
           },
-          "coverage": 0.2573,
+          "coverage": 0.2572,
           "delays_by_kind": {},
           "detected": 0,
           "eligible_exposure_h": 205.78,
@@ -8418,13 +8418,13 @@
           "anomaly_events": 0,
           "conditions": {
             "unreliable_sensor": {
-              "coverage": 0.257,
+              "coverage": 0.2567,
               "false_alerts": 0,
               "false_alerts_per_1000h": 0.0,
               "rows": 30589
             }
           },
-          "coverage": 0.257,
+          "coverage": 0.2567,
           "delays_by_kind": {},
           "detected": 0,
           "eligible_exposure_h": 205.78,
@@ -8473,13 +8473,13 @@
           "anomaly_events": 0,
           "conditions": {
             "unreliable_sensor": {
-              "coverage": 0.3098,
+              "coverage": 0.3097,
               "false_alerts": 0,
               "false_alerts_per_1000h": 0.0,
               "rows": 30589
             }
           },
-          "coverage": 0.3098,
+          "coverage": 0.3097,
           "delays_by_kind": {},
           "detected": 0,
           "eligible_exposure_h": 205.78,
@@ -8583,13 +8583,13 @@
           "anomaly_events": 0,
           "conditions": {
             "unreliable_sensor": {
-              "coverage": 0.5804,
+              "coverage": 0.5802,
               "false_alerts": 188,
               "false_alerts_per_1000h": 913.592,
               "rows": 30589
             }
           },
-          "coverage": 0.5804,
+          "coverage": 0.5802,
           "delays_by_kind": {},
           "detected": 0,
           "eligible_exposure_h": 205.78,
@@ -8604,10 +8604,10 @@
             1107.0093
           ],
           "false_alerts_zero_count_upper_per_1000h": null,
-          "false_reassurance": 0.0117,
+          "false_reassurance": 0.0114,
           "false_reassurance_ci95": [
-            0.0101,
-            0.014
+            0.0095,
+            0.0139
           ],
           "median_drift_bias_at_detection_c": null,
           "misdirected_alerts": 0,

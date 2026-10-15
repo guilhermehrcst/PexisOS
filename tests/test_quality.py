@@ -1,5 +1,6 @@
 """Time and data-quality semantics."""
 
+import random
 import unittest
 
 from helpers import FOCUSED, alternating, records, row, steady
@@ -103,9 +104,13 @@ class StuckSensorTests(unittest.TestCase):
         rows = [row(0, 90)] + steady(7200, 6, 90) + [row(7380, 120), row(7410, 90), row(7440, 90),
                                                      row(7470, 70), row(7500, 72), row(7530, 90)]
         flags = self.flags(rows)
-        self.assertTrue(flags[6])                    # suspected
-        self.assertEqual(flags[7:10], [False, True, True])   # a lone outlier, then still suspected
-        self.assertEqual(flags[10:], [False, False, False])  # two deviations clear it
+        self.assertTrue(flags[6])                           # suspected
+        # The lone outlier is read while the suspicion is unresolved, so it stays
+        # suspected. (Until the sensor-integrity review it was emitted unflagged
+        # although the state was still "stuck": a reading the system did not trust
+        # could be reported normal.)
+        self.assertEqual(flags[7:10], [True, True, True])
+        self.assertEqual(flags[10:], [True, False, False])  # the 2nd consecutive deviation clears it
 
     def test_sentinel_spikes_do_not_reset_the_stuck_state(self):
         """Scientific review F5: a -40 sentinel used to reset the rule on a frozen sensor."""
@@ -128,6 +133,160 @@ class StuckSensorTests(unittest.TestCase):
 
     def test_realistic_noise_is_never_flagged(self):
         self.assertFalse(any(self.flags(alternating(0, 400), DetectorConfig(warmup_s=0))))
+
+
+ANCHOR = [row(0, 90)] + steady(7200, 6, 90)  # 90 C, a 2 h park, then 6 readings frozen at 90: suspected
+
+
+class StuckStateMachineTests(unittest.TestCase):
+    """Sensor-integrity review: the suspicion is a state machine, and every reading
+    emitted while the suspicion is unresolved must carry it.
+
+    States per vehicle: HEALTHY -> OBSERVING (after an engine-off gap of at least
+    stuck_gap_s; anchor = the last plausible reading before the gap) -> SUSPECTED
+    (stuck_min_samples readings within stuck_tolerance_c of the anchor) -> HEALTHY
+    (two consecutive plausible readings outside the tolerance). A deviation in
+    OBSERVING returns to HEALTHY at once. In SUSPECTED a reading within the
+    tolerance, or an accepted reading with no usable coolant value, restarts the
+    recovery count. Excluded records (duplicate, conflicting duplicate, out of
+    order, unplaceable) never change the state."""
+
+    def flags(self, rows, config=FOCUSED):
+        return ["coolant_stuck_suspected" in i.issues for i in annotate(rows, config)]
+
+    def test_full_transition_sequence(self):
+        rows = (alternating(0, 4)                                   # 1 healthy
+                + steady(7200, 5, 90)                               # 2-3 frozen after a park: suspected at the 5th
+                + [row(7350, 90), row(7380, 93), row(7410, 90),     # 4 still frozen, 5 one outlier, 6 back
+                   row(7440, 70), row(7470, 72),                    # 7 two consecutive deviations
+                   row(7500, 74)])                                  # 8 cleared
+        self.assertEqual(self.flags(rows), [False] * 4 + [False] * 4 + [True]
+                         + [True, True, True, True, False, False])
+
+    def test_repeated_isolated_outliers_never_clear(self):
+        outliers = [row(7380 + 60 * i, 80 + i) for i in range(5)]
+        frozen = [row(7410 + 60 * i, 90) for i in range(5)]
+        rows = ANCHOR + [r for pair in zip(outliers, frozen) for r in pair]
+        self.assertTrue(all(self.flags(rows)[6:]))
+
+    def test_unusable_readings_interrupt_recovery(self):
+        """Invariant F: a gap in usable data must not stitch two isolated outliers
+        into recovery evidence (outlier, sentinel or empty cell, outlier)."""
+        for interruption in (-40, 215, None, 400):
+            rows = ANCHOR + [row(7380, 80), row(7410, interruption), row(7440, 81), row(7470, 90)]
+            with self.subTest(interruption=interruption):
+                flags = self.flags(rows)
+                self.assertEqual((flags[7], flags[9], flags[10]), (True, True, True))  # outlier, outlier, frozen
+
+    def test_excluded_records_never_establish_or_clear(self):
+        stuck = ANCHOR + [row(7380, 70), row(7380, 70),             # a deviation and its duplicate
+                          row(7300, 60), row(7320, 61),             # out-of-order deviations
+                          row(7380, 75),                            # conflicting duplicate
+                          row(7410, 90)]                            # back at the frozen value
+        items = annotate(stuck)
+        self.assertEqual([i.integrity for i in items[8:12]],
+                         ["duplicate", "out_of_order", "out_of_order", "conflicting_duplicate"])
+        # excluded deviations did not complete the recovery evidence
+        self.assertTrue(items[-1].coolant_plausible and "coolant_stuck_suspected" in items[-1].issues)
+        # never established by excluded rows either: duplicates of the frozen value after a park
+        healthy = [row(0, 90), row(7200, 90)] + [row(7200, 90)] * 6 + [row(7230, 60)]
+        self.assertFalse(any(self.flags(healthy)))
+
+    def test_suspicion_survives_another_park_and_one_quantisation_step(self):
+        rows = ANCHOR + alternating(7380, 6) + steady(7380 + 180 + 7200, 4, 91)
+        self.assertTrue(all(self.flags(rows)[6:]))
+
+    def test_recovery_across_a_park_is_two_real_readings(self):
+        # a working sensor reads the cooled engine after a park: that is genuine evidence
+        rows = ANCHOR + [row(7380, 70), row(7380 + 7200, 40), row(7380 + 7230, 45)]
+        self.assertEqual(self.flags(rows)[6:], [True, True, False, False])
+
+    def test_operating_conditions_do_not_matter(self):
+        rows = ANCHOR + [row(7380 + 30 * i, 90, rpm=800 + 400 * i, speed=10 * i) for i in range(8)]
+        self.assertTrue(all(self.flags(rows)[6:]))
+
+    def test_vehicles_are_isolated(self):
+        frozen = ANCHOR + [row(7380, 93), row(7410, 90)]
+        other = [row(t, 60 + (t // 30) % 7, vehicle="v2") for t in range(0, 7440, 30)]
+        merged = sorted(frozen + other, key=lambda r: (r[0], r[1]))
+        by_vehicle = {}
+        for r, i in zip(merged, annotate(merged)):
+            by_vehicle.setdefault(r[1], []).append("coolant_stuck_suspected" in i.issues)
+        self.assertEqual(by_vehicle["v1"], self.flags(frozen))
+        self.assertEqual(by_vehicle["v2"], self.flags(other))
+
+
+def oracle_flags(rows, config):
+    """Independent, explicit statement of the state machine documented above."""
+    tol, need, gap_us = config.stuck_tolerance_c, config.stuck_min_samples, round(config.stuck_gap_s * 1e6)
+    lo, hi = config.coolant_range_c
+    state = {}
+    out = []
+    for record in records(rows):
+        vid, now, value = record.vehicle_id, record.epoch_us, record.coolant_temp_c
+        s = state.setdefault(vid, {"mode": "HEALTHY", "anchor": None, "k": 0, "d": 0,
+                                   "prev": None, "prev_us": None, "last_us": None})
+        if s["last_us"] is not None and now <= s["last_us"]:
+            out.append(False)                    # excluded record: no state change
+            continue
+        s["last_us"] = now
+        usable = value is not None and lo <= value <= hi and value not in config.coolant_sentinels_c
+        if not usable:
+            if s["mode"] == "SUSPECTED":
+                s["d"] = 0
+            out.append(False)
+            continue
+        if s["prev_us"] is not None and now - s["prev_us"] >= gap_us and s["mode"] != "SUSPECTED":
+            s["mode"], s["anchor"], s["k"], s["d"] = "OBSERVING", s["prev"], 0, 0
+        s["prev"], s["prev_us"] = value, now
+        within = s["anchor"] is not None and abs(value - s["anchor"]) <= tol
+        if s["mode"] == "OBSERVING":
+            if within:
+                s["k"] += 1
+                if s["k"] >= need:
+                    s["mode"], s["d"] = "SUSPECTED", 0
+            else:
+                s["mode"], s["anchor"] = "HEALTHY", None
+        elif s["mode"] == "SUSPECTED":
+            if within:
+                s["d"] = 0
+            else:
+                s["d"] += 1
+                if s["d"] >= 2:
+                    s["mode"], s["anchor"], s["d"] = "HEALTHY", None, 0
+        out.append(s["mode"] == "SUSPECTED")
+    return out
+
+
+def random_stuck_rows(rng, n=160, start_s=0):
+    rows, t = [], {"a": start_s, "b": start_s}
+    frozen = {"a": 90.0, "b": 88.0}
+    for _ in range(n):
+        vid = rng.choice("ab")
+        p = rng.random()
+        if p < 0.12:
+            t[vid] += rng.choice([3700, 7200])           # engine-off gap
+        elif p < 0.16 and rows and rows[-1][1] == vid:
+            rows.append(rows[-1])                        # exact duplicate
+            continue
+        elif p < 0.19:
+            rows.append(row(max(t[vid] - 45, start_s), 70, vehicle=vid))
+            continue                                     # late row
+        t[vid] += 30
+        q = rng.random()
+        value = (frozen[vid] if q < 0.6 else frozen[vid] + rng.choice([-1, 1]) if q < 0.7
+                 else rng.choice([None, -40, 215, 500]) if q < 0.78 else frozen[vid] + rng.uniform(-30, 30))
+        rows.append(row(t[vid], None if value is None else round(value, 1), vehicle=vid))
+    return rows
+
+
+class StuckModelBasedTests(unittest.TestCase):
+    def test_tracker_matches_the_specified_state_machine(self):
+        for seed in range(300):
+            rows = random_stuck_rows(random.Random(seed))
+            with self.subTest(seed=seed):
+                got = ["coolant_stuck_suspected" in i.issues for i in annotate(rows)]
+                self.assertEqual(got, oracle_flags(rows, FOCUSED))
 
 
 if __name__ == "__main__":

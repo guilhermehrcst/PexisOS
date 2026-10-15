@@ -21,7 +21,9 @@ Quality issue codes (added to row-level codes from ``ingest``)
     warmup_transient        within ``warmup_s`` of a segment start
     coolant_stuck_suspected after an engine-off gap of ``stuck_gap_s`` the
                             reading stayed within ``stuck_tolerance_c`` of its
-                            pre-gap value for ``stuck_min_samples`` samples
+                            pre-gap value for ``stuck_min_samples`` samples, and
+                            the suspicion has not been cleared since (see
+                            ``QualityTracker._stuck`` for the state machine)
 """
 
 from __future__ import annotations
@@ -134,6 +136,8 @@ class QualityTracker:
             stuck = self._stuck(state, coolant, now)
             if stuck:
                 issues.append("coolant_stuck_suspected")
+        elif state.stuck:
+            state.deviations = 0  # no usable reading: recovery evidence must be consecutive
 
         return Annotated(
             record, "accepted", tuple(issues), segment_start, elapsed_s, warmup,
@@ -145,19 +149,39 @@ class QualityTracker:
         )
 
     def _stuck(self, state: _VehicleState, value: float, now: int) -> bool:
-        """Physics-based stuck-sensor suspicion.
+        """Physics-based stuck-sensor suspicion; returns True if this reading is suspect.
 
         After an engine-off gap of at least ``stuck_gap_s`` a real coolant reading
         must have dropped (the engine cooled while parked) and must then rise
         during warm-up. Readings that stay within ``stuck_tolerance_c`` (1 LSB by
         default, so a sensor dithering between two codes is covered) of the
         pre-gap value for ``stuck_min_samples`` samples are suspected stuck.
-        Once suspected, a single outlier does not clear the suspicion (glitches
-        on a frozen sensor); two consecutive deviating readings do.
-        The cost of a false suspicion is abstention, never a false alarm, and
-        the absolute barrier still evaluates suspected readings.
-        A sensor that freezes during a long uninterrupted drive is only
-        suspected after the next engine-off gap (documented limitation).
+
+        State machine, per vehicle, over accepted readings only (excluded
+        records never reach it):
+            HEALTHY    no anchor. A plausible reading after a gap >= stuck_gap_s
+                       moves to OBSERVING with anchor = the last plausible
+                       reading before the gap.
+            OBSERVING  within tolerance: count it; at stuck_min_samples move to
+                       SUSPECTED (this reading is the first suspect one).
+                       Outside tolerance: back to HEALTHY.
+            SUSPECTED  every reading is suspect until recovery. Within
+                       tolerance, or an accepted record without a usable coolant
+                       value (missing, implausible, sentinel), restarts the
+                       recovery count. Recovery needs two consecutive plausible
+                       readings outside tolerance: the first is still suspect,
+                       the second clears the state and is the first trusted one.
+                       A gap does not interrupt recovery: a working sensor reads
+                       the cooled engine after a park.
+        Invariant: the return value is True whenever the state is SUSPECTED after
+        this reading, so a reading the tracker does not trust is never handed to
+        the relative barrier (an unresolved suspicion cannot produce "normal").
+        The cost of a suspicion is abstention, never a false alarm, and the
+        absolute barrier still evaluates suspected readings.
+        Readings in OBSERVING are not yet suspect; with the default warm-up they
+        fall inside the warm-up window (documented limitation). A sensor that
+        freezes during a long uninterrupted drive is only suspected after the
+        next engine-off gap (documented limitation).
         """
         cfg = self.config
         gap = None if state.last_coolant_us is None else now - state.last_coolant_us
@@ -173,6 +197,7 @@ class QualityTracker:
                 state.stuck = True
             return state.stuck
         state.deviations += 1
-        if not state.stuck or state.deviations >= 2:
-            state.anchor, state.anchored, state.stuck, state.deviations = None, 0, False, 0
+        if state.stuck and state.deviations < 2:
+            return True  # one deviation is not recovery evidence: the suspicion stands
+        state.anchor, state.anchored, state.stuck, state.deviations = None, 0, False, 0
         return False
