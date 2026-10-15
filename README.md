@@ -40,6 +40,14 @@ and writes a SHA-256 provenance manifest. It trains nothing and reads no outcome
 values. No real file has been inspected by this project yet; see
 [docs/COMPONENT-X-PREFLIGHT.md](docs/COMPONENT-X-PREFLIGHT.md).
 
+## Offline CAN replay lab (v0.4 Lab A)
+
+`pexislink lab can-replay --dbc FILE --frames FILE --out records.jsonl --summary summary.json`
+decodes recorded classic-CAN frames through a local DBC, file to file. It never opens a CAN
+interface or transmits. The decoder (cantools) is optional:
+`pip install --require-hashes -r requirements/lab-can.txt`. See
+[docs/CAN-REPLAY-LAB-A.md](docs/CAN-REPLAY-LAB-A.md).
+
 ## What an assessment means
 
 | Status | Meaning |

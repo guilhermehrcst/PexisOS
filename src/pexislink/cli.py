@@ -4,6 +4,7 @@
     pexislink synth --scenario NAME --seed N --out DIR
     pexislink benchmark [--profile quick|dev|full] --out DIR
     pexislink dataset preflight --source component-x-v3 --input-dir DIR --out MANIFEST.json
+    pexislink lab can-replay --dbc FILE --frames FILE --out RECORDS.jsonl --summary SUMMARY.json
 
 The v0.1 invocation ``pexislink --baseline B --observations O`` still runs the
 frozen v0.1 rule with its original output, plus a deprecation notice on stderr.
@@ -17,6 +18,9 @@ prepared before the first line is written); 1 output could not be written
 file present and structurally clean; 3 at least one blocking issue; 4 no
 blocking issue but expected files missing; 2 invalid usage or unusable input
 directory (no manifest written); 1 the manifest could not be written.
+
+``lab can-replay`` is offline and file-to-file (no CAN interface, no
+transmission); its exit codes are documented in ``pexislink/lab_cli.py``.
 """
 
 from __future__ import annotations
@@ -38,7 +42,7 @@ from .detect import STATUSES, assess_records
 from .ingest import DEFAULT_MAX_FILE_BYTES, DEFAULT_MAX_VEHICLES, InputError, Limits, Record, TelemetryFile
 from .reference import build_reference
 
-COMMANDS = ("detect", "synth", "benchmark", "dataset")
+COMMANDS = ("detect", "synth", "benchmark", "dataset", "lab")
 NOTICE = ("Research output. An anomaly is a deviation from this vehicle's own reference; "
           "it is not a diagnosed fault, a failure prediction or a safety assessment.")
 MAX_FILE_MB = 4096
@@ -71,6 +75,9 @@ def _dispatch(args: list[str]) -> int:
         return _detect(args[1:])
     if args[0] == "dataset":
         return _dataset(args[1:])
+    if args[0] == "lab":
+        from .lab_cli import main as lab_main
+        return lab_main(args[1:])
     if args[0] == "synth":
         from .synth import cli_synth
         return cli_synth(args[1:])
