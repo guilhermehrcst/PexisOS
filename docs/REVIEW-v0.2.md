@@ -62,6 +62,20 @@ What held up in both reviews:
 | F16 | low | Recall 1.0 was guaranteed by the parameter ranges. | Measured. Subtle-overheat scenario (3-7 C). |
 | F17 | low | `suspected_anomaly` is never scored; runners could reach ground truth. | Runners fixed. Unscored `suspected` documented. |
 
+## Automated review on the pull request: 6 findings
+
+An automated reviewer (Codex) commented on the opened PR. Every finding was
+reproduced by a failing test before it was fixed.
+
+| Severity | Finding | Disposition | Evidence |
+|---|---|---|---|
+| P1 | A failed write to buffered stdout still exited 120 (same defect as CI's first failure). | Fixed in `f1497ed`: output errors are handled at the process boundary for every command. | `test_output_device_full_exits_1_without_traceback`, `test_every_command_exits_1_when_stdout_cannot_be_written` |
+| P2 | 10000 rpm and 300 km/h (the inclusive range maxima) fell into singleton context bins. | Fixed in `dd6340b`: they join the top bins, like 100 % load. | `test_inclusive_rpm_and_speed_maxima_share_the_top_bins` |
+| P2 | The leakage boundary counted usable rows from contexts later discarded for having too few samples. | Fixed in `dd6340b`: the boundary comes only from contexts kept in the model, as documented. | `test_samples_of_discarded_contexts_do_not_move_the_boundary`, `test_vehicle_with_only_discarded_contexts_has_no_boundary` |
+| P2 | A directory as `--summary` failed only after all assessments were written. | Fixed in `dd6340b`: an existing destination must be a regular file. This also stops `/dev/null` from being replaced when run as root. | `test_summary_destination_is_checked_before_any_output` |
+| P2 | A bad benchmark `--out` failed only after the whole run, with a traceback. | Fixed in `dd6340b` and `f1497ed`: the folder is created before the run (exit 2), and write failures exit 1. | `test_unusable_output_folder_fails_before_running` |
+| P2 | The benchmark could not be imported on Windows (`resource`, `os.uname`). | Fixed in `dd6340b`: portable provenance (peak RSS `null` where unavailable). Simulated in a test; not run on Windows. | `test_provenance_does_not_need_unix_only_modules` |
+
 ## Process notes
 
 - Detector changes made after run 1 are listed in ADR 0001 §7. No detector
