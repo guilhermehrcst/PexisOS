@@ -48,7 +48,7 @@ asserts the corrected behaviour.
 |---|---|---|
 | S-1 | Per-vehicle state isolation under interleaving | P21; `test_S1_*`; v0.2 metamorphic `test_vehicle_isolation` |
 | S-2 | Mixed UTC offsets are ordered by instant | P15; `test_S2_*`; v0.2 `test_timezone_re_expression_is_invariant` |
-| S-3 | Overlapping reference/observation periods are rejected | P22; `test_S3_*`; v0.2 keeps it fatal, checked twice (pre-pass and per record) |
+| S-3 | Overlapping reference/observation periods are rejected | P22; `test_S3_*`; v0.2 quarantines each overlapping observation (`reference_overlap`) instead of aborting the fleet (review M3) |
 | S-4 | Unknown vehicle / context is `insufficient_baseline`, not `normal` | PR #1 tests; v0.2 `test_unseen_vehicle_alarm_but_never_normal` |
 | S-5 | Calendar-edge offsets (`0001-01-01T00:00+14:00`) do not crash | P23 |
 

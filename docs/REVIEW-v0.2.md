@@ -5,7 +5,8 @@ code, attacked the changes in parallel. Both were read-only on the repository.
 One did code and security review, the other scientific validity. Every finding
 was first verified, and each fix was reproduced before it was made. This page
 records each finding and its disposition. ADR 0001 §7 records the resulting
-design changes, and [BENCHMARK.md](BENCHMARK.md) reports held-out run 2.
+design changes. [BENCHMARK.md](BENCHMARK.md) reports run 2 and a
+pre-declared confirmation on unused seeds.
 
 What held up in both reviews:
 
@@ -64,7 +65,8 @@ What held up in both reviews:
 ## Process notes
 
 - Detector changes made after run 1 are listed in ADR 0001 §7. No detector
-  parameter value was tuned. The test seeds were reused for run 2; that
-  weakness is disclosed rather than hidden.
+  parameter value was tuned. The test seeds were reused for run 2. That
+  weakness is disclosed, and a confirmatory run on unused seeds 301-310, with
+  its predictions committed before it ran, checks it (ADR 0001 §8).
 - A mutation check was re-run after the fixes: 18 deliberately injected bugs,
   including one for each safety fix above, were all caught by the suite.

@@ -30,7 +30,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Check Python syntax
-        run: python -m compileall -q src tests
+        run: python -m compileall -q src tests scripts
       - name: Run unit, property, metamorphic and integration tests (standard library only)
         env:
           PYTHONPATH: src

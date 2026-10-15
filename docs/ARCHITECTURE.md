@@ -24,7 +24,7 @@ synth ──► rows ─────────────────► any 
 |---|---|---|
 | `ingest` | Bounded read, closed CSV schema, strict row syntax, row-level issue codes | interpret physics or time |
 | `quality` | Per-vehicle replay in arrival order: integrity states, segments, warm-up, plausibility, OBD sentinels, stuck sensor | reorder or drop records silently |
-| `reference` | Frozen per-vehicle, per-context median and robust scale from clean, warm samples; chronology guard | learn from observations |
+| `reference` | Frozen per-vehicle, per-context median and robust scale from clean, warm samples; records each vehicle's last contributing sample (the leakage boundary) | learn from observations |
 | `detect` | Four statuses, two barriers, duration-based confirmation | assert `normal` without a reference |
 | `config` | Single validated source of every parameter (closed JSON schema) | accept unknown keys |
 | `synth`, `evaluate`, `baselines`, `benchmark` | Offline research harness | be imported by detection code (enforced by `tests/test_architecture.py`) |

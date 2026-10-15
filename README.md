@@ -25,7 +25,7 @@ pexislink synth --scenario abrupt_anomaly --seed 1 --out demo
 pexislink detect --reference demo/reference.csv --observations demo/observations.csv \
     --summary demo/summary.json > demo/assessments.jsonl
 
-# 3. Reproduce the benchmark (quick: ~1 min; full held-out split: ~7 min on one core)
+# 3. Reproduce the benchmark (quick: ~1 min; full test split: ~7.5 min on one core)
 pexislink benchmark --profile quick --out reports/benchmark-quick
 
 # Tests: standard library only
@@ -96,8 +96,11 @@ Unknown or duplicate columns are rejected.
   reproduced by a test in `tests/test_v01_audit.py`.
 - [ADR 0001](docs/adr/0001-v0.2-offline-detector-architecture.md): architecture,
   rejected alternatives, pre-registered parameters and hypotheses.
-- [Benchmark](docs/BENCHMARK.md): method, held-out results, scientific
+- [Benchmark](docs/BENCHMARK.md): method, results on the test seeds and a
+  pre-declared confirmation on unused seeds, error analysis, scientific
   validity, limitations, resource use. Raw results: `reports/`.
+- [Independent review of v0.2](docs/REVIEW-v0.2.md): 33 findings and their
+  dispositions.
 - [Architecture and safety boundaries](docs/ARCHITECTURE.md).
 
 ## Open source
