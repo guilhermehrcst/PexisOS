@@ -84,8 +84,8 @@ class TelemetryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "truncated.csv"
             path.write_text(
-                "timestamp,vehicle_id,engine_rpm,speed_kmh,coolant_temp_c\\n"
-                '2026-10-02T08:00:00Z,demo-001,2000,60,"90\\n',
+                "timestamp,vehicle_id,engine_rpm,speed_kmh,coolant_temp_c\n"
+                '2026-10-02T08:00:00Z,demo-001,2000,60,"90\n',
                 encoding="utf-8",
             )
             with self.assertRaisesRegex(ValueError, "malformed CSV"):
