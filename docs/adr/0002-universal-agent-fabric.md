@@ -40,6 +40,33 @@ The core abstractions should be independent from a specific transport, hardware 
 
 Placement is a deployment detail. **Entity identity and authorization cannot be inferred from where the agent runs.**
 
+### Mobile-first control plane: one phone, many agent locations
+
+**Product requirement:** the end user should be able to observe, organize and, where explicitly permitted, manage their enrolled physical and digital entities from **one mobile interface**. Tentative experience name: **PexisLink Mobile**. This is the *control plane and user experience*, not the universal place where inference, collection, or all agents must run.
+
+- **Phone:** single owner-scoped dashboard for devices/services grouped by place and type; time of last verified observation; agent status and permissions; explainable alerts; history; and an optional natural-language assistant for querying **authorized** observations. The app must distinguish unavailable, stale and insufficient evidence rather than invent live state.
+- **Agent runtime:** stays on a compatible host, owner-controlled gateway or authorized remote connector, with independent resource budgets. Basic permitted monitoring should continue when the phone is offline, closed or powered down; the phone is not a single point of failure.
+- **Connectivity:** same-LAN/local connections can function without cloud where the relevant local agents/gateway are reachable. Control from outside that LAN requires a **separate authorized connection** (e.g. an authenticated relay or user-provisioned VPN). A phone cannot reach arbitrary offline or non-networked equipment by magic.
+- **Authorization:** explicit enrollment/pairing, owner verification as feasible, per-entity principals and shared-household/team roles, least-privilege and revocation, short-lived scoped credentials, safe handling of reconnects. A mobile biometric gate may protect sensitive *UI actions* but is not a replacement for server/agent-side authorization.
+- **Action safety:** Stage 0 is **read-only**. Future low-risk operations (for example requesting a status refresh from an authorized API) require a separately reviewed capability policy. High-impact actions require confirmed intent and an independent policy check; an LLM cannot grant itself permissions. Vehicle actuators, safety interlocks and spacecraft control are out of scope.
+- **Privacy and usability:** minimize data leaving the owner's control; offer configurable retention/export/delete controls, explicit offline and synchronization state, accessible mobile-first interactions, and transparency on which device/connector produced each observation.
+
+**Proposed navigation:** Overview, Enrolled Entities, Alerts/Activity, Assistant, Permissions/Settings. This is a product direction, **not a shipped app or implemented API**.
+
+#### Mobile-facing proof of concept (after the offline agent contracts)
+
+Create a lightweight **mobile-responsive, read-only** viewer for **the same three synthetic domain fixtures** (virtual appliance, CAN replay, software service) from the core PoC. It may start as an installable PWA if platform constraints allow; evaluate a native iOS/Android application only when required capabilities such as local pairing or background integration justify native APIs. Neither a PWA nor a native app may circumvent iOS/Android background execution, platform permissions or network constraints.
+
+Acceptance examples:
+
+1. One screen shows all three synthetic entities using the same versioned event contract, per-entity provenance and **last observed** time; no cross-entity data mixing.
+2. Offline browsing of previously authorized cached data clearly displays **stale/offline** status. It must not claim to show real-time data when disconnected.
+3. An unenrolled entity, expired token or revoked permission is denied even if a user asks the natural-language assistant to override policy.
+4. Closing the app does not stop an independently running local replay/agent, and reopening does not silently backfill missing observations as verified.
+5. The mobile frontend does **not** add device discovery, remote shell, background scanning, CAN transmission, MQTT publish or arbitrary command execution in the MVP.
+
+
+
 ## 3. Minimum event contract (proposed, not yet an implemented API)
 
 Prefer versioned JSON-compatible schemas for the first prototype; retain domain-specific typed payloads rather than forcing all observations into one generic float.
