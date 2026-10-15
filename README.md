@@ -31,6 +31,8 @@ timestamp, vehicle_id, engine_rpm, speed_kmh, coolant_temp_c
 
 ## Design
 
+**Known v0.1 limitation:** sample-based persistence resets at operating-bucket boundaries and cannot distinguish a transient from sustained abnormal behaviour. The historical v0.1 rule is deliberately preserved as a benchmark comparator while the research-grade replacement in [PR #3](https://github.com/guilhermehrcst/Pexislink/pull/3) uses time-based evidence states. Neither version establishes that a vehicle is safe or predicts component failure.
+
 See [architecture and safety boundaries](docs/ARCHITECTURE.md). The initial milestone prioritizes trustworthy ingestion, clear semantics, and deterministic tests over complex models.
 
 **Next milestones (not yet implemented):** quality flags for missing and unreliable sensors; offline benchmarking with labeled real-world datasets; calibrated model comparison; supported read-only vehicle adapters; and eventually specialized aerospace research, always subject to independent validation.

@@ -68,18 +68,21 @@ class Sample:
 def read_samples(path: str | Path) -> list[Sample]:
     """Load strict, timestamped telemetry records from UTF-8 CSV."""
     with Path(path).open(newline="", encoding="utf-8-sig") as source:
-        reader = csv.DictReader(source)
-        missing = set(REQUIRED_COLUMNS) - set(reader.fieldnames or ())
-        if missing:
-            raise ValueError(f"missing CSV columns: {', '.join(sorted(missing))}")
-        samples: list[Sample] = []
-        for line_number, row in enumerate(reader, start=2):
-            if None in row:
-                raise ValueError(f"line {line_number}: unexpected extra CSV fields")
-            try:
-                samples.append(Sample.from_mapping(row))
-            except ValueError as exc:
-                raise ValueError(f"line {line_number}: {exc}") from exc
+        reader = csv.DictReader(source, strict=True)
+        try:
+            missing = set(REQUIRED_COLUMNS) - set(reader.fieldnames or ())
+            if missing:
+                raise ValueError(f"missing CSV columns: {', '.join(sorted(missing))}")
+            samples: list[Sample] = []
+            for line_number, row in enumerate(reader, start=2):
+                if None in row:
+                    raise ValueError(f"line {line_number}: unexpected extra CSV fields")
+                try:
+                    samples.append(Sample.from_mapping(row))
+                except ValueError as exc:
+                    raise ValueError(f"line {line_number}: {exc}") from exc
+        except csv.Error as exc:
+            raise ValueError(f"line {reader.line_num}: malformed CSV: {exc}") from exc
     return samples
 
 
