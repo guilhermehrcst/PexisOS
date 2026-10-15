@@ -538,6 +538,18 @@ class CodexReviewTests(PreflightCase):
             report = run_preflight(self.data, PreflightLimits(), ["t"])["files"][TRAIN_OPS]
         self.assertEqual(report["fatal"]["code"], "file_changed_during_read")
 
+    def test_path_replaced_during_read_is_detected(self):
+        write_dataset(self.data)
+
+        def replace(path):
+            fresh = path.with_name("fresh.tmp")
+            fresh.write_bytes(path.read_bytes())  # identical bytes, different file
+            os.replace(fresh, path)
+
+        with self.mutate_during_read(replace):
+            report = run_preflight(self.data, PreflightLimits(), ["t"])["files"][TRAIN_OPS]
+        self.assertEqual(report["fatal"]["code"], "file_changed_during_read")
+
     def test_file_growing_past_the_size_cap_is_bounded(self):
         write_dataset(self.data)
         size = len(clean_files()[TRAIN_OPS])
@@ -548,6 +560,24 @@ class CodexReviewTests(PreflightCase):
 
         with self.mutate_during_read(grow):
             report = run_preflight(self.data, PreflightLimits(max_file_bytes=size + 1000), ["t"])["files"][TRAIN_OPS]
+        self.assertEqual(report["fatal"]["code"], "file_changed_during_read")
+        self.assertEqual(report["sha256"]["status"], "not_checked")
+
+    def test_outcome_file_growing_during_drain_is_bounded(self):
+        """Outcome files are hashed by drain() after the header: the cap must hold there too."""
+        write_dataset(self.data)
+        name = "test_labels.csv"
+        size = len(clean_files()[name])
+        original = componentx._check_outcome
+
+        def wrapper(source, expected, *rest):
+            if expected.column_names == ("class_label",) and expected.split == "test":
+                with open(self.data / name, "ab") as handle:  # grows after the size check
+                    handle.write(b"920003,0\n" * 2000)
+            original(source, expected, *rest)
+
+        with mock.patch.object(componentx, "_check_outcome", wrapper):
+            report = run_preflight(self.data, PreflightLimits(max_file_bytes=size + 100), ["t"])["files"][name]
         self.assertEqual(report["fatal"]["code"], "file_changed_during_read")
         self.assertEqual(report["sha256"]["status"], "not_checked")
 

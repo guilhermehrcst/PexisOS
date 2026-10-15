@@ -180,8 +180,12 @@ hash it); run the preflight; only then, with authorisation, the operational file
   rejected, and numeric literals are limited to 64 characters.
 - The git HEAD (also resolved through a linked worktree's `gitdir` file) does not
   reveal uncommitted changes; `package_sources_sha256` covers the code actually run.
-- Change detection compares size, mtime and ctime before and after the read; a
-  writer that restores all three is not detected.
+- Change detection (fail closed, `file_changed_during_read`): size, mtime and ctime
+  of the open file before and after the read, the path still naming the same file
+  (device and inode) after the read, and the byte cap while streaming. Remaining
+  TOCTOU gaps: a writer that restores size, mtime and ctime, or a change on a file
+  system with coarse timestamps within one tick, is not detected; a swap between
+  `lstat` and `open` is caught by the same-file check.
 - Cross-split overlap needs every split's vehicle IDs in memory (bounded by
   `--max-vehicles`; about 34,000 described in total).
 - No checksum from the publisher was found to compare against.
@@ -224,7 +228,7 @@ fails on `c0a9724` (`CodexReviewTests`).
 
 | Finding | Fix |
 |---|---|
-| A same-size rewrite during the read was not detected | size, mtime and ctime compared before and after |
+| A same-size rewrite during the read was not detected | size, mtime and ctime compared before and after; the path must still name the file read (added after the owner's review gate) |
 | A file growing after `fstat` was read without bound | byte cap enforced while streaming; reported as `file_changed_during_read` |
 | An unwritable manifest parent exited 2 instead of the documented 1 | exit 1 (a non-regular destination stays a usage error, exit 2) |
 | Without `O_NOFOLLOW` (Windows) a symlink would be followed | `lstat` check and same-file check before reading; `O_NOFOLLOW` kept as a second barrier, tested separately |

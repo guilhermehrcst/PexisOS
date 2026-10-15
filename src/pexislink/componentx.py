@@ -592,7 +592,7 @@ def check_file(path: Path, name: str, limits: PreflightLimits, vehicles_out: set
         code = "symlink_not_followed" if exc.errno == errno.ELOOP else "unreadable"
         report.update(status="not_checked", fatal={"code": code, "line": None, "errno": exc.errno})
     else:
-        _read_file(descriptor, info, expected, limits, report, vehicles_out)
+        _read_file(path, descriptor, info, expected, limits, report, vehicles_out)
     if report["fatal"]:
         report["blocking"].insert(0, report["fatal"]["code"])
         vehicles_out.clear()  # a failed file contributes no vehicle set to split checks
@@ -602,7 +602,7 @@ def check_file(path: Path, name: str, limits: PreflightLimits, vehicles_out: set
     return report
 
 
-def _read_file(descriptor: int, info: os.stat_result, expected: ExpectedFile, limits: PreflightLimits,
+def _read_file(path: Path, descriptor: int, info: os.stat_result, expected: ExpectedFile, limits: PreflightLimits,
                report: dict[str, Any], vehicles_out: set[str]) -> None:
     with os.fdopen(descriptor, "rb") as handle:
         report["bytes"] = info.st_size
@@ -638,6 +638,10 @@ def _read_file(descriptor: int, info: os.stat_result, expected: ExpectedFile, li
             after = os.fstat(handle.fileno())
             changed = source.bytes != info.st_size or any(  # same-size rewrites change mtime/ctime
                 getattr(after, key) != getattr(info, key) for key in ("st_size", "st_mtime_ns", "st_ctime_ns"))
+            try:  # the path must still name the file that was read (not renamed over or deleted)
+                changed = changed or not os.path.samestat(os.lstat(path), info)
+            except FileNotFoundError:
+                changed = True
         except OSError as exc:  # e.g. EIO mid-read: this file fails, the run continues
             report["fatal"] = {"code": "read_error", "line": None, "errno": exc.errno}
             report["sha256"] = {"status": "not_checked", "reason": "read error"}
