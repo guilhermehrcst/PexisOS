@@ -19,6 +19,7 @@ the quick results on Python 3.11 and compares them byte for byte). Numbers in
 | Run 1 | test 201-210 | commit `1319178` | **Withdrawn.** The independent review found its evaluation invalid (a saturating placebo, hypotheses that a silent detector passes, labels recoverable from vehicle ids) and found detector defects; see [REVIEW-v0.2.md](REVIEW-v0.2.md) and ADR 0001 §7. Its numbers are not comparable with the runs below and remain only in git history. |
 | Run 2 | test 201-210, **reused** | commit `b39c3a2`, package fingerprint `bbb0bc5f…` | §2. Not a clean held-out estimate, because these seeds had been seen once before the §7 changes. |
 | Confirmation | 301-310, never generated before | same code, unchanged | §3. Protocol, predicted verdicts and decision rule were committed and pushed before the run (ADR 0001 §8, commit `e1b8b70`). |
+| Sensor-integrity re-run | the same test and confirmation seeds, **all already observed** | commit `afa4bcd`, fingerprint `4a1d31fc…` | §3a. A before/after comparison for a correctness fix (ADR 0001 §9), not a held-out result. |
 
 ## 1. Protocol
 
@@ -328,6 +329,41 @@ trip. The one missed abrupt event (an overheat of 12.8 C) was confirmed after
 the horizon. No overheat in the unseen-vehicle scenario produced two
 consecutive readings ≥ 115 C within 24 h of onset.
 
+## 3a. Sensor-integrity correction: before and after
+
+ADR 0001 §9 and REVIEW-v0.2.md (sensor-integrity section) describe a reproduced
+defect: an unresolved frozen-sensor suspicion could let a reading the tracker
+did not trust be reported `normal`. After the correction, both full profiles
+were re-run on their original seeds, which are **already observed and not
+holdouts**. The historical reports are unchanged; the new ones are in
+[`reports/sensor-integrity-rerun/`](../reports/sensor-integrity-rerun/).
+
+| Profile | Changed metric values (all detectors) | v0.2 defaults | Verdicts |
+|---|---|---|---|
+| Test seeds 201-210 | 12 | `unreliable_sensor` coverage 0.2821 → 0.2820; nothing else | all 9 unchanged |
+| Confirmation seeds 301-310 | 6 | nothing | all 9 unchanged |
+| Quick (development seeds) | 17 | `unreliable_sensor` coverage 0.2573 → 0.2572 | all unchanged |
+
+The largest changes are in the `no-warmup` ablation, where the fixed paths
+matter most. On test seeds, false reassurance falls from 0.0152 to 0.0134 in
+`unreliable_sensor` and from 0.0155 to 0.0138 with the 1-LSB flicker; on
+confirmation seeds, from 0.0129 to 0.0112 and from 0.0139 to 0.0122. No false
+alert, detection or delay of the default detector changed.
+
+**The benchmark barely exercises this failure mode.** Its frozen sensors
+rarely produce a plausible outlier near the reference while suspected, and
+when they do it is usually in warm-up or in a context without a reference.
+So the benchmark could not have revealed the defect, and the correction's value
+rests on the unit, state-machine and model-based tests, not on these numbers.
+
+*Error analysis* (`scripts/error_analysis.py`, section 8; test seeds, default detector): the remaining
+false reassurance, 713 of 64,077 frozen-sensor rows in `unreliable_sensor` and
+688 of 62,132 in `stress_stuck_flicker` (0.0111 each), falls **entirely before
+the first engine-off gap of at least 1 h after the freeze**; none falls after
+it. On confirmation seeds the counts are 477 of 56,303 and 572 of 61,372, again
+all before the first park. All of it comes from the documented limitation that a sensor freezing
+during a drive is suspected only after the next park.
+
 ## 4. Scientific validity
 
 **What was detected.** In synthetic data whose physics we wrote, v0.2 detects
@@ -387,19 +423,20 @@ PYTHONPATH=src python scripts/error_analysis.py [confirm]                       
 ~~~
 
 - `results.json` is deterministic. The quick profile's file has SHA-256
-  `b4f2388e…` on CPython 3.11.17, 3.12.3 and 3.13.16; CI regenerates it on 3.11
-  and fails on any difference. The full test profile gives the same file
-  (`b0f84b79…`) on 3.11.17 and 3.13.16.
+  `33818dfd…` at the current head, identical on CPython 3.11.17, 3.12.3 and
+  3.13.16; CI regenerates it on 3.11 and fails on any difference. (Before the
+  sensor-integrity correction it was `b4f2388e…`.) The run-2 full test profile
+  gave the same file (`b0f84b79…`) on 3.11.17 and 3.13.16.
 - Determinism was verified on one platform only (Linux x86-64, glibc 2.39), not
   across operating systems or libm implementations.
 - `provenance.json` records versions, the package fingerprint, timings and peak
-  memory. All three reports were produced by fingerprint `bbb0bc5f…`. Later
-  package changes came from review of the pull request (`f1497ed`, `dd6340b`:
-  output-error handling, context bins at the range maxima, the leakage boundary
-  computed from retained contexts, portable provenance). They change no result:
-  at fingerprint `725f6ef7…`, the full test profile and the confirmation
-  reproduced their committed `results.json` byte for byte, and CI checks the
-  quick profile on every push.
+  memory. Run 2 and the confirmation were produced by fingerprint `bbb0bc5f…`.
+  The review fixes `f1497ed` and `dd6340b` changed no result: at fingerprint
+  `725f6ef7…` both profiles reproduced their `results.json` byte for byte. The
+  sensor-integrity correction (`2f27e84`, `afa4bcd`, fingerprint `4a1d31fc…`)
+  does change results slightly (§3a). The error analysis in §2.4 was produced
+  at `bbb0bc5f…` and was not re-run after the correction; v0.2 false alerts,
+  detections and delays, which it explains, did not change.
 
 ## 7. Resources
 
@@ -409,6 +446,7 @@ All runs are CPU-only, on one host.
 |---|---|---|
 | Run 2: 10 seeds × 16 scenarios × 10 detectors (3.5 M evaluation and 1.7 M reference rows per detector) | 1 CPU (`taskset -c 0`), 1 GiB address space (`prlimit --as`) | 452 s wall, 447 s CPU, peak RSS 79.2 MB |
 | Confirmation (same protocol, seeds 301-310) | same | 460 s wall, 453 s CPU, peak RSS 73.7 MB |
+| Sensor-integrity re-run: test / confirmation profiles | same | 443 s / 446 s wall, peak RSS 78.9 / 78.0 MB |
 | Quick benchmark (the CI gate) | none | 61 s wall, peak RSS 55.4 MB |
 | `pexislink detect` on 833,854 rows (37 MB of CSV, 200 vehicles), measured in-process with `getrusage` | same | 28 s, peak RSS **58 MB**. The original reader peaked at 171 MB because `io.StringIO` keeps a UCS-4 copy; replacing it gave 77 MB (commit `7d372d7`), and per-line decoding of a byte snapshot gave 58 MB. |
 
@@ -465,7 +503,13 @@ Every run in this table except the quick benchmark used
 - **Late conflicting duplicates** are not detected; conflict detection depends
   on arrival order (review L8).
 - **A sensor that freezes mid-drive** is suspected only after the next
-  engine-off gap.
+  engine-off gap. This is now the only measured source of false reassurance
+  under the default detector (§3a).
+- **A frozen-sensor suspicion depends on engine-off gaps.** A logger dropout of
+  at least `stuck_gap_s` during a drive is treated like a park, so a healthy
+  sensor reading the same warm value afterwards is withheld (provisional
+  suspicion) until it moves by more than 1 C. The failure direction is
+  abstention.
 - **A single far-future timestamp glitch** in the observations makes all later
   rows of that vehicle `out_of_order`. This fails safe and is visible in the
   summary, but it removes coverage.

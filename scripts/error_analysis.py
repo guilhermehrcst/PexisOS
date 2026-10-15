@@ -224,6 +224,25 @@ def paired_comparisons(seeds: Sequence[int]) -> None:
               f"only v0.2 {only_v02}  only {name} {only_other}  p={sign_test(only_v02, only_other):.4f}")
 
 
+def residual_false_reassurance(seeds: Sequence[int]) -> None:
+    print("8. Frozen-sensor rows reported normal, before and after the first engine-off gap >= stuck_gap_s")
+    gap_us = round(BASE.stuck_gap_s * US)
+    for scenario in ("unreliable_sensor", "stress_stuck_flicker"):
+        before = after = total = 0
+        for seed in seeds:
+            data = generate(scenario, seed)
+            rows = by_vehicle(data, [(a.status, a.direction) for a in assess(data)])
+            for event in (e for e in data.truth.events if e.category == "sensor_fault"):
+                parked, previous = False, None
+                for t, _, status, _ in (r for r in rows[event.vehicle_id] if r[0] >= event.onset_us):
+                    parked = parked or (previous is not None and t - previous >= gap_us)
+                    previous, total = t, total + 1
+                    if status == "normal":
+                        after += parked
+                        before += not parked
+        print(f"   {scenario:22s} frozen-sensor rows {total}  normal before the first park {before}  after it {after}")
+
+
 def main(argv: list[str]) -> int:
     seed_sets = {"test": TEST_SEEDS, "confirm": CONFIRMATION_SEEDS}
     if len(argv) > 1 or (argv and argv[0] not in seed_sets):
@@ -238,6 +257,7 @@ def main(argv: list[str]) -> int:
     reference_thresholds(seeds)
     unseen_vehicle_overheats(seeds)
     paired_comparisons(seeds)
+    residual_false_reassurance(seeds)
     return 0
 
 
