@@ -393,7 +393,11 @@ PYTHONPATH=src python scripts/error_analysis.py [confirm]                       
 - Determinism was verified on one platform only (Linux x86-64, glibc 2.39), not
   across operating systems or libm implementations.
 - `provenance.json` records versions, the package fingerprint, timings and peak
-  memory. All three reports were produced by fingerprint `bbb0bc5f…`.
+  memory. All three reports were produced by fingerprint `bbb0bc5f…`. The only
+  later package change is output-error handling in `cli.py`, which computes no
+  results: regenerating at the current head gives a different fingerprint in
+  `provenance.json` but the same `results.json` (CI checks this for the quick
+  profile on every push).
 
 ## 7. Resources
 

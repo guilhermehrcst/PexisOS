@@ -10,7 +10,7 @@ frozen v0.1 rule with its original output, plus a deprecation notice on stderr.
 Exit codes: 0 success; 2 invalid input or usage (``detect`` then emits no
 assessments: the input is fully validated and the summary destination is
 prepared before the first line is written); 1 output could not be written
-(for example, the pipe was closed early).
+(for example, the pipe was closed early or the device is full).
 """
 
 from __future__ import annotations
@@ -38,27 +38,47 @@ MAX_FILE_MB = 4096
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = list(sys.argv[1:] if argv is None else argv)
+    try:
+        code = _dispatch(list(sys.argv[1:] if argv is None else argv))
+        sys.stdout.flush()  # report buffered-output errors here, not at interpreter exit
+    except BrokenPipeError:
+        _discard_stdout()
+        return 1
+    except OSError as exc:
+        print(f"error: cannot write output: {exc}", file=sys.stderr)
+        _discard_stdout()
+        return 1
+    return code
+
+
+def _dispatch(args: list[str]) -> int:
     if not args or args[0] in ("-h", "--help"):
         print(__doc__.strip())
         return 0 if args else 2
     if args[0] == "--version":
         print(__version__)
         return 0
+    if args[0] not in COMMANDS:
+        return _legacy_v01(args)
+    if args[0] == "detect":
+        return _detect(args[1:])
+    if args[0] == "synth":
+        from .synth import cli_synth
+        return cli_synth(args[1:])
+    from .benchmark import cli_benchmark
+    return cli_benchmark(args[1:])
+
+
+def _discard_stdout() -> None:
+    """After a failed write, point stdout at the null device. Otherwise the
+    interpreter flushes the leftover buffer again at exit, fails again, and
+    exits with status 120 instead of the documented 1."""
     try:
-        if args[0] not in COMMANDS:
-            return _legacy_v01(args)
-        if args[0] == "detect":
-            return _detect(args[1:])
-        if args[0] == "synth":
-            from .synth import cli_synth
-            return cli_synth(args[1:])
-        from .benchmark import cli_benchmark
-        return cli_benchmark(args[1:])
-    except BrokenPipeError:
         devnull = os.open(os.devnull, os.O_WRONLY)
         os.dup2(devnull, sys.stdout.fileno())
-        return 1
+        os.close(devnull)
+    except (OSError, ValueError):  # stdout is not an OS file: nothing left to flush there
+        pass
 
 
 def _file_mb(text: str) -> int:
@@ -121,6 +141,7 @@ def _detect(argv: list[str]) -> int:
         if summary_file:
             summary_file.discard()
         print(f"error: cannot write assessments: {exc}", file=sys.stderr)
+        _discard_stdout()
         return 1
 
     overlaps = reason_counts.get("reference_overlap", 0)

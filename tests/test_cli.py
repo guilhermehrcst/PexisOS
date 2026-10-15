@@ -181,14 +181,41 @@ class SubprocessTests(unittest.TestCase):
 
     @unittest.skipUnless(os.path.exists("/dev/full"), "requires /dev/full")
     def test_output_device_full_exits_1_without_traceback(self):
-        env = dict(os.environ, PYTHONPATH=str(ROOT / "src"))
-        with open("/dev/full", "w") as full:
-            proc = subprocess.run([sys.executable, "-m", "pexislink", "detect",
-                                   "--reference", str(ROOT / "examples/baseline.csv"),
-                                   "--observations", str(ROOT / "examples/observations.csv")],
-                                  stdout=full, stderr=subprocess.PIPE, text=True, env=env, timeout=60)
-        self.assertEqual(proc.returncode, 1, proc.stderr)
-        self.assertNotIn("Traceback", proc.stderr)
+        # Both buffering modes: with buffered stdout (the default, and CI's) the
+        # interpreter flushed the leftover buffer again at exit and exited 120.
+        for unbuffered in (None, "1"):
+            env = {k: v for k, v in os.environ.items() if k != "PYTHONUNBUFFERED"}
+            env["PYTHONPATH"] = str(ROOT / "src")
+            if unbuffered:
+                env["PYTHONUNBUFFERED"] = unbuffered
+            with self.subTest(PYTHONUNBUFFERED=unbuffered), open("/dev/full", "w") as full:
+                proc = subprocess.run([sys.executable, "-m", "pexislink", "detect",
+                                       "--reference", str(ROOT / "examples/baseline.csv"),
+                                       "--observations", str(ROOT / "examples/observations.csv")],
+                                      stdout=full, stderr=subprocess.PIPE, text=True, env=env, timeout=60)
+                self.assertEqual(proc.returncode, 1, proc.stderr)
+                self.assertNotIn("Traceback", proc.stderr)
+                self.assertNotIn("Exception ignored", proc.stderr)
+
+    @unittest.skipUnless(os.path.exists("/dev/full"), "requires /dev/full")
+    def test_every_command_exits_1_when_stdout_cannot_be_written(self):
+        env = {k: v for k, v in os.environ.items() if k != "PYTHONUNBUFFERED"}
+        env["PYTHONPATH"] = str(ROOT / "src")
+        with tempfile.TemporaryDirectory() as tmp:
+            commands = {
+                "version": ["--version"],
+                "legacy": ["--baseline", str(ROOT / "examples/baseline.csv"),
+                           "--observations", str(ROOT / "examples/observations.csv")],
+                "synth": ["synth", "--scenario", "normal_operation", "--seed", "1", "--out", tmp],
+            }
+            for name, argv in commands.items():
+                with self.subTest(command=name), open("/dev/full", "w") as full:
+                    proc = subprocess.run([sys.executable, "-m", "pexislink", *argv], stdout=full,
+                                          stderr=subprocess.PIPE, text=True, env=env, timeout=120)
+                    self.assertEqual(proc.returncode, 1, proc.stderr)
+                    self.assertIn("cannot write output", proc.stderr)
+                    self.assertNotIn("Traceback", proc.stderr)
+                    self.assertNotIn("Exception ignored", proc.stderr)
 
 
 if __name__ == "__main__":
