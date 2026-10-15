@@ -312,6 +312,23 @@ class GateFailureTests(LabCase):
         self.assert_no_output()
 
 
+class BoundedInputTests(unittest.TestCase):
+    def test_the_byte_cap_holds_while_streaming(self):
+        """A file that grows after the size check is cut off at the cap, not read to its end."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "f.csv"
+            path.write_bytes(b"x" * 10)
+            with canreplay.open_input(path, 16, "frame") as source:
+                with open(path, "ab") as grow:
+                    grow.write(b"y" * 1000)
+                with self.assertRaises(ReplayError) as caught:
+                    source.read()
+                self.assertEqual(caught.exception.code, "input_changed")
+                self.assertLessEqual(source.bytes_read, 16 + 1010)
+                with self.assertRaises(ReplayError):
+                    source.finish()
+
+
 class OutputSafetyTests(LabCase):
     def test_outputs_may_not_alias_inputs_or_each_other(self):
         write_inputs(self.inputs)
@@ -351,6 +368,25 @@ class OutputSafetyTests(LabCase):
         self.assertEqual(self.run_lab()[0], 5)
         self.assertEqual((self.out.read_text(), self.summary.read_text()), ("previous records\n", "previous summary\n"))
         self.assertEqual(sorted(p.name for p in self.outdir.iterdir()), ["records.jsonl", "summary.json"])
+
+    def test_a_stale_summary_never_pairs_with_new_records(self):
+        """If the run stops between the two renames, no old summary remains next to the new records."""
+        write_inputs(self.inputs)
+        self.out.write_text("old records\n")
+        self.summary.write_text("old summary\n")
+        real_commit = lab_cli._Pending.commit
+
+        def commit(pending):
+            if pending.target == self.summary:
+                raise OSError(28, "No space left on device")
+            real_commit(pending)
+
+        with mock.patch.object(lab_cli._Pending, "commit", commit):
+            code, stderr = self.run_lab()
+        self.assertEqual(code, 1, stderr)
+        self.assertFalse(self.summary.exists())  # the interrupted state the docs describe
+        self.assertNotEqual(self.out.read_text(), "old records\n")
+        self.assertEqual(sorted(p.name for p in self.outdir.iterdir()), ["records.jsonl"])
 
     def test_interrupt_leaves_no_temporary_files(self):
         write_inputs(self.inputs)

@@ -100,6 +100,19 @@ class RealCantoolsTests(unittest.TestCase):
             self.assertNotIn("SYNTH", stderr)  # parser text is not echoed
             self.assertFalse(self.out.exists())
 
+    def test_duplicate_id_and_format_is_rejected_although_cantools_accepts_it(self):
+        """cantools 44.1.0 strict mode accepts two 11-bit messages with id 0x123 and only logs a
+        warning naming them; the lab must reject the DBC and must not echo the names."""
+        import cantools
+        duplicate = SYNTHETIC_DBC.replace("BO_ 1792 SYNTH_EMPTY: 0 SYNTH", "BO_ 291 SYNTH_DUP: 0 SYNTH")
+        names = [m.name for m in cantools.database.load_string(duplicate, database_format="dbc", strict=True).messages]
+        self.assertIn("SYNTH_DUP", names)  # accepted by cantools itself
+        self.dbc.write_text(duplicate, encoding="utf-8")
+        code, stderr = self.run_real()
+        self.assertEqual(code, 4, stderr)
+        self.assertNotIn("SYNTH", stderr)
+        self.assertFalse(self.out.exists())
+
     def test_fresh_process_imports_cantools_under_the_guard(self):
         """In a new interpreter the cantools import itself runs inside no_device_access()."""
         env = {**os.environ, "PYTHONPATH": str(SRC)}

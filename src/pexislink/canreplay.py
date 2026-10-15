@@ -29,6 +29,7 @@ Frame CSV contract (Lab A), exactly this header and no quoting:
 from __future__ import annotations
 
 import hashlib
+import logging
 import math
 import os
 import re
@@ -316,7 +317,8 @@ def load_cantools_decoder(dbc_text: str, limits: ReplayLimits) -> Decoder:
         raise ReplayError("decoder_unavailable",
                           "the optional decoder is not installed: pip install 'pexislink[can]'") from None
     try:
-        database = cantools.database.load_string(dbc_text, database_format="dbc", strict=True)
+        with _quiet("cantools"):  # its warnings name DBC messages (e.g. "Overwriting message ...")
+            database = cantools.database.load_string(dbc_text, database_format="dbc", strict=True)
     except Exception:  # parser exceptions are many; their text may echo DBC content
         raise ReplayError("invalid_dbc", "the DBC could not be parsed (strict mode)") from None
     if not hasattr(database, "messages") or not hasattr(database, "nodes"):
@@ -338,6 +340,24 @@ def load_cantools_decoder(dbc_text: str, limits: ReplayLimits) -> Decoder:
                                     tuple(SignalSpec(str(s.name), str(s.unit) if s.unit else None)
                                           for s in native.signals))
     return _CantoolsDecoder(cantools, database, messages)
+
+
+@contextmanager
+def _quiet(name: str) -> Iterator[None]:
+    """Drop records of ``name`` and its child loggers (no output to stderr) during the block."""
+    def drop(record: logging.LogRecord) -> bool:
+        return not (record.name == name or record.name.startswith(name + "."))
+
+    handlers = [logging.lastResort, *logging.getLogger().handlers]
+    for handler in handlers:
+        if handler is not None:
+            handler.addFilter(drop)
+    try:
+        yield
+    finally:
+        for handler in handlers:
+            if handler is not None:
+                handler.removeFilter(drop)
 
 
 # --------------------------------------------------------------- assessment
