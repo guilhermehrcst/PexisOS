@@ -66,7 +66,9 @@ class PersistenceTests(unittest.TestCase):
     """F-03 and F-05 counterparts: confirmation is a continuous duration."""
 
     def test_run_does_not_bridge_gaps(self):
-        result = run(REFERENCE, [row(DAY, 103), row(29 * DAY, 103)])
+        # 106, not 103 again: an identical reading after 28 days is a frozen-sensor
+        # signature and is (correctly) withheld, which would hide what is tested here
+        result = run(REFERENCE, [row(DAY, 103), row(29 * DAY, 106)])
         self.assertEqual(statuses(result), ["suspected_anomaly", "suspected_anomaly"])
 
     def test_confirmation_requires_duration(self):
@@ -159,6 +161,36 @@ class SensorIntegrityStateTests(unittest.TestCase):
         self.assertIn("coolant_stuck_suspected", hot.quality)
         self.assertIsNone(hot.reference_c)                                   # no relative evidence used
         self.assertEqual(result[-1].reasons, ("coolant_stuck_suspected",))
+
+    def test_post_park_readings_at_the_frozen_value_are_never_normal(self):
+        """Adversarial review M1: readings after an engine-off gap that stay at the
+        pre-gap value are an unresolved integrity question from the first one on.
+        Before the fix they were trusted until stuck_min_samples was reached, which
+        the warm-up window hid only at fast sampling and only if no unusable
+        readings preceded them."""
+        cfg = DetectorConfig()
+        reference = alternating(0, 160)                       # 80 min, warm contexts well populated
+        drive = alternating(DAY, 60)                          # warm drive ends at DAY + 1770 s
+        park = DAY + 1770 + 7200
+        cases = {
+            "300 s sampling": [row(park + 300 * i, 90) for i in range(6)],
+            "sentinels first": [row(park + 30 * i, -40) for i in range(31)] + steady(park + 930, 6, 90),
+            "coolant dropout": ([row(DAY + 1800 + 30 * i, None) for i in range(130)]   # >= 3600 s, no new segment
+                                + steady(DAY + 1800 + 3900, 6, 90)),
+        }
+        for name, tail in cases.items():
+            with self.subTest(name):
+                result = run(reference, drive + tail, cfg)[len(drive):]
+                self.assertNotIn("normal", statuses(result))
+
+    def test_suspicion_carries_from_the_reference_file_into_the_observations(self):
+        """Adversarial review M2: each file used a fresh tracker, so a sensor frozen
+        at the end of the reference period was trusted again in the observations."""
+        for cfg in (FOCUSED, DetectorConfig()):
+            reference = alternating(0, 120) + steady(3570 + 7200, 60, 90)   # frozen after a park
+            observed = steady(3570 + 7200 + 1800, 60, 90)                    # still frozen, same stream
+            with self.subTest(warmup_s=cfg.warmup_s):
+                self.assertNotIn("normal", statuses(run(reference, observed, cfg)))
 
     def test_no_normal_while_any_vehicle_is_suspected_in_random_streams(self):
         from test_quality import oracle_flags, random_stuck_rows

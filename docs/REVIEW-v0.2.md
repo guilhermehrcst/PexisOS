@@ -76,6 +76,30 @@ reproduced by a failing test before it was fixed.
 | P2 | A bad benchmark `--out` failed only after the whole run, with a traceback. | Fixed in `dd6340b` and `f1497ed`: the folder is created before the run (exit 2), and write failures exit 1. | `test_unusable_output_folder_fails_before_running` |
 | P2 | The benchmark could not be imported on Windows (`resource`, `os.uname`). | Fixed in `dd6340b`: portable provenance (peak RSS `null` where unavailable). Simulated in a test; not run on Windows. | `test_provenance_does_not_need_unix_only_modules` |
 
+## Sensor-integrity review: 1 defect and 5 follow-up findings
+
+A later review suspected that a frozen-sensor suspicion could leak a trusted
+reading. It was reproduced before anything changed. An independent adversarial
+review of the correction then found further gaps. Every item below was
+reproduced by a failing test before its fix. The state machine is documented in
+`QualityTracker._stuck`.
+
+| ID | Severity | Finding | Disposition | Evidence |
+|---|---|---|---|---|
+| SI-1 | high | While a suspicion was established, one deviating reading returned "not stuck" although the state stayed stuck. A 93 C reading against a 90.5 C reference came out `normal`, and a 94.5 C reading produced relative-barrier evidence, from a sensor the tracker did not trust. The existing test asserted this behaviour. | Fixed. Until recovery, every plausible reading is suspect; the second consecutive deviation clears the suspicion and is the first trusted reading. | `test_single_plausible_outlier_is_not_normal`, `test_relative_barrier_waits_for_explicit_recovery`, `StuckStateMachineTests` |
+| SI-2 | medium | Two isolated outliers separated by a missing, implausible or sentinel reading counted as consecutive recovery evidence. | Fixed. An accepted record without a usable coolant value restarts the recovery count. | `test_unusable_readings_interrupt_recovery` |
+| M1 | medium | Post-park readings at the pre-park value were trusted until `stuck_min_samples` was reached. With the defaults this produced `normal` at sampling intervals of 300-900 s, or after leading sentinels or a coolant dropout of at least 1 h, and a docstring claimed warm-up covered it. | Fixed. Such readings are suspect from the first one (provisional); one deviation clears a provisional suspicion. A logger's cached start-up value costs one abstention. | `test_post_park_readings_at_the_frozen_value_are_never_normal` |
+| M2 | medium | A suspicion established in the reference file was lost in the observations, because each file had a fresh tracker. | Fixed. Established suspicions are carried into the detector. Nothing else crosses the boundary, because the time between files is not known to be an engine-off period. | `test_suspicion_carries_from_the_reference_file_into_the_observations` |
+| L1 | low | A deviation contradicted by a conflicting duplicate still counted as recovery evidence. | Fixed. A conflicting duplicate restarts the recovery count. | `test_conflicting_duplicate_interrupts_recovery` |
+| L2 | low | Recovery accepts deviations in opposite directions and any time between them. | **Documented, not changed.** Both are consistent with a working sensor (for example, readings of a cooled engine after a park). Invariant B, that one outlier never clears an established suspicion, holds. | `QualityTracker._stuck` docstring |
+
+A model-based test compares the tracker with an explicit statement of the state
+machine on 300 random two-vehicle streams that include gaps, duplicates,
+conflicting duplicates, late rows and unusable readings. A detector-level test
+checks on 200 random streams that no suspect reading is reported `normal` or
+used as relative evidence. Mutation check: 23 deliberate bugs, including one for
+each item above, were all caught.
+
 ## Process notes
 
 - Detector changes made after run 1 are listed in ADR 0001 §7. No detector

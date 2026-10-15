@@ -19,17 +19,20 @@ Quality issue codes (added to row-level codes from ``ingest``)
     coolant_temp_c_sentinel exactly an encoding-extreme value that loggers emit
                             on sensor faults (OBD-II PID 0x05: -40 C and 215 C)
     warmup_transient        within ``warmup_s`` of a segment start
-    coolant_stuck_suspected after an engine-off gap of ``stuck_gap_s`` the
-                            reading stayed within ``stuck_tolerance_c`` of its
-                            pre-gap value for ``stuck_min_samples`` samples, and
-                            the suspicion has not been cleared since (see
-                            ``QualityTracker._stuck`` for the state machine)
+    coolant_stuck_suspected the sensor-integrity state machine does not trust
+                            this reading: after an engine-off gap of
+                            ``stuck_gap_s`` it stayed within ``stuck_tolerance_c``
+                            of the pre-gap value (provisional), or a suspicion
+                            established after ``stuck_min_samples`` such readings
+                            has not been cleared (see ``QualityTracker._stuck``).
+                            Readings without a usable coolant value never carry
+                            it; they are already unusable for another reason.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, Mapping
 
 from .config import DetectorConfig
 from .ingest import DEFAULT_MAX_VEHICLES, InputError, Record
@@ -51,6 +54,18 @@ class Annotated:
     coolant_ok: bool = False         # coolant_plausible and not suspected stuck
     context_ok: bool = False         # rpm and speed parsed and plausible
     load_ok: bool = False            # load parsed and plausible (False if column absent)
+
+
+@dataclass(frozen=True, slots=True)
+class CoolantState:
+    """An established frozen-sensor suspicion, carried from the reference file
+    into the observations so that it does not end at the file boundary. Only
+    SUSPECTED is carried: the time between two files is not known to be an
+    engine-off period, so it must not start a new observation."""
+
+    anchor: float
+    anchored: int
+    deviations: int
 
 
 class _VehicleState:
@@ -81,10 +96,12 @@ def _within(value: float | None, bounds: tuple[float, float]) -> bool:
 class QualityTracker:
     """Annotates one file's records. Use a fresh tracker per file."""
 
-    def __init__(self, config: DetectorConfig, *, max_vehicles: int = DEFAULT_MAX_VEHICLES) -> None:
+    def __init__(self, config: DetectorConfig, *, max_vehicles: int = DEFAULT_MAX_VEHICLES,
+                 coolant_states: Mapping[str, CoolantState] | None = None) -> None:
         self.config = config
         self.max_vehicles = max_vehicles
         self._vehicles: dict[str, _VehicleState] = {}
+        self._carried = coolant_states or {}
         self._segment_gap_us = round(config.segment_gap_s * _US)
         self._stuck_gap_us = round(config.stuck_gap_s * _US)
 
@@ -96,6 +113,10 @@ class QualityTracker:
             if len(self._vehicles) >= self.max_vehicles:
                 raise InputError(f"line {record.line}: more than {self.max_vehicles} vehicles")
             state = self._vehicles[record.vehicle_id] = _VehicleState()
+            carried = self._carried.get(record.vehicle_id)
+            if carried is not None:
+                state.anchor, state.anchored, state.deviations = carried.anchor, carried.anchored, carried.deviations
+                state.stuck = True
 
         now = record.epoch_us
         content = _content(record)
@@ -105,6 +126,8 @@ class QualityTracker:
             if now == state.last_us:
                 integrity: Integrity = ("duplicate" if content == state.last_content
                                         else "conflicting_duplicate")
+                if integrity == "conflicting_duplicate" and state.stuck:
+                    state.deviations = 0  # a contradicted deviation is not recovery evidence
                 return Annotated(record, integrity, record.issues)
 
         cfg = self.config
@@ -148,6 +171,11 @@ class QualityTracker:
             load_ok=_within(record.engine_load_pct, cfg.load_range_pct),
         )
 
+    def coolant_states(self) -> dict[str, CoolantState]:
+        """Established suspicions after the last record, per vehicle."""
+        return {vehicle: CoolantState(state.anchor, state.anchored, state.deviations)
+                for vehicle, state in self._vehicles.items() if state.stuck and state.anchor is not None}
+
     def _stuck(self, state: _VehicleState, value: float, now: int) -> bool:
         """Physics-based stuck-sensor suspicion; returns True if this reading is suspect.
 
@@ -157,31 +185,35 @@ class QualityTracker:
         default, so a sensor dithering between two codes is covered) of the
         pre-gap value for ``stuck_min_samples`` samples are suspected stuck.
 
-        State machine, per vehicle, over accepted readings only (excluded
-        records never reach it):
-            HEALTHY    no anchor. A plausible reading after a gap >= stuck_gap_s
-                       moves to OBSERVING with anchor = the last plausible
-                       reading before the gap.
-            OBSERVING  within tolerance: count it; at stuck_min_samples move to
-                       SUSPECTED (this reading is the first suspect one).
-                       Outside tolerance: back to HEALTHY.
-            SUSPECTED  every reading is suspect until recovery. Within
-                       tolerance, or an accepted record without a usable coolant
-                       value (missing, implausible, sentinel), restarts the
-                       recovery count. Recovery needs two consecutive plausible
-                       readings outside tolerance: the first is still suspect,
-                       the second clears the state and is the first trusted one.
-                       A gap does not interrupt recovery: a working sensor reads
-                       the cooled engine after a park.
-        Invariant: the return value is True whenever the state is SUSPECTED after
-        this reading, so a reading the tracker does not trust is never handed to
-        the relative barrier (an unresolved suspicion cannot produce "normal").
-        The cost of a suspicion is abstention, never a false alarm, and the
-        absolute barrier still evaluates suspected readings.
-        Readings in OBSERVING are not yet suspect; with the default warm-up they
-        fall inside the warm-up window (documented limitation). A sensor that
-        freezes during a long uninterrupted drive is only suspected after the
-        next engine-off gap (documented limitation).
+        State machine, per vehicle, over accepted readings (excluded records
+        never reach it, except that a conflicting duplicate restarts the
+        recovery count in SUSPECTED):
+            HEALTHY    no anchor; readings are trusted. A plausible reading after
+                       a gap >= stuck_gap_s since the last plausible reading
+                       moves to OBSERVING with anchor = that last reading.
+            OBSERVING  within tolerance: suspect (provisional) and counted; at
+                       stuck_min_samples move to SUSPECTED. Outside tolerance:
+                       back to HEALTHY, and that reading is trusted (the sensor
+                       moved after the park). A logger's single cached start-up
+                       value therefore costs one abstention, never more.
+            SUSPECTED  every plausible reading is suspect until recovery. Within
+                       tolerance, an accepted record without a usable coolant
+                       value (missing, implausible, sentinel) or a conflicting
+                       duplicate restarts the recovery count. Recovery needs two
+                       consecutive plausible readings outside tolerance, in any
+                       direction: the first is still suspect, the second clears
+                       the state and is the first trusted one. Time between them
+                       does not matter: a working sensor reads the cooled engine
+                       after a park.
+        Invariant: the return value is True whenever the reading is within
+        tolerance of an active anchor or the state is SUSPECTED after it, so a
+        reading whose integrity is unresolved is never handed to the relative
+        barrier and can never produce "normal". The cost is abstention, never a
+        false alarm, and the absolute barrier still evaluates suspect readings.
+        An established suspicion is carried from the reference file into the
+        observations (``coolant_states``); nothing else crosses the boundary. A sensor that freezes during a long uninterrupted
+        drive is only suspected after the next engine-off gap (documented
+        limitation).
         """
         cfg = self.config
         gap = None if state.last_coolant_us is None else now - state.last_coolant_us
@@ -195,7 +227,7 @@ class QualityTracker:
             state.anchored += 1
             if state.anchored >= cfg.stuck_min_samples:
                 state.stuck = True
-            return state.stuck
+            return True  # provisional in OBSERVING, established in SUSPECTED
         state.deviations += 1
         if state.stuck and state.deviations < 2:
             return True  # one deviation is not recovery evidence: the suspicion stands

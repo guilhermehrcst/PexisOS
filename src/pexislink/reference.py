@@ -27,7 +27,7 @@ from typing import Iterable, Mapping
 
 from .config import DetectorConfig
 from .ingest import DEFAULT_MAX_CONTEXTS, DEFAULT_MAX_VEHICLES, InputError, Record
-from .quality import Annotated, QualityTracker
+from .quality import Annotated, CoolantState, QualityTracker
 
 # (vehicle_id, rpm bin, speed bin, load bin or None when load is not used)
 ContextKey = tuple[str, int, int, int | None]
@@ -52,6 +52,9 @@ class ReferenceModel:
     rows: int = 0
     used: int = 0
     excluded: Mapping[str, int] = field(default_factory=dict)
+    # established frozen-sensor suspicions after the last reference row, per
+    # vehicle; the detector starts from them so they survive the file boundary
+    coolant_states: Mapping[str, CoolantState] = field(default_factory=dict)
 
     def summary(self) -> dict[str, object]:
         return {
@@ -150,4 +153,5 @@ def build_reference(records: Iterable[Record], config: DetectorConfig, *, use_lo
         rows=rows,
         used=used,
         excluded=dict(excluded),
+        coolant_states=tracker.coolant_states(),
     )

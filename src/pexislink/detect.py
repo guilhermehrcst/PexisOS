@@ -101,7 +101,8 @@ class Detector:
     def __init__(self, model: ReferenceModel, *, max_vehicles: int = DEFAULT_MAX_VEHICLES) -> None:
         self.model = model
         self.config = model.config
-        self._tracker = QualityTracker(model.config, max_vehicles=max_vehicles)
+        self._tracker = QualityTracker(model.config, max_vehicles=max_vehicles,
+                                       coolant_states=model.coolant_states)
         self._runs: dict[str, _Run] = {}
         self._run_gap_us = round(model.config.run_gap_s * _US)
         self._confirm_us = round(model.config.confirm_s * _US)

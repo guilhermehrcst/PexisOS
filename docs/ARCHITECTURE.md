@@ -37,6 +37,12 @@ synth ──► rows ─────────────────► any 
    reading is valid, plausible, not a sentinel, not suspected stuck, outside
    warm-up, within the threshold, and below the absolute limit.
    Suspected-stuck readings are still evaluated by the absolute barrier.
+   A frozen-sensor suspicion is a per-vehicle state machine (HEALTHY,
+   OBSERVING, SUSPECTED; see `QualityTracker._stuck`): every reading whose
+   integrity is unresolved is suspect, one outlier never clears an established
+   suspicion, recovery needs two consecutive plausible deviating readings, and
+   an established suspicion carries from the reference file into the
+   observations (checked against an explicit model on random streams).
 3. `confirmed_anomaly` implies at least `confirm_s` of continuous same-direction
    evidence with no gap above `run_gap_s` (checked against an independent
    brute-force oracle on random sequences).
