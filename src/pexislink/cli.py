@@ -186,6 +186,7 @@ def _dataset(argv: list[str]) -> int:
     pre.add_argument("--max-dir-entries", type=int, default=defaults.max_dir_entries)
     pre.add_argument("--max-categories", type=int, default=defaults.max_categories)
     args = parser.parse_args(argv)
+    # Messages never echo local paths (they may name people or vehicles); errno text only.
     try:
         limits = PreflightLimits(max_file_bytes=args.max_file_mb << 20,
                                  max_line_bytes=args.max_line_bytes, max_rows=args.max_rows,
@@ -193,20 +194,19 @@ def _dataset(argv: list[str]) -> int:
                                  max_dir_entries=args.max_dir_entries, max_categories=args.max_categories)
         input_dir = Path(args.input_dir)
         if not input_dir.is_dir():
-            raise ValueError(f"input directory does not exist or is not a directory: {args.input_dir}")
-        out = Path(args.out)
-        if input_dir.resolve() in out.resolve().parents:
+            raise ValueError("--input-dir does not exist or is not a directory")
+        if _inside(Path(args.out), input_dir):
             raise ValueError("refusing to write the manifest inside the input directory (it is read-only input)")
-    except (ValueError, OSError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
+    except (ValueError, OSError, RuntimeError) as exc:  # RuntimeError: symlink loop in resolve() on 3.11
+        print(f"error: {_no_path(exc)}", file=sys.stderr)
         return 2
     try:
         manifest_file = _PendingFile(args.out, forbidden=())
-    except ValueError as exc:  # the destination is not a regular file: a usage error
-        print(f"error: {exc}", file=sys.stderr)
+    except ValueError:  # the destination is not a regular file: a usage error
+        print("error: --out exists and is not a regular file", file=sys.stderr)
         return 2
     except OSError as exc:  # missing or unwritable parent: the manifest cannot be written
-        print(f"error: cannot write manifest: {exc}", file=sys.stderr)
+        print(f"error: cannot write manifest: {_no_path(exc)}", file=sys.stderr)
         return 1
     command = ["pexislink", "dataset", "preflight", "--source", args.source, "--input-dir", "<input-dir>",
                "--out", "<out>", "--max-file-mb", str(args.max_file_mb), "--max-line-bytes",
@@ -218,7 +218,7 @@ def _dataset(argv: list[str]) -> int:
         manifest = run_preflight(input_dir, limits, command)
     except (ValueError, OSError, RecursionError, MemoryError) as exc:
         manifest_file.discard()
-        print(f"error: {exc}", file=sys.stderr)
+        print(f"error: {_no_path(exc)}", file=sys.stderr)
         return 2
     except BaseException:  # e.g. Ctrl-C: leave no temporary file behind
         manifest_file.discard()
@@ -226,7 +226,7 @@ def _dataset(argv: list[str]) -> int:
     try:
         manifest_file.commit(manifest, sort_keys=True)
     except (OSError, ValueError) as exc:
-        print(f"error: cannot write manifest: {exc}", file=sys.stderr)
+        print(f"error: cannot write manifest: {_no_path(exc)}", file=sys.stderr)
         return 1
     overall = manifest["overall"]
     print(f"preflight: {overall['status']}; {len(overall['blocking_issues'])} blocking issue(s); "
@@ -234,6 +234,28 @@ def _dataset(argv: list[str]) -> int:
           f"{time.perf_counter() - started:.1f} s; peak RSS {_peak_rss_mb()} MB (not in the manifest)",
           file=sys.stderr)
     return {"pass": 0, "fail": 3, "incomplete": 4}[overall["status"]]
+
+
+def _no_path(exc: BaseException) -> str:
+    """Error text without file names: OSError messages embed the path."""
+    if isinstance(exc, OSError):
+        return exc.strerror or type(exc).__name__
+    if isinstance(exc, RuntimeError):
+        return "symbolic link loop or unresolvable path"
+    return str(exc)
+
+
+def _inside(out: Path, directory: Path) -> bool:
+    """True if ``out`` would land in ``directory`` or below. Compares device and inode
+    of each existing parent, so case-insensitive or aliased paths cannot bypass it."""
+    target = os.stat(directory)
+    for parent in Path(os.path.realpath(out)).parents:  # realpath: no RuntimeError on loops (3.11)
+        try:
+            if os.path.samestat(os.stat(parent), target):
+                return True
+        except OSError:
+            continue
+    return False
 
 
 def _peak_rss_mb() -> float | str:

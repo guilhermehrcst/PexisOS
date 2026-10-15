@@ -215,6 +215,12 @@ def precision_lost(cell: str, value: float) -> bool:
         return True
 
 
+def _has_content(chunk: bytes, start: int, end: int) -> bool:
+    if end - start > 8:
+        return True
+    return bool(chunk[start:end].strip(b"\r"))
+
+
 class _HashedFile:
     """Single pass over a binary file: SHA-256 and byte count of every byte,
     bounded physical lines, strict UTF-8. Nothing is materialised."""
@@ -229,6 +235,9 @@ class _HashedFile:
         self.bom = False
         self.final_newline = True
         self.record_bytes = 0  # bytes of the CSV record being assembled (quoted fields may span lines)
+        self.content_lines = 0  # drained lines holding any byte other than CR/LF (bytes only, never decoded)
+        self._partial_content = False
+        self.count_content = False  # set for outcome files, whose rows are never parsed
 
     def _consume(self, raw: bytes) -> None:
         self.sha.update(raw)
@@ -264,12 +273,28 @@ class _HashedFile:
             except UnicodeDecodeError:
                 raise _FileFailure("invalid_utf8", self.lines) from None
 
+    def _count_content(self, chunk: bytes) -> None:
+        """Count lines with a byte other than CR, one line at a time (no per-line list)."""
+        start = 0
+        while (end := chunk.find(b"\n", start)) >= 0:
+            if self._partial_content or _has_content(chunk, start, end):
+                self.content_lines += 1
+            self._partial_content = False
+            start = end + 1
+        self._partial_content = self._partial_content or _has_content(chunk, start, len(chunk))
+
     def drain(self) -> None:
-        """Hash the rest of the file without decoding it; count newlines."""
+        """Hash the rest of the file without decoding it; count newlines and
+        lines that are not blank (a byte-level test: nothing is decoded)."""
         while chunk := self.handle.read(_CHUNK):
             self._consume(chunk)
             self.lines += chunk.count(b"\n")
             self.final_newline = chunk.endswith(b"\n")
+            if self.count_content:
+                self._count_content(chunk)
+        if self._partial_content:  # an unterminated last line with content
+            self.content_lines += 1
+            self._partial_content = False
 
 
 @dataclass(slots=True)
@@ -539,11 +564,13 @@ def _check_outcome(source: _HashedFile, expected: ExpectedFile, limits: Prefligh
         raise _FileFailure("unexpected_header", 1)  # names are not reported: they may be data
     report["header"] = {"columns": len(names), "names": names}
     header_bytes = source.bytes
+    source.count_content = True
     source.drain()
     after = source.lines - 1
     if source.bytes > header_bytes and not source.final_newline:
         after += 1  # an unterminated last line
     report["physical_lines_after_header"] = after
+    report["non_blank_lines_after_header"] = source.content_lines
     report["label_policy"] = ("outcome values were not decoded; only the header, byte length, SHA-256 "
                               "and physical line count (blank lines included) were read")
 
@@ -661,7 +688,7 @@ def _read_file(path: Path, descriptor: int, info: os.stat_result, expected: Expe
     time_step = report.get("time_step") or {}
     if time_step.get("backwards_steps") or (time_step.get("duplicate_keys") or {}).get("adjacent_equal"):
         report["blocking"].append("time_step_order")  # duplicate or backwards (vehicle_id, time_step) keys
-    if (rows and not rows.get("data_rows")) or report.get("physical_lines_after_header") == 0:
+    if (rows and not rows.get("data_rows")) or report.get("non_blank_lines_after_header") == 0:
         report["blocking"].append("no_data_rows")
 
 
@@ -786,7 +813,7 @@ def _git_head(package: Path) -> dict[str, Any]:
                     sha, _, name = line.partition(" ")
                     if name == ref:
                         return {"status": "verified_local", "sha": sha, "ref": ref}
-        except (OSError, UnicodeDecodeError):
+        except (OSError, UnicodeDecodeError, RuntimeError, ValueError):  # RuntimeError: symlink loop (3.11)
             break
         break
     return {"status": "not_available", "sha": None, "ref": None}

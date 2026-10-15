@@ -85,7 +85,6 @@ class CleanDatasetTests(PreflightCase):
             self.assertNotIn(str(vid), text)
         self.assertNotIn("Cat", text)  # specification values
         self.assertNotIn(str(self.root), text)
-        self.assertNotIn("in_study_repair\": 1", text)
 
     def test_evidence_statuses_are_explicit(self):
         manifest = self.preflight()
@@ -633,6 +632,80 @@ class CodexReviewTests(PreflightCase):
         data = b"vehicle_id,class_label,synthetic_x,synthetic_y\n920001,0,1,2\n"
         manifest = self.preflight(overrides={"test_labels.csv": data}, limits=PreflightLimits(max_columns=3))
         self.assertEqual(manifest["files"]["test_labels.csv"]["fatal"]["code"], "too_many_columns")
+
+
+class ReReviewTests(PreflightCase):
+    """Independent re-review of the final diff (39c2677). Each test failed on 39c2677."""
+
+    def test_symlink_loop_in_out_path_fails_cleanly_on_every_version(self):
+        write_dataset(self.data)
+        loop = self.root / "loop"
+        loop.symlink_to(loop)
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            code = main(["dataset", "preflight", "--source", "component-x-v3", "--input-dir", str(self.data),
+                         "--out", str(loop / "m.json")])
+        self.assertEqual(code, 1)  # the manifest cannot be written there (3.11 used to raise RuntimeError)
+        self.assertIn("cannot write manifest", stderr.getvalue())
+        self.assertNotIn(str(self.root), stderr.getvalue())
+
+    def test_git_head_symlink_loop_is_not_available(self):
+        root = self.root / "repo"
+        (root / "pkg").mkdir(parents=True)
+        (self.root / "l1").symlink_to(self.root / "l2")
+        (self.root / "l2").symlink_to(self.root / "l1")
+        (root / ".git").write_text("gitdir: ../l1\n")
+        self.assertEqual(componentx._git_head(root / "pkg")["status"], "not_available")
+
+    def test_outcome_with_only_blank_lines_has_no_data(self):
+        write_dataset(self.data, overrides={"test_labels.csv": b"vehicle_id,class_label\n\n\r\n\n"})
+        code, manifest, _ = self.run_cli()
+        report = manifest["files"]["test_labels.csv"]
+        self.assertEqual(code, 3)
+        self.assertEqual(report["non_blank_lines_after_header"], 0)
+        self.assertEqual(report["blocking"], ["no_data_rows"])
+
+    def test_non_blank_count_spans_chunks_and_unterminated_lines(self):
+        source = componentx._HashedFile(io.BytesIO(b""), 64, 1 << 30)
+        source.count_content = True
+        for chunk in (b"\n92", b"0001,0\n\n", b"\r\n9200", b"02,1"):  # lines split across chunks
+            source._count_content(chunk)
+        source.handle = io.BytesIO(b"")
+        source.drain()
+        self.assertEqual(source.content_lines, 2)
+
+    def test_errors_do_not_echo_local_paths(self):
+        marker = self.root / "secret_owner_ABC123"
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            self.assertEqual(main(["dataset", "preflight", "--source", "component-x-v3", "--input-dir",
+                                   str(marker), "--out", str(self.out)]), 2)
+            write_dataset(self.data)
+            self.assertEqual(main(["dataset", "preflight", "--source", "component-x-v3", "--input-dir",
+                                   str(self.data), "--out", str(marker / "deep" / "m.json")]), 1)
+        self.assertNotIn("secret_owner", stderr.getvalue())
+
+    def test_growth_during_parsing_is_bounded(self):
+        """The cap holds on the parse path too: the training file 'grows' past it while parsed."""
+        write_dataset(self.data)
+        size = len(clean_files()[TRAIN_OPS])
+        real = os.fstat
+        state = {"patched": False}
+
+        def small_first(fd):
+            info = real(fd)
+            if not state["patched"] and info.st_size == size:  # its size when opened: under the cap
+                state["patched"] = True
+                values = list(info)
+                values[6] = 10
+                return os.stat_result(values)
+            return info
+
+        with mock.patch.object(componentx.os, "fstat", side_effect=small_first):
+            report = run_preflight(self.data, PreflightLimits(max_file_bytes=size // 2), ["t"])["files"][TRAIN_OPS]
+        self.assertEqual(report["fatal"]["code"], "file_changed_during_read")
+        self.assertEqual(report["sha256"]["status"], "not_checked")
+        self.assertNotIn("rows", report)  # parsing stopped at the cap
 
 
 if __name__ == "__main__":

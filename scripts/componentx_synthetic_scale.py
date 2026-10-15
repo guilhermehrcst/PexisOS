@@ -22,10 +22,10 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=1)
     args = parser.parse_args()
     rng = random.Random(args.seed)
-    args.out.mkdir(parents=True, exist_ok=True)
-    header = ["vehicle_id", "time_step"] + [f"synthetic_f{i:03d}" for i in range(FEATURES)]
     if not 1 <= args.vehicles <= args.rows:
         parser.error("need 1 <= --vehicles <= --rows")
+    args.out.mkdir(parents=True, exist_ok=True)
+    header = ["vehicle_id", "time_step"] + [f"synthetic_f{i:03d}" for i in range(FEATURES)]
     base, extra = divmod(args.rows, args.vehicles)  # exactly --rows rows in total
     with open(args.out / "train_operational_readouts.csv", "w", encoding="ascii", newline="\n") as handle:
         handle.write(",".join(header) + "\n")

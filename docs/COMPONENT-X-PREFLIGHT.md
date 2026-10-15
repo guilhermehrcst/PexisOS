@@ -84,7 +84,7 @@ occurs.
 |---|---|---|
 | operational | `*_operational_readouts.csv` | strict UTF-8 (BOM noted), no NUL, bounded line length and bounded record length (a quoted field spanning lines counts towards one record), strict CSV quoting, header (safe names, unique, `vehicle_id` and `time_step` present), field count, vehicle-id syntax, strict numbers (no `nan`/`inf`/overflow/underflow to 0/`1_000`/non-ASCII digits/blanks; nothing coerced to 0), `time_step` rejected if beyond 2^53 and not exactly representable, per vehicle in file order: backwards `time_step`, duplicate `(vehicle_id, time_step)`, non-contiguous vehicle rows, positive gap histogram (powers of two, no unit assumed); per column: missing, non-numeric, non-finite, underflow, over-long, values beyond 2^53 not exactly representable, min, max, and *candidate* decreases within a vehicle's contiguous rows |
 | specifications | `*_specifications.csv` | as above for structure; duplicate `vehicle_id`; per column missing count and number of distinct values (capped; values are kept only as 16-byte digests) |
-| outcome | `train_tte.csv`, `validation_labels.csv`, `test_labels.csv` | **metadata only**: header line, byte length, SHA-256, physical line count after the header (blank lines included; not a parsed row count). The first line is accepted as a header only if it names every column the publisher describes (otherwise `unexpected_header`, and no names are reported, since a headerless file's first line is data). Values are never decoded (a test feeds invalid UTF-8 after the header to prove it) |
+| outcome | `train_tte.csv`, `validation_labels.csv`, `test_labels.csv` | **metadata only**: header line, byte length, SHA-256, physical line count after the header and how many of those lines are not blank (a byte-level test; neither is a parsed row count; a file with no non-blank line blocks as `no_data_rows`). The first line is accepted as a header only if it names every column the publisher describes (otherwise `unexpected_header`, and no names are reported, since a headerless file's first line is data). Values are never decoded (a test feeds invalid UTF-8 after the header to prove it) |
 
 Across files: vehicle-ID overlap between the train, validation and test operational
 files, and operational-versus-specification coverage per split, as counts. Label
@@ -129,8 +129,9 @@ the PexisLink version, a SHA-256 of the package sources, the git HEAD read from
 files, and the Python version.
 
 It contains **no row values, no vehicle identifiers, no local paths and no names of
-unrecognised local files** (only their count). Time and peak memory go to stderr
-only, so they do not break determinism.
+unrecognised local files** (only their count). Error messages on stderr do not echo
+paths either (errno text only). Time and peak memory go to stderr only, so they do
+not break determinism.
 
 ## 5. Resources (synthetic data, this container: 4 CPUs, 16 GB RAM)
 
@@ -236,3 +237,23 @@ fails on `c0a9724` (`CodexReviewTests`).
 | A linked worktree's `.git` file gave `git_head: not_available` | `gitdir` and `commondir` resolved |
 | `--max-columns` was not applied to outcome headers | applied |
 | The synthetic scale script wrote `vehicles x floor(rows/vehicles)` rows | exactly `--rows` (the measurements above used divisible values and are unaffected) |
+
+## 10. Independent re-review of the final diff
+
+After the owner's review gate, a fresh reviewer re-checked `39c2677`: all eight gate items
+passed with reproductions (streaming cap on the parse and drain paths, same-size rewrite,
+rename-over and deletion, split checks only from passing files, exit codes for early and
+late manifest failures, symlinks without `O_NOFOLLOW`, exact synthetic row counts, outcome
+column limit, linked worktrees with packed refs). It found four new defects, all fixed with
+tests that fail on `39c2677` (`ReReviewTests`):
+
+| Severity | Finding | Fix |
+|---|---|---|
+| Medium | A symlink loop in `--out` (or in a worktree `gitdir`) raised `RuntimeError` as a traceback on Python 3.11 | `realpath`, so every version reports `cannot write manifest` (exit 1) without traceback; `git_head: not_available` |
+| Low | An outcome file with only blank lines after the header passed | non-blank lines counted at byte level; `no_data_rows` |
+| Low | Error messages echoed local paths | errno text only |
+| Low | The synthetic script created `--out` before validating its arguments | validation first |
+
+Also from that review: the "manifest inside the input directory" guard now compares device
+and inode of each parent (robust to case-insensitive or aliased paths), the parse-path
+growth case has its own test, and a test assertion that could not fail was removed.
