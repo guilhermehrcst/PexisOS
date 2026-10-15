@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import csv
 import hashlib
-import io
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -225,8 +224,16 @@ def read_bounded_text(path: str | Path, max_bytes: int = DEFAULT_MAX_FILE_BYTES)
     return decode_utf8(read_bounded_bytes(path, max_bytes))
 
 
+# One physical line with its terminator (\r\n, \r or \n), or a final unterminated
+# line. Iterating matches over the existing string avoids io.StringIO, whose
+# internal UCS-4 buffer silently quadrupled peak memory (measured: 171 MB peak
+# for 37 MB of CSV before this change).
+_LINE = re.compile(r"[^\r\n]*(?:\r\n?|\n)|[^\r\n]+\Z")
+
+
 def _bounded_lines(text: str, max_line_chars: int) -> Iterator[str]:
-    for number, line in enumerate(io.StringIO(text, newline=""), start=1):
+    for number, match in enumerate(_LINE.finditer(text), start=1):
+        line = match.group()
         if len(line) > max_line_chars:
             raise InputError(f"line {number}: longer than the {max_line_chars}-character limit")
         yield line

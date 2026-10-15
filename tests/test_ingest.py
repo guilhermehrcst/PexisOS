@@ -163,6 +163,23 @@ class SnapshotTests(FileFixture):
         self.assertEqual(first[0].vehicle_id, "v1")
         self.assertEqual(len(table.sha256), 64)
 
+    def test_line_endings_and_quoted_newlines_match_csv_module_semantics(self):
+        import csv as csv_module
+        import io
+        from pexislink.ingest import _bounded_lines
+        bodies = [
+            HEADER + "\n" + GOOD + "\n",
+            HEADER + "\r\n" + GOOD + "\r\n",
+            HEADER + "\r" + GOOD + "\r",                 # classic Mac line endings
+            HEADER + "\n" + GOOD,                         # no final newline
+            HEADER + "\n" + '2026-10-02T08:00:00Z,"v\n1",2000,60,90\n',  # quoted newline
+            "\n\n" + HEADER + "\n\n" + GOOD + "\n\n",
+        ]
+        for body in bodies:
+            expected = list(csv_module.reader(io.StringIO(body, newline=""), strict=True))
+            actual = list(csv_module.reader(_bounded_lines(body, 1024), strict=True))
+            self.assertEqual(actual, expected, repr(body))
+
     def test_line_numbers_are_physical(self):
         table = TelemetryFile(self.write(HEADER + "\n\n" + GOOD + "\n" + "2026-10-02T08:01:00Z,v1,2000,60,91\n"))
         self.assertEqual([r.line for r in table.records()], [3, 4])
