@@ -57,7 +57,7 @@ The **Model Context Protocol (MCP)** already standardizes how AI applications ac
 
 **Do not fork or replace MCP.** The missing specialization PexisLink would explore is an **edge/physical-world capability substrate** behind MCP: identity and provenance for physical/digital entities, typed observations, permissions, bounded local execution, interoperability adapters, reliable abstention/stale-data semantics and audit. MCP is the external model-facing interface; PexisLink's **internal API is model/provider-independent**. An optional later A2A adapter is justified only if real cross-agent delegation is required, not as MVP scaffolding.
 
-\`\`\`text
+```text
   Claude / OpenAI agents / other model and app clients
                        |
               standard MCP tool API
@@ -70,7 +70,7 @@ The **Model Context Protocol (MCP)** already standardizes how AI applications ac
                        |
   explicitly enrolled, read-only domain adapters
     (synthetic sensors / recorded CAN / local service)
-\`\`\`
+```
 
 **First minimal read-only MCP tool candidates** (names are provisional; freeze only after conformance review):
 
