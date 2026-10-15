@@ -3,6 +3,7 @@
     pexislink detect --reference R.csv --observations O.csv [--summary S.json]
     pexislink synth --scenario NAME --seed N --out DIR
     pexislink benchmark [--profile quick|dev|full] --out DIR
+    pexislink dataset preflight --source component-x-v3 --input-dir DIR --out MANIFEST.json
 
 The v0.1 invocation ``pexislink --baseline B --observations O`` still runs the
 frozen v0.1 rule with its original output, plus a deprecation notice on stderr.
@@ -11,6 +12,11 @@ Exit codes: 0 success; 2 invalid input or usage (``detect`` then emits no
 assessments: the input is fully validated and the summary destination is
 prepared before the first line is written); 1 output could not be written
 (for example, the pipe was closed early or the device is full).
+
+``dataset preflight`` is read-only and offline. Exit codes: 0 every expected
+file present and structurally clean; 3 at least one blocking issue; 4 no
+blocking issue but expected files missing; 2 invalid usage or unusable input
+directory (no manifest written); 1 the manifest could not be written.
 """
 
 from __future__ import annotations
@@ -20,6 +26,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 from collections import Counter
 from pathlib import Path
 from typing import IO, Any, Iterator, Sequence
@@ -31,7 +38,7 @@ from .detect import STATUSES, assess_records
 from .ingest import DEFAULT_MAX_FILE_BYTES, DEFAULT_MAX_VEHICLES, InputError, Limits, Record, TelemetryFile
 from .reference import build_reference
 
-COMMANDS = ("detect", "synth", "benchmark")
+COMMANDS = ("detect", "synth", "benchmark", "dataset")
 NOTICE = ("Research output. An anomaly is a deviation from this vehicle's own reference; "
           "it is not a diagnosed fault, a failure prediction or a safety assessment.")
 MAX_FILE_MB = 4096
@@ -62,6 +69,8 @@ def _dispatch(args: list[str]) -> int:
         return _legacy_v01(args)
     if args[0] == "detect":
         return _detect(args[1:])
+    if args[0] == "dataset":
+        return _dataset(args[1:])
     if args[0] == "synth":
         from .synth import cli_synth
         return cli_synth(args[1:])
@@ -158,6 +167,70 @@ def _detect(argv: list[str]) -> int:
     return 0
 
 
+def _dataset(argv: list[str]) -> int:
+    from .componentx import SOURCE_ID, PreflightLimits, run_preflight
+
+    parser = argparse.ArgumentParser(prog="pexislink dataset",
+                                     description="Read-only, offline preflight of locally supplied dataset files.")
+    sub = parser.add_subparsers(dest="action", required=True)
+    pre = sub.add_parser("preflight", help="validate local files and write a provenance manifest (JSON)")
+    pre.add_argument("--source", required=True, choices=[SOURCE_ID])
+    pre.add_argument("--input-dir", required=True, help="local directory holding the publisher's files")
+    pre.add_argument("--out", required=True, help="manifest path (outside the input directory)")
+    defaults = PreflightLimits()
+    pre.add_argument("--max-file-mb", type=int, default=defaults.max_file_bytes >> 20)
+    pre.add_argument("--max-line-bytes", type=int, default=defaults.max_line_bytes)
+    pre.add_argument("--max-rows", type=int, default=defaults.max_rows)
+    pre.add_argument("--max-vehicles", type=int, default=defaults.max_vehicles)
+    pre.add_argument("--max-columns", type=int, default=defaults.max_columns)
+    args = parser.parse_args(argv)
+    try:
+        limits = PreflightLimits(max_file_bytes=args.max_file_mb << 20,
+                                 max_line_bytes=args.max_line_bytes, max_rows=args.max_rows,
+                                 max_vehicles=args.max_vehicles, max_columns=args.max_columns)
+        input_dir = Path(args.input_dir)
+        if not input_dir.is_dir():
+            raise ValueError(f"input directory does not exist or is not a directory: {args.input_dir}")
+        out = Path(args.out)
+        if input_dir.resolve() in out.resolve().parents:
+            raise ValueError("refusing to write the manifest inside the input directory (it is read-only input)")
+        manifest_file = _PendingFile(args.out, forbidden=())
+    except (ValueError, OSError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    command = ["pexislink", "dataset", "preflight", "--source", args.source, "--input-dir", "<input-dir>",
+               "--out", "<out>", "--max-file-mb", str(args.max_file_mb), "--max-line-bytes",
+               str(args.max_line_bytes), "--max-rows", str(args.max_rows), "--max-vehicles",
+               str(args.max_vehicles), "--max-columns", str(args.max_columns)]
+    started = time.perf_counter()
+    try:
+        manifest = run_preflight(input_dir, limits, command)
+    except (ValueError, OSError, RecursionError, MemoryError) as exc:
+        manifest_file.discard()
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    try:
+        manifest_file.commit(manifest, sort_keys=True)
+    except (OSError, ValueError) as exc:
+        print(f"error: cannot write manifest: {exc}", file=sys.stderr)
+        return 1
+    overall = manifest["overall"]
+    print(f"preflight: {overall['status']}; {len(overall['blocking_issues'])} blocking issue(s); "
+          f"{len(overall['missing_expected_files'])} expected file(s) missing; "
+          f"{time.perf_counter() - started:.1f} s; peak RSS {_peak_rss_mb()} MB (not in the manifest)",
+          file=sys.stderr)
+    return {"pass": 0, "fail": 3, "incomplete": 4}[overall["status"]]
+
+
+def _peak_rss_mb() -> float | str:
+    try:
+        import resource
+    except ImportError:  # not available on Windows
+        return "unknown"
+    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return round(peak / (1024 * 1024 if sys.platform == "darwin" else 1024), 1)  # macOS bytes, Linux KiB
+
+
 def _summary(config: DetectorConfig, reference: TelemetryFile, observations: TelemetryFile,
              model: Any, status_counts: Counter[str], reason_counts: Counter[str],
              quality_counts: Counter[str]) -> dict[str, Any]:
@@ -204,10 +277,10 @@ class _PendingFile:
                                                       suffix=".tmp")
         self.handle: IO[str] = os.fdopen(descriptor, "w", encoding="utf-8")
 
-    def commit(self, payload: Any) -> None:
+    def commit(self, payload: Any, *, sort_keys: bool = False) -> None:
         try:
             with self.handle:
-                json.dump(payload, self.handle, indent=2, allow_nan=False)
+                json.dump(payload, self.handle, indent=2, allow_nan=False, sort_keys=sort_keys)
                 self.handle.write("\n")
             mask = os.umask(0)
             os.umask(mask)

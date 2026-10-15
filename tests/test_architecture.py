@@ -44,10 +44,18 @@ class LayeringTests(unittest.TestCase):
             "evaluate": {"synth"},
             "synth": {"ingest"},
             "baselines": {"core", "ingest"},
+            "componentx": {""},  # package root only (__version__): no detector, no evaluation harness
         }
         for module, permitted in allowed.items():
             self.assertTrue(imported_modules(module) <= permitted,
                             f"{module} imports {imported_modules(module) - permitted}")
+
+    def test_dataset_preflight_is_isolated_from_detection_and_evaluation(self):
+        """v0.3 Stage A: the Component X preflight must not reach, or be reached by, the
+        v0.1 comparator, the v0.2 detector or the benchmark (only the CLI wires it in)."""
+        for path in PACKAGE.glob("*.py"):
+            if path.stem not in ("componentx", "cli"):
+                self.assertNotIn("componentx", imported_modules(path.stem), path.name)
 
     def test_no_process_is_spawned_at_runtime(self):
         """Code review L10: platform.platform() used to spawn `uname -p` during a
@@ -66,6 +74,10 @@ class LayeringTests(unittest.TestCase):
             run_benchmark(Profile("tiny", "dev", (101,), 4, 13), ["normal_operation"])
             self.assertEqual(main(["detect", "--reference", str(examples / "baseline.csv"),
                                    "--observations", str(examples / "observations.csv")]), 0)
+            import tempfile
+            with tempfile.TemporaryDirectory() as tmp:
+                self.assertEqual(main(["dataset", "preflight", "--source", "component-x-v3", "--input-dir",
+                                       str(examples), "--out", str(Path(tmp) / "m.json")]), 4)
 
     def test_no_network_or_subprocess_in_the_package(self):
         forbidden = {"socket", "urllib", "http", "subprocess", "requests", "ftplib", "smtplib", "ctypes"}

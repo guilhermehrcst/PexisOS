@@ -32,6 +32,14 @@ pexislink benchmark --profile quick --out reports/benchmark-quick
 PYTHONPATH=src python -m unittest discover -s tests -v
 ~~~
 
+## Real-data preflight (v0.3 Stage A)
+
+`pexislink dataset preflight --source component-x-v3 --input-dir DIR --out manifest.json`
+checks locally supplied Scania Component X v3 files (read-only, offline, streaming)
+and writes a SHA-256 provenance manifest. It trains nothing and reads no outcome
+values. No real file has been inspected by this project yet; see
+[docs/COMPONENT-X-PREFLIGHT.md](docs/COMPONENT-X-PREFLIGHT.md).
+
 ## What an assessment means
 
 | Status | Meaning |
