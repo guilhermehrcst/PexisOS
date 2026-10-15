@@ -1,7 +1,12 @@
-"""A small, deterministic, read-only telemetry anomaly baseline.
+"""Legacy v0.1 telemetry anomaly baseline, retained as a frozen comparator.
 
 This module detects deviations from an earlier reference period. It does not
 predict component failure, estimate remaining useful life, or diagnose faults.
+
+The decision rule in ``analyze`` is intentionally unchanged from v0.1 so that
+benchmark comparisons stay meaningful; its known defects are documented in
+docs/AUDIT-v0.1.md and pinned by tests/test_v01_audit.py. New code should use
+the v0.2 pipeline (``pexislink.detect``).
 """
 
 from __future__ import annotations
@@ -13,7 +18,10 @@ from math import floor, isfinite
 from pathlib import Path
 from statistics import median
 import csv
+import io
 from typing import Literal, Mapping, Sequence
+
+from .ingest import DEFAULT_MAX_FILE_BYTES, read_bounded_text
 
 
 REQUIRED_COLUMNS = (
@@ -65,14 +73,22 @@ class Sample:
         return cls(timestamp, vehicle_id, **values)
 
 
-def read_samples(path: str | Path) -> list[Sample]:
-    """Load strict, timestamped telemetry records from UTF-8 CSV."""
-    with Path(path).open(newline="", encoding="utf-8-sig") as source:
-        reader = csv.DictReader(source)
-        missing = set(REQUIRED_COLUMNS) - set(reader.fieldnames or ())
+def read_samples(path: str | Path, *, max_bytes: int = DEFAULT_MAX_FILE_BYTES) -> list[Sample]:
+    """Load strict, timestamped telemetry records from UTF-8 CSV.
+
+    Input is bounded to ``max_bytes`` and every CSV structure error surfaces as
+    ``ValueError`` (audit findings F-09, F-10, F-11).
+    """
+    reader = csv.DictReader(io.StringIO(read_bounded_text(path, max_bytes), newline=""))
+    samples: list[Sample] = []
+    try:
+        fieldnames = reader.fieldnames or ()
+        duplicates = sorted({name for name in fieldnames if list(fieldnames).count(name) > 1})
+        if duplicates:
+            raise ValueError(f"duplicate CSV column(s): {', '.join(duplicates)}")
+        missing = set(REQUIRED_COLUMNS) - set(fieldnames)
         if missing:
             raise ValueError(f"missing CSV columns: {', '.join(sorted(missing))}")
-        samples: list[Sample] = []
         for line_number, row in enumerate(reader, start=2):
             if None in row:
                 raise ValueError(f"line {line_number}: unexpected extra CSV fields")
@@ -80,6 +96,8 @@ def read_samples(path: str | Path) -> list[Sample]:
                 samples.append(Sample.from_mapping(row))
             except ValueError as exc:
                 raise ValueError(f"line {line_number}: {exc}") from exc
+    except csv.Error as exc:
+        raise ValueError(f"line {reader.line_num}: malformed CSV: {exc}") from None
     return samples
 
 
