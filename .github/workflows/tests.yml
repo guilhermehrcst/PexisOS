@@ -1,0 +1,35 @@
+name: Tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Check Python syntax
+        run: python -m compileall -q src tests
+      - name: Run unit tests without third-party dependencies
+        env:
+          PYTHONPATH: src
+        run: python -m unittest discover -s tests -v
+      - name: Smoke-test local demo
+        env:
+          PYTHONPATH: src
+        run: python -m pexislink --baseline examples/baseline.csv --observations examples/observations.csv
