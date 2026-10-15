@@ -212,3 +212,12 @@ All findings were reproduced; each fix has a test that fails on `aaac4dd`
 | F7 | Low | cantools warnings named DBC messages on stderr; duplicate names accepted | log records and warnings dropped during the parse; duplicate names and empty DBCs rejected |
 | F8 | Low | Integers beyond the double range were written as decoded | `value_out_of_range` |
 | F9 | Low | Unbounded DBC read, long output names, permissions reset, DBC BOM rejected, undocumented leap-second and multiplexer behaviour | bounded read, short temp names, existing permissions kept, DBC BOM accepted, documented |
+
+## 10. Automated review on PR #10 (of `3a0d6fb`)
+
+| Finding | Fix |
+|---|---|
+| P1: when a different error escaped the replay (e.g. a parser that caught the refusal and raised its own error), the guard's violation and live-thread checks were skipped, so the run reported the wrong code and a new thread could outlive the guard | the checks always run before any error propagates; a violation takes precedence (exit 11) |
+| P2: an absurd `--max-dbc-kb` overflowed the read size and gave a traceback | every limit is bounded to 1..2^40; anything else is a usage error (exit 2) |
+
+Both have tests in `CodexReviewTests` that fail on `3a0d6fb`.

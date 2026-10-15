@@ -62,6 +62,7 @@ _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 _MAX_STANDARD_ID = 0x7FF
 _MAX_EXTENDED_ID = 0x1FFFFFFF
 _CHUNK = 1 << 20
+_MAX_LIMIT = 1 << 40  # 1 TiB / 10^12 rows: far above any real use, well inside Py_ssize_t for reads
 _UNKNOWN_ID_CAP = 100_000
 _MESSAGE_LINE = re.compile(r"[ \t]*BO_[ \t]")
 _SIGNAL_LINE = re.compile(r"[ \t]*SG_[ \t]")
@@ -103,8 +104,8 @@ class ReplayLimits:
 
     def __post_init__(self) -> None:
         for name, value in asdict(self).items():
-            if not isinstance(value, int) or isinstance(value, bool) or value < 1:
-                raise ValueError(f"{name} must be a positive integer")
+            if not isinstance(value, int) or isinstance(value, bool) or not 1 <= value <= _MAX_LIMIT:
+                raise ValueError(f"{name} must be an integer between 1 and {_MAX_LIMIT}")
 
 
 # --------------------------------------------------------------- frames
@@ -502,17 +503,21 @@ def no_device_access() -> Iterator[None]:
         _hook_installed = True
     threads_before = {id(thread) for thread in threading.enumerate()}
     _guard.update(active=True, violations=0)
+    pending: BaseException | None = None
     try:
         yield
-    except SafetyViolation:  # an uncaught refusal is a guard failure, never a traceback
-        _guard["violations"] += 1
+    except BaseException as error:  # finish the checks below before anything propagates; an uncaught
+        pending = error             # SafetyViolation was already counted by the hook, so it ends as exit 11
     finally:
         _guard["active"] = False
     # A thread started during the replay could act after the guard switched off: fail closed.
     if any(id(thread) not in threads_before and thread.is_alive() for thread in threading.enumerate()):
         _guard["violations"] += 1
-    if _guard["violations"]:
-        raise ReplayError("safety_guard", "replay code attempted device, network, process or thread activity")
+    if _guard["violations"]:  # takes precedence over any other error (e.g. a parser that caught the refusal)
+        raise ReplayError("safety_guard",
+                          "replay code attempted device, network, process or thread activity") from pending
+    if pending is not None:
+        raise pending
 
 
 # --------------------------------------------------------------- replay

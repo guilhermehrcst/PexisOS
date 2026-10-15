@@ -604,5 +604,48 @@ class ReviewRegressionTests(LabCase):
         self.assertEqual(os.stat(self.summary).st_mode & 0o777, 0o600)
 
 
+class CodexReviewTests(LabCase):
+    """Automated review of PR #10 (3a0d6fb). Each test failed on 3a0d6fb."""
+
+    def test_guard_checks_run_even_when_another_error_propagates(self):
+        import threading
+        stop = threading.Event()
+
+        def thread_then_error(text, limits):
+            threading.Thread(target=stop.wait, daemon=True).start()
+            raise ReplayError("invalid_dbc", "pretend parse failure")
+
+        def refusal_turned_into_error(text, limits):
+            try:
+                socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            except Exception:
+                raise ReplayError("invalid_dbc", "a parser that wraps every exception") from None
+            return StubDecoder()
+
+        try:
+            for factory in (thread_then_error, refusal_turned_into_error):
+                write_inputs(self.inputs)
+                code, stderr = self.run_lab(factory=factory)
+                self.assertEqual(code, 11, stderr)
+                self.assertIn("safety_guard", stderr)
+                self.assert_no_output()
+        finally:
+            stop.set()
+
+    def test_other_errors_still_propagate_unchanged(self):
+        write_inputs(self.inputs)
+
+        def failing(text, limits):
+            raise ReplayError("invalid_dbc", "pretend parse failure")
+        self.assertEqual(self.run_lab(factory=failing)[0], 4)
+
+    def test_absurd_limits_are_usage_errors(self):
+        write_inputs(self.inputs)
+        for flag in ("--max-dbc-kb", "--max-frames-mb", "--max-line-bytes", "--max-rows"):
+            code, stderr = self.run_lab(flag, str(10 ** 16))
+            self.assertEqual(code, 2, (flag, stderr))
+            self.assertNotIn("Traceback", stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
