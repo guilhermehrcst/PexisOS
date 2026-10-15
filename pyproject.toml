@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pexislink"
-version = "0.1.0a0"
+dynamic = ["version"]
 description = "Read-only vehicle telemetry and anomaly detection research"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -14,6 +14,9 @@ dependencies = []
 
 [project.scripts]
 pexislink = "pexislink.cli:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "pexislink.__version__" }
 
 [tool.setuptools.packages.find]
 where = ["src"]
