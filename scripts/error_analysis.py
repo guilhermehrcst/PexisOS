@@ -13,6 +13,7 @@ import statistics
 import sys
 from collections import Counter, defaultdict
 from dataclasses import replace
+from math import comb
 from typing import Sequence
 
 from pexislink.baselines import Verdict, fixed_limit, legacy_v01
@@ -20,7 +21,7 @@ from pexislink.benchmark import BASE, DEV_SEEDS, TEST_SEEDS
 from pexislink.config import DetectorConfig
 from pexislink.detect import RecordAssessment, assess_records
 from pexislink.evaluate import Score, metrics, score
-from pexislink.ingest import parse_rows
+from pexislink.ingest import Record, parse_rows
 from pexislink.reference import build_reference
 from pexislink.synth import Dataset, Event, generate
 from run_confirmation import CONFIRMATION_SEEDS
@@ -182,6 +183,47 @@ def unseen_vehicle_overheats(seeds: Sequence[int]) -> None:
                   f"first 115 C limit alert after {delay}")
 
 
+FAULT_SCENARIOS = ("abrupt_anomaly", "gradual_sensor_drift", "stress_subtle_overheat", "unseen_vehicles_and_regimes",
+                   "data_integrity", "contaminated_reference", "stress_abrupt_noise_x2", "stress_sampling_60s")
+
+
+def detections(data: Dataset, reference: list[Record], observed: list[Record], config: DetectorConfig) -> list[bool]:
+    """Per anomaly event, in ground-truth order: detected as defined in evaluate.score."""
+    model = build_reference(reference, config, use_load=config.use_load)
+    rows = by_vehicle(data, [(a.status, a.direction) for a in assess_records(model, observed)])
+    hits = []
+    for event in (e for e in data.truth.events if e.category == "anomaly"):
+        lo, hi = window(event)
+        hits.append(any(r[2] == "confirmed_anomaly" and (event.direction == 0 or r[3] == event.direction)
+                        for r in rows[event.vehicle_id] if lo <= r[0] <= hi))
+    return hits
+
+
+def sign_test(b: int, c: int) -> float:
+    """Exact two-sided sign test on discordant pairs."""
+    n = b + c
+    return 1.0 if n == 0 else min(1.0, 2 * sum(comb(n, k) for k in range(min(b, c) + 1)) / 2 ** n)
+
+
+def paired_comparisons(seeds: Sequence[int]) -> None:
+    print("7. Paired detection of the same events (exact two-sided sign test on discordant events)")
+    comparisons = [("stress_subtle_overheat", "v0.2-fixed-4C", replace(BASE, fixed_threshold_c=4.0))]
+    comparisons += [(scenario, "v0.2-no-load", replace(BASE, use_load=False)) for scenario in FAULT_SCENARIOS]
+    for scenario, name, other in comparisons:
+        only_v02 = only_other = total_v02 = total_other = events = 0
+        for seed in seeds:
+            data = generate(scenario, seed)
+            reference, observed = list(parse_rows(data.reference_rows)), list(parse_rows(data.observation_rows))
+            for a, b in zip(detections(data, reference, observed, BASE), detections(data, reference, observed, other)):
+                events += 1
+                total_v02 += a
+                total_other += b
+                only_v02 += a and not b
+                only_other += b and not a
+        print(f"   {scenario:28s} v0.2 {total_v02}/{events}  {name} {total_other}/{events}  "
+              f"only v0.2 {only_v02}  only {name} {only_other}  p={sign_test(only_v02, only_other):.4f}")
+
+
 def main(argv: list[str]) -> int:
     seed_sets = {"test": TEST_SEEDS, "confirm": CONFIRMATION_SEEDS}
     if len(argv) > 1 or (argv and argv[0] not in seed_sets):
@@ -195,6 +237,7 @@ def main(argv: list[str]) -> int:
     sampling_rate_diagnostic()
     reference_thresholds(seeds)
     unseen_vehicle_overheats(seeds)
+    paired_comparisons(seeds)
     return 0
 
 

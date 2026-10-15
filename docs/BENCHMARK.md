@@ -7,9 +7,9 @@
 
 Generated reports: [run 2, test seeds](../reports/benchmark-full-test/report.md),
 [confirmation, unused seeds](../reports/benchmark-confirm/report.md) and
-[quick, development seeds](../reports/benchmark-quick/report.md) (regenerated
-byte for byte in CI). Numbers in §2 and §3 come from the `results.json` beside
-each report. Numbers marked *error analysis* come from
+[quick, development seeds](../reports/benchmark-quick/report.md) (CI regenerates
+the quick results on Python 3.11 and compares them byte for byte). Numbers in
+§2 and §3 come from the `results.json` beside each report. Numbers marked *error analysis* come from
 `scripts/error_analysis.py`, which explains results and changes nothing.
 
 ## Run history
@@ -42,7 +42,7 @@ totals add up to.
 | Group | Scenarios | What is injected |
 |---|---|---|
 | Negative control | `normal_operation` | nothing |
-| Faults to detect | `abrupt_anomaly`, `gradual_sensor_drift`, `stress_subtle_overheat` | cooling failure (+12-22 C at idle, weaker at speed) and stuck-open thermostat (-12 to -20 C), to be detected within 24 h; sensor drift of 0.3-1.0 C/day in either sign; overheat of only 3-7 C |
+| Faults to detect | `abrupt_anomaly`, `gradual_sensor_drift`, `stress_subtle_overheat` | cooling failure (+12-22 C at idle, weaker at speed) and stuck-open thermostat (-12 to -20 C at highway speed, 40 % of that at idle), to be detected within 24 h; sensor drift of 0.3-1.0 C/day in either sign; overheat of only 3-7 C |
 | False-positive conditions | `load_change`, `seasonal_shift` | towing (+20-35 % load, legitimately hotter); hot (+15-20 C) or severe-cold (-25 to -30 C) ambient |
 | Sensor and data faults | `unreliable_sensor`, `stress_stuck_flicker`, `data_integrity` | 5 % missing readings, 0.4 % spikes and sentinels, frozen sensors (in one variant flickering by 1 LSB); duplicates, conflicting duplicates, late rows and mixed UTC offsets, with overheats |
 | Assumption violations | `unseen_vehicles_and_regimes`, `contaminated_reference`, `stress_slow_warmup_x0.6`, `stress_slow_warmup_x0.5` | vehicles without a reference, or without highway driving in it; a fault already present in the last 30 % or all of the reference period; warm-up heating at 0.6× and 0.5× |
@@ -96,7 +96,7 @@ rows of the same datasets.
 | Cross-vehicle leakage | References are per vehicle. A vehicle without one never borrows another's. | `test_vehicle_isolation`; H5 |
 | Metric credits coincidence | Direction-aware, horizon-bounded placebo control. | `test_detection_delay_and_placebo`, `test_horizon_and_direction_are_enforced` |
 | Degenerate verdicts | Coverage floor and per-trip conditions, checked against a silent and an always-alarm detector. | `HypothesisCriteriaTests`, `test_oracle_null_and_always_alarm` |
-| Tuning on the test set | Defaults were written before any data existed (ADR §4), and none was tuned after run 1 or run 2 (§7). Seeds were split once. **Weakness:** run 2 reused the test seeds, so a confirmatory run on unused seeds was declared before running (§8). | `test_seed_splits_are_disjoint`; ADR §4, §7, §8 |
+| Tuning on the test set | Defaults were written before any data existed (ADR §4). After run 1, only defect fixes changed them (`stuck_tolerance_c` added, the flatline rule removed, the coolant range widened; ADR §7); none was tuned to results. Seeds were split once. **Weakness:** run 2 reused the test seeds, so a confirmatory run on unused seeds was declared before running (§8). | `test_seed_splits_are_disjoint`; ADR §4, §7, §8 |
 
 ## 2. Run 2 results (test seeds 201-210, reused)
 
@@ -152,10 +152,10 @@ coverage floor of 0.2 and a non-inferiority margin of 0.1 on excess recall.
 
 | Component | v0.2 | Without it | Reading |
 |---|---|---|---|
-| Warm-up suppression (`no-warmup`) | false alerts 0 (≤ 1.99); trips with a false alert 0; coverage 0.43 | 1056 [981, 1129] per 1000 h; trips 0.61; coverage 0.86 | The dominant fix for false alerts. It also keeps warm-up readings out of the reference. *Error analysis:* with it, 71 % of reference contexts sit at the 4 C threshold floor (median threshold 4.0 C); without it, 28 % do (median 5.9 C). That is why `no-warmup` detects 1/50 subtle overheats, against 10/50 for v0.2. |
-| Robust scale (`fixed-4C`) | subtle-overheat recall 0.2 [0.1, 0.31]; seasonal 49 [21.7, 83.6]; slow warm-up ×0.5 62.5 [36.2, 90.6] per 1000 h | 0.32 [0.2, 0.45]; 55.5 [24.6, 93.6]; 98.5 [55.8, 145.6] | In run 2 all three intervals overlap. In the confirmation, subtle-overheat recall is 0.12 [0.04, 0.22] against 0.34 [0.21, 0.48]: on subtle faults the robust scale is **measurably worse** than a plain 4 C threshold, and its false-alert advantage under violated assumptions is not distinguishable (no paired analysis was done). |
+| Warm-up suppression (`no-warmup`) | false alerts 0 (≤ 1.99); trips with a false alert 0; coverage 0.43 | 1056 [981, 1129] per 1000 h; trips 0.61; coverage 0.86 | The dominant fix for false alerts. It also keeps warm-up readings out of the reference. *Error analysis:* with it, 71 % of reference contexts sit at the 4 C threshold floor (median threshold 4.0 C); without it, 28 % do (median 5.9 C). That plausibly explains why `no-warmup` detects only 1/50 subtle overheats, against 10/50 for v0.2 (not tested separately). |
+| Robust scale (`fixed-4C`) | subtle-overheat recall 0.2 [0.1, 0.31]; seasonal 49 [21.7, 83.6]; slow warm-up ×0.5 62.5 [36.2, 90.6] per 1000 h | 0.32 [0.2, 0.45]; 55.5 [24.6, 93.6]; 98.5 [55.8, 145.6] | The marginal intervals overlap in both runs, but a paired comparison of the same events is clear. *Error analysis:* the plain 4 C threshold detected every subtle overheat that v0.2 detected, plus 6 more in run 2 (exact sign test p = 0.03) and 11 more in the confirmation (p = 0.001). On subtle faults the robust scale is **measurably worse**. Its false-alert advantage under violated assumptions was not tested pairwise and is not distinguishable by interval. |
 | Threshold level (`fixed-8C`, v0.1's) | drift recall 1.0 at a median bias of 4.07 C; abrupt 0.9; subtle 0.2; seasonal 49 per 1000 h | drift 0.82 at 7.78 C; abrupt 0.8; subtle 0; seasonal 5.9 | The lower threshold detects more and earlier. It costs false alerts under hot ambient, not in normal operation (0 in both). |
-| Engine-load context (`no-load`) | towing false alerts 0 (≤ 1.99), towing coverage 0.04; recall: abrupt 0.9, unseen 0.35, subtle 0.2, 60 s sampling 0.56 | 46.3 [20.8, 77.6], coverage 0.49; recall 0.92, 0.45, 0.28, 0.76 | It removes towing false alerts by abstaining. In run 2 it cost recall in every fault scenario (more, emptier contexts); the confirmation replicated the cost only at 60 s sampling. The trade is not clearly favourable (finding 7). |
+| Engine-load context (`no-load`) | towing false alerts 0 (≤ 1.99), towing coverage 0.04; recall: abrupt 0.9, unseen 0.35, subtle 0.2, 60 s sampling 0.56 | 46.3 [20.8, 77.6], coverage 0.49; recall 0.92, 0.45, 0.28, 0.76 | It removes towing false alerts by abstaining. Paired, its recall cost is significant only at 60 s sampling, in both runs; elsewhere the differences are a few events and not significant (finding 7). The trade is not clearly favourable. |
 | Stuck-sensor rule (`no-stuck`) | false reassurance 0.011 [0.009, 0.014]; with 1-LSB flicker 0.011 [0.009, 0.013] | 0.399 [0.364, 0.42]; 0.426 [0.408, 0.444] | The rule itself removes most false reassurance. With the rule off, v0.2 still beats v0.1 (0.881), because abstention (warm-up, contexts without a reference) and some alarms also keep frozen readings from being reported `normal`. |
 | Absolute 115 C barrier (`no-absolute`) | identical recall, detections, false alerts and false reassurance in every scenario | identical | **Not exercised.** Alert counts differ by at most 1 and coverage by at most 0.0006. See finding 6. |
 
@@ -165,7 +165,7 @@ coverage floor of 0.2 and a non-inferiority margin of 0.1 on excess recall.
 |---|---|---|
 | Warm-up heating at 0.6× | 2.2 [0, 4.9] false alerts per 1000 h (4 alerts) | Zero false alerts depend on warm-ups ending inside the 900 s window. |
 | Warm-up heating at 0.5× | 62.5 [36.2, 90.6] (116 alerts) | All 116 are below the reference, 20.0-25.4 min into a trip (error analysis). |
-| Twice the sensor noise | 0 false alerts; abrupt excess recall 0.88 [0.78, 0.96]; overheat delay 27.4 min | False alerts are robust to noise. Detection is slower. |
+| Twice the sensor noise | 0 false alerts; abrupt excess recall 0.88 [0.78, 0.96]; overheat delay 27.4 min | False alerts are robust to noise. Detection was slower here (27.4 against 14.0 min), but not in the confirmation (18.4 against 28.3), so the delay effect is not established. |
 | 60 s sampling | recall 0.56 [0.42, 0.69]; coverage 0.31 | A strong degradation (finding 3). |
 | Overheat of only 3-7 C | recall 0.2 [0.1, 0.31] | Weak (finding 4). |
 | Frozen sensor flickering by 1 LSB | false reassurance 0.011 | The tolerance rule covers it. |
@@ -187,15 +187,17 @@ coverage floor of 0.2 and a non-inferiority margin of 0.1 on excess recall.
 3. **v0.2 is fragile to the sampling rate.** At 60 s, recall falls from 0.9 to
    0.56 and coverage from 0.43 to 0.31. Two parameters are in effect counts of
    samples. `min_reference_samples = 30` means 15 min of reference at 30 s but
-   30 min at 60 s. `run_gap_s = 90` tolerates two missing samples at 30 s and
+   30 min at 60 s. `run_gap_s = 90` tolerates up to two missing samples at
+   30 s (with the generator's ±3 s timestamp jitter, about half the time) and
    none at 60 s. *Error analysis* on development seeds 101-105, with no default
    changed: at 60 s, a minimum of 15 samples raises recall from 0.76 to 0.84
    (coverage 0.32 to 0.41), and also allowing a 150 s gap raises it to 0.88. At
    30 s, the same seeds give 0.96. This is the class of defect that F-03 fixed
    for persistence, still present in two parameters.
 4. **Subtle faults are mostly missed.** v0.2 detects 10/50 overheats of 3-7 C
-   (confirmation: 6/50). The `fixed-4C` ablation detects 16/50 (17/50) and
-   `fixed-8C` 0/50 (0/50). v0.1 itself has excess recall 0.27 [0.08, 0.44]
+   (confirmation: 6/50). The `fixed-4C` ablation detects 16/50 (17/50),
+   including every event v0.2 detects (paired sign test p = 0.03 and 0.001),
+   and `fixed-8C` 0/50 (0/50). v0.1 itself has excess recall 0.27 [0.08, 0.44]
    (confirmation: 0.07), because its warm-up-contaminated reference lowers its
    medians, at a cost of 5625 false alerts per 1000 h.
 5. **Abrupt faults that were missed were detected late, not never.** *Error
@@ -219,10 +221,15 @@ coverage floor of 0.2 and a non-inferiority margin of 0.1 on excess recall.
    tests (`test_stuck_high_sensor_still_alarms`,
    `test_readings_above_150_c_are_alarms_not_implausible`).
 7. **The load context buys abstention, not discrimination.** H3 holds only by
-   abstention in both runs. In run 2 the load context also cost recall in every
-   fault scenario (abrupt 0.92 to 0.9, unseen 0.45 to 0.35, subtle 0.28 to 0.2,
-   60 s sampling 0.76 to 0.56); the confirmation replicated a clear cost only at
-   60 s sampling (0.72 to 0.56). Whether to keep it is an open decision.
+   abstention in both runs. In run 2 the load context lowered recall in 5 of 8
+   fault scenarios (abrupt 0.92 to 0.9, noise ×2 0.9 to 0.88, unseen 0.45 to
+   0.35, subtle 0.28 to 0.2, 60 s sampling 0.76 to 0.56) and changed nothing in
+   the other 3. *Error analysis*, pairing the same events: the cost is
+   significant only at 60 s sampling, where 10 events (confirmation: 8) were
+   detected only without the load context (exact sign test p = 0.002 and
+   0.008). Elsewhere no paired difference is significant (p > 0.2), and in the
+   confirmation's `data_integrity` the load context detected one event more.
+   Whether to keep it is an open decision.
    Deciding it on these seeds would be tuning on the test set, so it is a
    recommendation below.
 8. **No capability on vehicles without a reference.** *Error analysis:* v0.2
@@ -250,8 +257,8 @@ coverage floor of 0.2 and a non-inferiority margin of 0.1 on excess recall.
 The protocol, the predicted verdicts and the decision rule were committed and
 pushed before this run (ADR 0001 §8, commit `e1b8b70`). The code was unchanged
 (fingerprint `bbb0bc5f…`). It ran on CPython 3.13.16, while run 2 ran on
-3.11.17; the quick profile is byte-identical across 3.11-3.13, so the version
-does not change results. The first launch failed before Python started
+3.11.17. Results were byte-identical across 3.11, 3.12 and 3.13 for the quick
+profile; for the full profiles that is inferred, not verified. The first launch failed before Python started
 (`/usr/bin/time` is not installed in this container); the relaunch is the only
 run. 3,499,273 evaluation rows, 1,857 unique operating hours, 340 events.
 
@@ -298,12 +305,14 @@ run 2's intervals might suggest. Read single-run numbers with their intervals.
   11.5). No interval is computed for delays, and they are clearly unstable
   across seed sets.
 - Subtle-overheat recall fell from 0.2 to 0.12 [0.04, 0.22], while the plain
-  4 C threshold reached 0.34 [0.21, 0.48]. Here the intervals do not overlap:
-  on subtle faults, the robust scale is measurably worse than a fixed 4 C
-  threshold.
+  4 C threshold reached 0.34 [0.21, 0.48]. The marginal intervals touch, but
+  the paired comparison is clear: the plain threshold detected every event
+  v0.2 detected, plus 11 more (exact sign test p = 0.001).
 - The load context's recall cost replicated only at 60 s sampling (0.56
-  against 0.72 without it) and barely on subtle faults (0.12 against 0.14). On
-  abrupt faults and unseen vehicles, recall was equal (0.98 and 0.45 in both).
+  against 0.72 without it; paired p = 0.008). Elsewhere recall differed by at
+  most one event, in either direction: subtle 0.12 against 0.14, noise ×2 0.88
+  against 0.9, and `data_integrity` 0.87 against 0.83 in favour of the load
+  context; abrupt, drift, unseen and contaminated were equal.
 - Unseen-vehicle recall rose from 0.35 to 0.45. Again, all 10 overheats on
   vehicles without any reference were missed without evidence.
 - Cold-season false alerts fell from 27 to 11 and hot-season alerts rose from
@@ -392,17 +401,25 @@ All runs are CPU-only, on one host.
 | Run | Constraint | Result |
 |---|---|---|
 | Run 2: 10 seeds × 16 scenarios × 10 detectors (3.5 M evaluation and 1.7 M reference rows per detector) | 1 CPU (`taskset -c 0`), 1 GiB address space (`prlimit --as`) | 452 s wall, 447 s CPU, peak RSS 79.2 MB |
-| Confirmation (same protocol, seeds 301-310) | 1 CPU, 1 GiB address space | 460 s wall, 453 s CPU, peak RSS 73.7 MB |
+| Confirmation (same protocol, seeds 301-310) | same | 460 s wall, 453 s CPU, peak RSS 73.7 MB |
 | Quick benchmark (the CI gate) | none | 61 s wall, peak RSS 55.4 MB |
-| `pexislink detect` on 833,854 rows (37 MB of CSV, 200 vehicles) | 1 CPU, 1 GiB | 28 s, peak RSS **58 MB** (171 MB before `io.StringIO`, whose UCS-4 buffer quadrupled memory, was replaced) |
+| `pexislink detect` on 833,854 rows (37 MB of CSV, 200 vehicles), measured in-process with `getrusage` | same | 28 s, peak RSS **58 MB**. The original reader peaked at 171 MB because `io.StringIO` keeps a UCS-4 copy; replacing it gave 77 MB (commit `7d372d7`), and per-line decoding of a byte snapshot gave 58 MB. |
 
 Memory is dominated by the byte snapshots of the input files (capped at
 64 MiB per file), plus per-vehicle state and the reference statistics:
-observations are streamed and never held as records. Throughput, from run 2's stage timings on the same 5.17 M rows: v0.2
-strict parsing runs at about 145,000 rows/s and detection at about 165,000
-rows/s, so about 77,000 rows/s end to end. v0.1 on cleaned input, including its
-own lenient parsing, runs at about 153,000 rows/s. **v0.2 is about 2× slower
-than v0.1**, the price of strict validation and the quality layer.
+observations are streamed and never held as records.
+
+Throughput comes from run 2's stage timings on the same 5.17 M rows, held in
+memory, with no file reading or output. On those rows, v0.2's strict parsing
+runs at about 145,000 rows/s and its detection at about 165,000 rows/s, so
+about 77,000 rows/s for both together. v0.1 on cleaned input, including its
+own lenient parsing, runs at about 153,000 rows/s, so **v0.2 is about 2×
+slower than v0.1**: the price of strict validation and the quality layer. The
+CLI also validates the whole file in a first pass and writes JSON Lines, and
+end to end it runs at about 30,000 rows/s (833,854 rows in 28 s).
+
+Every run in this table except the quick benchmark used
+`taskset -c 0 prlimit --as=1073741824` (one CPU, 1 GiB of address space).
 
 ## 8. Dependency and licence inventory
 
