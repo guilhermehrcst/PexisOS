@@ -512,5 +512,98 @@ class ReviewRegressionTests(PreflightCase):
         self.assertEqual(manifest["files"]["test_labels.csv"]["check"], "metadata_only")
 
 
+class CodexReviewTests(PreflightCase):
+    """Automated review of PR #5 (c0a9724). Each test failed on c0a9724."""
+
+    def mutate_during_read(self, change):
+        original = componentx._check_operational
+
+        def wrapper(source, limits, report, vehicles):
+            original(source, limits, report, vehicles)
+            if "900001" in vehicles:  # only while the training file itself is open
+                change(self.data / TRAIN_OPS)
+
+        return mock.patch.object(componentx, "_check_operational", wrapper)
+
+    def test_same_size_rewrite_during_read_is_detected(self):
+        write_dataset(self.data)
+
+        def rewrite(path):
+            data = path.read_bytes()
+            path.write_bytes(data.replace(b"900001", b"900009"))  # same length, new content
+            stamp = path.stat().st_mtime_ns + 5_000_000_000
+            os.utime(path, ns=(stamp, stamp))
+
+        with self.mutate_during_read(rewrite):
+            report = run_preflight(self.data, PreflightLimits(), ["t"])["files"][TRAIN_OPS]
+        self.assertEqual(report["fatal"]["code"], "file_changed_during_read")
+
+    def test_file_growing_past_the_size_cap_is_bounded(self):
+        write_dataset(self.data)
+        size = len(clean_files()[TRAIN_OPS])
+
+        def grow(path):
+            with open(path, "ab") as handle:
+                handle.write(b"x" * 100_000)
+
+        with self.mutate_during_read(grow):
+            report = run_preflight(self.data, PreflightLimits(max_file_bytes=size + 1000), ["t"])["files"][TRAIN_OPS]
+        self.assertEqual(report["fatal"]["code"], "file_changed_during_read")
+        self.assertEqual(report["sha256"]["status"], "not_checked")
+
+    def test_unwritable_manifest_destination_exits_1(self):
+        write_dataset(self.data)
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            code = main(["dataset", "preflight", "--source", "component-x-v3", "--input-dir", str(self.data),
+                         "--out", str(self.root / "missing" / "m.json")])
+        self.assertEqual(code, 1)
+        self.assertIn("cannot write manifest", stderr.getvalue())
+
+    def test_symlink_rejected_without_o_nofollow(self):
+        write_dataset(self.data, omit=(TRAIN_OPS,))
+        target = self.root / "elsewhere.csv"
+        target.write_bytes(clean_files()[TRAIN_OPS])
+        (self.data / TRAIN_OPS).symlink_to(target)
+        with mock.patch.object(componentx.os, "O_NOFOLLOW", 0):  # as on Windows: flag unavailable
+            report = run_preflight(self.data, PreflightLimits(), ["t"])["files"][TRAIN_OPS]
+        self.assertEqual(report["fatal"]["code"], "symlink_not_followed")
+        self.assertNotIn("sha256", report)
+
+    def test_o_nofollow_still_guards_a_swap_after_lstat(self):
+        """Second, independent barrier: the entry becomes a symlink between lstat and open."""
+        write_dataset(self.data, omit=(TRAIN_OPS,))
+        target = self.root / "elsewhere.csv"
+        target.write_bytes(clean_files()[TRAIN_OPS])
+        (self.data / TRAIN_OPS).symlink_to(target)
+        with mock.patch.object(componentx.os, "lstat", side_effect=lambda path: os.stat(target)):
+            report = run_preflight(self.data, PreflightLimits(), ["t"])["files"][TRAIN_OPS]
+        self.assertEqual(report["fatal"]["code"], "symlink_not_followed")
+
+    def test_split_checks_withheld_when_rows_were_rejected(self):
+        bad = ops(operational_rows((900001,)) + ["920001,not-a-number,1,0,0"])
+        manifest = self.preflight(overrides={TRAIN_OPS: bad})
+        overlap = manifest["split_checks"]["operational_vehicle_overlap_between_splits"]
+        self.assertEqual(overlap["train__test"], "not_checked")
+
+    def test_git_head_resolves_linked_worktree(self):
+        root = self.root / "worktree"
+        (root / "pkg").mkdir(parents=True)
+        gitdir = self.root / "common" / "worktrees" / "wt"
+        gitdir.mkdir(parents=True)
+        (root / ".git").write_text(f"gitdir: {gitdir}\n")
+        (gitdir / "HEAD").write_text("ref: refs/heads/feature\n")
+        (gitdir / "commondir").write_text("../..\n")
+        (self.root / "common" / "refs" / "heads").mkdir(parents=True)
+        (self.root / "common" / "refs" / "heads" / "feature").write_text("a" * 40 + "\n")
+        self.assertEqual(componentx._git_head(root / "pkg"),
+                         {"status": "verified_local", "sha": "a" * 40, "ref": "refs/heads/feature"})
+
+    def test_outcome_header_respects_max_columns(self):
+        data = b"vehicle_id,class_label,synthetic_x,synthetic_y\n920001,0,1,2\n"
+        manifest = self.preflight(overrides={"test_labels.csv": data}, limits=PreflightLimits(max_columns=3))
+        self.assertEqual(manifest["files"]["test_labels.csv"]["fatal"]["code"], "too_many_columns")
+
+
 if __name__ == "__main__":
     unittest.main()

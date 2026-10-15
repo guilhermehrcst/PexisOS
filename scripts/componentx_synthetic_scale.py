@@ -24,12 +24,14 @@ def main() -> None:
     rng = random.Random(args.seed)
     args.out.mkdir(parents=True, exist_ok=True)
     header = ["vehicle_id", "time_step"] + [f"synthetic_f{i:03d}" for i in range(FEATURES)]
-    per_vehicle = max(1, args.rows // args.vehicles)
+    if not 1 <= args.vehicles <= args.rows:
+        parser.error("need 1 <= --vehicles <= --rows")
+    base, extra = divmod(args.rows, args.vehicles)  # exactly --rows rows in total
     with open(args.out / "train_operational_readouts.csv", "w", encoding="ascii", newline="\n") as handle:
         handle.write(",".join(header) + "\n")
         for vehicle in range(args.vehicles):
             time, counters = 0.0, [0.0] * FEATURES
-            for _ in range(per_vehicle):
+            for _ in range(base + (vehicle < extra)):
                 time += rng.choice((2.0, 4.0, 6.2, 9.4))
                 counters = [c + rng.randrange(0, 50) for c in counters]
                 cells = [("" if rng.random() < 0.01 else f"{c:.1f}") for c in counters]

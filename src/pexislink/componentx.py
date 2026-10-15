@@ -219,9 +219,10 @@ class _HashedFile:
     """Single pass over a binary file: SHA-256 and byte count of every byte,
     bounded physical lines, strict UTF-8. Nothing is materialised."""
 
-    def __init__(self, handle: BinaryIO, max_line_bytes: int) -> None:
+    def __init__(self, handle: BinaryIO, max_line_bytes: int, max_bytes: int) -> None:
         self.handle = handle
         self.max_line_bytes = max_line_bytes
+        self.max_bytes = max_bytes  # enforced while reading: the file may grow after fstat
         self.sha = hashlib.sha256()
         self.bytes = 0
         self.lines = 0
@@ -232,6 +233,8 @@ class _HashedFile:
     def _consume(self, raw: bytes) -> None:
         self.sha.update(raw)
         self.bytes += len(raw)
+        if self.bytes > self.max_bytes:
+            raise _FileFailure("file_too_large", None)
 
     def raw_lines(self) -> Iterator[bytes]:
         while True:
@@ -512,7 +515,8 @@ def _check_specifications(source: _HashedFile, limits: PreflightLimits, report: 
     vehicles_out.update(seen)
 
 
-def _check_outcome(source: _HashedFile, expected: ExpectedFile, report: dict[str, Any]) -> None:
+def _check_outcome(source: _HashedFile, expected: ExpectedFile, limits: PreflightLimits,
+                   report: dict[str, Any]) -> None:
     """Metadata only: decode the header line, then hash the rest undecoded.
 
     The first line is accepted as a header only if it names every column the
@@ -528,6 +532,8 @@ def _check_outcome(source: _HashedFile, expected: ExpectedFile, report: dict[str
         names = next(csv.reader([first.decode("utf-8")], strict=True), [])
     except (UnicodeDecodeError, csv.Error):
         raise _FileFailure("invalid_header", 1) from None
+    if len(names) > limits.max_columns:
+        raise _FileFailure("too_many_columns", 1)
     if (not names or any(_COLUMN_NAME.fullmatch(name) is None for name in names) or len(set(names)) != len(names)
             or any(name not in names for name in expected.column_names)):
         raise _FileFailure("unexpected_header", 1)  # names are not reported: they may be data
@@ -552,9 +558,17 @@ def _sniff(handle: BinaryIO) -> str:
 
 
 def _open_regular(path: Path) -> tuple[int, os.stat_result]:
+    """Open a regular file without following a symlink, also where O_NOFOLLOW does
+    not exist (Windows): the entry is lstat'ed first and must be the file opened."""
+    link = os.lstat(path)
+    if stat.S_ISLNK(link.st_mode):
+        raise _FileFailure("symlink_not_followed")
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
     descriptor = os.open(path, flags)
     info = os.fstat(descriptor)
+    if not os.path.samestat(link, info):
+        os.close(descriptor)
+        raise _FileFailure("file_replaced_while_opening")
     if not stat.S_ISREG(info.st_mode):
         os.close(descriptor)
         raise _FileFailure("not_a_regular_file")
@@ -596,7 +610,7 @@ def _read_file(descriptor: int, info: os.stat_result, expected: ExpectedFile, li
             report.update(sha256={"status": "not_checked", "reason": "file larger than max_file_bytes"},
                           fatal={"code": "file_too_large", "line": None})
             return
-        source = _HashedFile(handle, limits.max_line_bytes)
+        source = _HashedFile(handle, limits.max_line_bytes, limits.max_file_bytes)
         try:
             report["content_type"] = _sniff(handle)
             try:
@@ -607,11 +621,23 @@ def _read_file(descriptor: int, info: os.stat_result, expected: ExpectedFile, li
                 elif expected.role == "specifications":
                     _check_specifications(source, limits, report, vehicles_out)
                 else:
-                    _check_outcome(source, expected, report)
+                    _check_outcome(source, expected, limits, report)
             except _FileFailure as failure:
+                if failure.code == "file_too_large":  # size passed the pre-read check, so it grew
+                    report["fatal"] = {"code": "file_changed_during_read", "line": None}
+                    report["sha256"] = {"status": "not_checked",
+                                        "reason": "file grew beyond max_file_bytes while read"}
+                    return
                 report["fatal"] = {"code": failure.code, "line": failure.line}
-            source.drain()
-            changed = source.bytes != info.st_size or os.fstat(handle.fileno()).st_size != info.st_size
+            try:
+                source.drain()
+            except _FileFailure:  # grew beyond max_file_bytes while being read
+                report["fatal"] = {"code": "file_changed_during_read", "line": None}
+                report["sha256"] = {"status": "not_checked", "reason": "file grew beyond max_file_bytes while read"}
+                return
+            after = os.fstat(handle.fileno())
+            changed = source.bytes != info.st_size or any(  # same-size rewrites change mtime/ctime
+                getattr(after, key) != getattr(info, key) for key in ("st_size", "st_mtime_ns", "st_ctime_ns"))
         except OSError as exc:  # e.g. EIO mid-read: this file fails, the run continues
             report["fatal"] = {"code": "read_error", "line": None, "errno": exc.errno}
             report["sha256"] = {"status": "not_checked", "reason": "read error"}
@@ -731,13 +757,22 @@ def _git_head(package: Path) -> dict[str, Any]:
     uncommitted changes; ``package_sources_sha256`` covers the code actually run."""
     for root in (package, *package.parents):
         git = root / ".git"
-        if not git.is_dir():
+        if not git.exists():
             continue
         try:
+            if git.is_file():  # linked worktree or submodule: "gitdir: <path>"
+                pointer = git.read_text(encoding="utf-8").strip()
+                if not pointer.startswith("gitdir: "):
+                    break
+                git = (root / pointer[8:]).resolve()
+            common = git
+            if (git / "commondir").is_file():  # refs of a linked worktree live in the common dir
+                common = (git / (git / "commondir").read_text(encoding="utf-8").strip()).resolve()
             head = (git / "HEAD").read_text(encoding="ascii").strip()
             if not head.startswith("ref: "):
                 return {"status": "verified_local", "sha": head, "ref": None}
             ref = head[5:]
+            git = common
             loose = git / ref
             if loose.is_file():
                 return {"status": "verified_local", "sha": loose.read_text(encoding="ascii").strip(), "ref": ref}
@@ -774,7 +809,7 @@ def run_preflight(input_dir: Path, limits: PreflightLimits, command: list[str]) 
         vehicles: set[str] = set()
         files[name] = check_file(Path(found.path), name, limits, vehicles)
         if expected.role != "outcome":
-            ok = files[name].get("fatal") is None and files[name]["status"] == "verified_local"
+            ok = not files[name]["blocking"] and files[name]["status"] == "verified_local"  # partial sets mislead
             vehicle_sets[f"{expected.split}:{expected.role}"] = vehicles if ok else None
     unrecognized = sum(1 for name in present if name not in EXPECTED)
     blocking = [f"{name}: {reason}" for name, report in files.items() for reason in report.get("blocking", ())]

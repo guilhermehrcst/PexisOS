@@ -197,10 +197,17 @@ def _dataset(argv: list[str]) -> int:
         out = Path(args.out)
         if input_dir.resolve() in out.resolve().parents:
             raise ValueError("refusing to write the manifest inside the input directory (it is read-only input)")
-        manifest_file = _PendingFile(args.out, forbidden=())
     except (ValueError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+    try:
+        manifest_file = _PendingFile(args.out, forbidden=())
+    except ValueError as exc:  # the destination is not a regular file: a usage error
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    except OSError as exc:  # missing or unwritable parent: the manifest cannot be written
+        print(f"error: cannot write manifest: {exc}", file=sys.stderr)
+        return 1
     command = ["pexislink", "dataset", "preflight", "--source", args.source, "--input-dir", "<input-dir>",
                "--out", "<out>", "--max-file-mb", str(args.max_file_mb), "--max-line-bytes",
                str(args.max_line_bytes), "--max-rows", str(args.max_rows), "--max-vehicles",

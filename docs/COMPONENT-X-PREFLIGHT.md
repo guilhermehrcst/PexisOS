@@ -72,7 +72,8 @@ pexislink dataset preflight --source component-x-v3 --input-dir DIR --out MANIFE
 ```
 
 Files are recognised by exact name, top level of `DIR` only. Symbolic links are not
-followed (`symlink_not_followed`). Directories, devices and FIFOs are opened
+followed (`symlink_not_followed`): the entry is `lstat`ed and must be the file then
+opened, and `O_NOFOLLOW` is used where the platform has it (two independent barriers). Directories, devices and FIFOs are opened
 non-blocking only to be identified with `fstat` and are never read
 (`not_a_regular_file`). Every regular file is read once, in a stream; its SHA-256
 covers every byte even when parsing stops early, except when the file exceeds
@@ -102,7 +103,7 @@ compared.
 
 | Situation | Effect |
 |---|---|
-| A file fails structurally (encoding, CSV syntax, header, limits, compression, symlink, not a regular file, read error, changed while read) | that file `check: fail` with `fatal: {code, line}`; it contributes no vehicle set; manifest still written; exit 3 |
+| A file fails structurally (encoding, CSV syntax, header, limits, compression, symlink, not a regular file, read error, changed while read: size, mtime or ctime differ, or it grew past `--max-file-mb`) | that file `check: fail` with `fatal: {code, line}`; it contributes no vehicle set; manifest still written; exit 3 |
 | A row is rejected (field count, vehicle id, `time_step`) | counted with the first 5 line numbers; `blocking: rejected_rows`; exit 3 |
 | A duplicate or backwards `(vehicle_id, time_step)` key | counted; `blocking: time_step_order`; exit 3 |
 | A data file with no data rows | `blocking: no_data_rows`; exit 3 |
@@ -110,8 +111,8 @@ compared.
 | A publisher claim does not match (rows, vehicles, columns, bytes) | listed in `overall.publisher_claim_mismatches`; not blocking, because the claims are unverified |
 | Expected files absent, nothing blocking | `overall: incomplete`, exit 4 |
 | All nine expected files present and clean | `overall: pass`, exit 0 (a structural statement only) |
-| Bad arguments, missing input directory, manifest inside the input directory | exit 2, no manifest |
-| Manifest cannot be written | exit 1 |
+| Bad arguments, missing input directory, manifest inside the input directory, manifest path is not a regular file | exit 2, no manifest |
+| Manifest cannot be written (missing or unwritable parent, full disk) | exit 1 |
 
 Compressed files (gzip, zip, xz, bzip2, zstd) are detected by magic bytes and not
 decompressed (no decompression bombs); decompress them yourself and re-run.
@@ -177,8 +178,10 @@ hash it); run the preflight; only then, with authorisation, the operational file
   will need a documented decision, not a silent filter or sort.
 - `time_step` values beyond 2^53 that are not exactly representable as a float are
   rejected, and numeric literals are limited to 64 characters.
-- The git HEAD does not reveal uncommitted changes; `package_sources_sha256` covers
-  the code actually run.
+- The git HEAD (also resolved through a linked worktree's `gitdir` file) does not
+  reveal uncommitted changes; `package_sources_sha256` covers the code actually run.
+- Change detection compares size, mtime and ctime before and after the read; a
+  writer that restores all three is not detected.
 - Cross-split overlap needs every split's vehicle IDs in memory (bounded by
   `--max-vehicles`; about 34,000 described in total).
 - No checksum from the publisher was found to compare against.
@@ -213,3 +216,19 @@ The reviewer also confirmed: determinism across runs and Python versions, exit c
 FIFO and symlink handling, byte-range arithmetic for the rounded publisher sizes, limit
 boundaries (N allowed, N+1 fails), strict number parsing, and that the manifest cannot be
 written inside the input directory (also via `..` or a symlink).
+
+## 9. Automated review on PR #5
+
+Codex raised 8 findings (all P2) on `c0a9724`. All were real; each fix has a test that
+fails on `c0a9724` (`CodexReviewTests`).
+
+| Finding | Fix |
+|---|---|
+| A same-size rewrite during the read was not detected | size, mtime and ctime compared before and after |
+| A file growing after `fstat` was read without bound | byte cap enforced while streaming; reported as `file_changed_during_read` |
+| An unwritable manifest parent exited 2 instead of the documented 1 | exit 1 (a non-regular destination stays a usage error, exit 2) |
+| Without `O_NOFOLLOW` (Windows) a symlink would be followed | `lstat` check and same-file check before reading; `O_NOFOLLOW` kept as a second barrier, tested separately |
+| A file with rejected rows still contributed its partial vehicle set | any blocking file is withheld from split checks |
+| A linked worktree's `.git` file gave `git_head: not_available` | `gitdir` and `commondir` resolved |
+| `--max-columns` was not applied to outcome headers | applied |
+| The synthetic scale script wrote `vehicles x floor(rows/vehicles)` rows | exactly `--rows` (the measurements above used divisible values and are unaffected) |
