@@ -1,6 +1,8 @@
 """Command-line entry point.
 
     pexislink detect --reference R.csv --observations O.csv [--summary S.json]
+    pexislink synth --scenario NAME --seed N --out DIR
+    pexislink benchmark [--profile quick|dev|full] --out DIR
 
 The v0.1 invocation ``pexislink --baseline B --observations O`` still runs the
 frozen v0.1 rule with its original output, plus a deprecation notice on stderr.
@@ -27,7 +29,7 @@ from .detect import STATUSES, assess_records
 from .ingest import DEFAULT_MAX_FILE_BYTES, DEFAULT_MAX_VEHICLES, InputError, Limits, Record, TelemetryFile
 from .reference import build_reference, check_chronology
 
-COMMANDS = ("detect",)
+COMMANDS = ("detect", "synth", "benchmark")
 NOTICE = ("Research output. An anomaly is a deviation from this vehicle's own reference; "
           "it is not a diagnosed fault, a failure prediction or a safety assessment.")
 
@@ -43,7 +45,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args[0] not in COMMANDS:
         return _legacy_v01(args)
     try:
-        return _detect(args[1:])
+        if args[0] == "detect":
+            return _detect(args[1:])
+        if args[0] == "synth":
+            from .synth import cli_synth
+            return cli_synth(args[1:])
+        from .benchmark import cli_benchmark
+        return cli_benchmark(args[1:])
     except BrokenPipeError:
         devnull = os.open(os.devnull, os.O_WRONLY)
         os.dup2(devnull, sys.stdout.fileno())
