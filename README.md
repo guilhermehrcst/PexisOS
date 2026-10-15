@@ -25,7 +25,7 @@ pexislink synth --scenario abrupt_anomaly --seed 1 --out demo
 pexislink detect --reference demo/reference.csv --observations demo/observations.csv \
     --summary demo/summary.json > demo/assessments.jsonl
 
-# 3. Reproduce the benchmark (quick: ~40 s; full held-out split: ~6 min on one core)
+# 3. Reproduce the benchmark (quick: ~1 min; full held-out split: ~7 min on one core)
 pexislink benchmark --profile quick --out reports/benchmark-quick
 
 # Tests: standard library only
@@ -39,12 +39,14 @@ PYTHONPATH=src python -m unittest discover -s tests -v
 | `normal` | Assessable against this vehicle's reference in this operating context, within threshold, below the absolute limit. "Consistent with its own past", **not** "healthy". |
 | `suspected_anomaly` | A deviation that has not yet lasted `confirm_s` (300 s). |
 | `confirmed_anomaly` | A same-direction deviation sustained for at least 300 s with no evidence gap above 90 s. Not a diagnosis. |
-| `insufficient_evidence` | The data cannot support a claim. `reasons[0]` says why: e.g. `warmup_transient`, `no_reference_vehicle`, `no_reference_context`, `coolant_stuck_suspected`, `coolant_temp_c_implausible`, `duplicate`, `out_of_order`, `unplaceable`. |
+| `insufficient_evidence` | The data cannot support a claim. `reasons[0]` says why: e.g. `warmup_transient`, `no_reference_vehicle`, `no_reference_context`, `coolant_stuck_suspected`, `coolant_temp_c_sentinel`, `coolant_temp_c_implausible`, `duplicate`, `out_of_order`, `reference_overlap`, `unplaceable`. |
 
-Two independent barriers raise anomalies: a **relative** one (|reading − the
-vehicle's reference median| ≥ 4 × robust spread, per operating context, after
-warm-up) and a reference-free **absolute** one (≥ 115 C). Neither can veto the
-other, and neither can assert `normal` without a matching reference. Every line
+Two barriers raise anomalies: a **relative** one (|reading − the vehicle's
+reference median| ≥ 4 × robust spread, floored at 4 C, per operating context,
+after warm-up, on a reading not suspected stuck) and a reference-free
+**absolute** one (≥ 115 C, on any plausible reading). Neither can veto the
+other; only the relative one can assert `normal`, and only with a matching
+reference. Both read the same sensor, so a drifting sensor defeats both. Every line
 carries the evidence used: reference median, delta, threshold, reference sample
 count, and how long the deviation has lasted.
 
@@ -59,17 +61,25 @@ Unknown or duplicate columns are rejected.
 - Numbers: plain ASCII decimals; `nan`, `inf`, `1_000` and non-ASCII digits are rejected.
 - `vehicle_id`: 1-64 characters of `A-Z a-z 0-9 . _ : -`. Use pseudonymous ids;
   never commit real VINs, location traces or private telemetry.
+- Coolant: plausible from -40 to 215 C (the OBD-II PID 0x05 range); exactly
+  -40 and 215 are fault sentinels and are never assessed.
+- A record may not span lines (no quoted newlines): no field of the schema
+  needs one, and allowing it let a stray quote merge thousands of rows.
 - Row-level problems (an empty cell, a bad number) become reasons on that row's
-  assessment; file-level problems (structure, size, chronology) stop the run
+  assessment; file-level problems (structure, encoding, size) stop the run
   with exit code 2 **before any assessment is written**.
-- Limits: 64 MiB per file (`--max-file-mb`), 1024-character lines, 2 million
-  rows, 10,000 vehicles (`--max-vehicles`).
-- Reference timestamps must precede each vehicle's observations (leakage guard).
+- Limits: 64 MiB per file (`--max-file-mb`, 1-4096), 1024-byte lines,
+  2 million rows, 10,000 vehicles (`--max-vehicles`), 100,000 reference contexts.
+- Leakage guard: an observation at or before the last reference sample used for
+  its vehicle is reported as `reference_overlap` and never assessed; stderr
+  says how many rows were affected.
 
 ## Backward compatibility
 
 - `pexislink --baseline B.csv --observations O.csv` still runs the v0.1 rule
-  with byte-identical output, and prints a deprecation notice on stderr.
+  with byte-identical output for inputs within the size limit (64 MiB by
+  default, adjustable with `--max-file-mb`; v0.1 had no limit), and prints a
+  deprecation notice on stderr.
 - `pexislink.analyze`, `Sample`, `read_samples` and `Assessment` keep their
   v0.1 behaviour. They are frozen as the benchmark comparator and have known
   defects ([audit](docs/AUDIT-v0.1.md)). `read_samples` now bounds its input and
