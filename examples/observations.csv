@@ -1,0 +1,4 @@
+timestamp,vehicle_id,engine_rpm,speed_kmh,coolant_temp_c
+2026-10-02T08:00:00Z,demo-001,2000,60,91
+2026-10-02T08:01:00Z,demo-001,2010,61,103
+2026-10-02T08:02:00Z,demo-001,2020,62,104
