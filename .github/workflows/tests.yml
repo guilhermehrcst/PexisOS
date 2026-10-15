@@ -15,21 +15,59 @@ concurrency:
 jobs:
   unit-tests:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 8
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
     steps:
       - name: Check out source
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Check Python syntax
+        run: python -m compileall -q src tests scripts
+      - name: Run unit, property, metamorphic and integration tests (standard library only)
+        env:
+          PYTHONPATH: src
+        run: python -m unittest discover -s tests -v
+      - name: Smoke-test the legacy v0.1 invocation and the v0.2 pipeline
+        env:
+          PYTHONPATH: src
+        run: |
+          python -m pexislink --baseline examples/baseline.csv --observations examples/observations.csv
+          python -m pexislink synth --scenario abrupt_anomaly --seed 1 --out "$RUNNER_TEMP/demo" --reference-days 4 --eval-days 13
+          python -m pexislink detect --reference "$RUNNER_TEMP/demo/reference.csv" \
+            --observations "$RUNNER_TEMP/demo/observations.csv" \
+            --summary "$RUNNER_TEMP/demo/summary.json" > "$RUNNER_TEMP/demo/assessments.jsonl"
+          python -c "import json, sys; print(json.load(open(sys.argv[1]))['observations']['status_counts'])" \
+            "$RUNNER_TEMP/demo/summary.json"
+
+  benchmark-reproducibility:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Check Python syntax
-        run: python -m compileall -q src tests
-      - name: Run unit tests without third-party dependencies
+      - name: Regenerate the quick benchmark and require identical results
         env:
           PYTHONPATH: src
-        run: python -m unittest discover -s tests -v
-      - name: Smoke-test local demo
-        env:
-          PYTHONPATH: src
-        run: python -m pexislink --baseline examples/baseline.csv --observations examples/observations.csv
+        run: |
+          python -m pexislink benchmark --profile quick --out "$RUNNER_TEMP/quick" --quiet
+          if ! cmp -s reports/benchmark-quick/results.json "$RUNNER_TEMP/quick/results.json"; then
+            echo "::error::Benchmark results differ from reports/benchmark-quick/results.json."
+            echo "Regenerate with: PYTHONPATH=src python -m pexislink benchmark --profile quick --out reports/benchmark-quick"
+            diff -u reports/benchmark-quick/results.json "$RUNNER_TEMP/quick/results.json" | head -120
+            exit 1
+          fi
+          cat "$RUNNER_TEMP/quick/provenance.json"

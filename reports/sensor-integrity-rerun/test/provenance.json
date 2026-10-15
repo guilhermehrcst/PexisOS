@@ -1,0 +1,37 @@
+{
+  "pexislink_version": "0.2.0a0",
+  "code_sha256": "4a1d31fce48ba1dd6e78f63e319d79edcd8e67a068a0f305049b1c5dff28fc69",
+  "python": "3.11.17",
+  "implementation": "cpython",
+  "platform": "Linux-6.18.44-fc-v114-x86_64",
+  "wall_time_s": 443.38,
+  "cpu_time_s": 437.72,
+  "peak_rss_mb": 78.9,
+  "seconds_by_stage": {
+    "generate": 57.43,
+    "parse (v0.2 ingest)": 33.47,
+    "fixed-limit-115C": 19.11,
+    "v0.1-as-shipped": 25.16,
+    "v0.1-cleaned": 36.6,
+    "v0.2": 30.45,
+    "v0.2-no-warmup": 31.62,
+    "v0.2-fixed-8C": 29.75,
+    "v0.2-fixed-4C": 29.71,
+    "v0.2-no-load": 28.53,
+    "v0.2-no-absolute": 29.75,
+    "v0.2-no-stuck": 29.09,
+    "metrics and bootstrap": 10.98
+  },
+  "rows_per_second": {
+    "fixed-limit-115C": 270390,
+    "v0.1-as-shipped": 205359,
+    "v0.1-cleaned": 141214,
+    "v0.2": 169703,
+    "v0.2-no-warmup": 163418,
+    "v0.2-fixed-8C": 173733,
+    "v0.2-fixed-4C": 173921,
+    "v0.2-no-load": 181168,
+    "v0.2-no-absolute": 173735,
+    "v0.2-no-stuck": 177669
+  }
+}
