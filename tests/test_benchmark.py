@@ -2,10 +2,14 @@
 
 import io
 import json
+import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 from pexislink.baselines import fixed_limit, legacy_v01
 from pexislink.benchmark import PROFILES, Profile, evaluate_hypotheses, render_markdown, run_benchmark
@@ -118,6 +122,31 @@ class CommandTests(unittest.TestCase):
             self.assertEqual(code, 0)
             with redirect_stdout(io.StringIO()), redirect_stderr(err):
                 self.assertEqual(main(["benchmark", "--scenarios", "nope", "--out", folder]), 2)
+
+    def test_unusable_output_folder_fails_before_running(self):
+        """Review: a bad --out failed only after the whole benchmark, with a traceback."""
+        with tempfile.TemporaryDirectory() as folder:
+            existing_file = Path(folder) / "results"
+            existing_file.write_text("not a folder")
+            err = io.StringIO()
+            with mock.patch("pexislink.benchmark.run_benchmark") as run, \
+                    redirect_stdout(io.StringIO()), redirect_stderr(err):
+                code = main(["benchmark", "--out", str(existing_file)])
+            self.assertEqual(code, 2)
+            run.assert_not_called()
+            self.assertIn("cannot create output folder", err.getvalue())
+
+    def test_provenance_does_not_need_unix_only_modules(self):
+        """Review: the benchmark could not even be imported on Windows (no resource
+        module, no os.uname). Simulated here; not run on Windows."""
+        probe = ("import os, sys; sys.modules['resource'] = None; del os.uname; "
+                 "from pexislink import benchmark; "
+                 "print(benchmark._peak_rss_mb(), benchmark._platform() == sys.platform)")
+        root = Path(__file__).resolve().parents[1]
+        proc = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, timeout=60,
+                              env=dict(os.environ, PYTHONPATH=str(root / "src")))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.split(), ["None", "True"])
 
 
 if __name__ == "__main__":

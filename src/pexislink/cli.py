@@ -194,6 +194,9 @@ class _PendingFile:
 
     def __init__(self, path: str, *, forbidden: Sequence[str | None]) -> None:
         self.target = Path(path)
+        if self.target.exists() and not self.target.is_file():
+            # a directory would fail only at the final rename; a device node (/dev/null) would be replaced
+            raise ValueError(f"summary destination exists and is not a regular file: {path}")
         for other in forbidden:
             if other and self.target.exists() and Path(other).exists() and self.target.samefile(other):
                 raise ValueError(f"refusing to overwrite an input file with the summary: {path}")

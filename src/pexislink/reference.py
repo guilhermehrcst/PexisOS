@@ -75,12 +75,16 @@ def context_key(item: Annotated, config: DetectorConfig, use_load: bool) -> Cont
     if use_load:
         if not item.load_ok or record.engine_load_pct is None:
             return None
-        top_bin = ceil(config.load_range_pct[1] / config.load_bin_pct) - 1  # 100 % joins the top bin
-        load_bin = min(floor(record.engine_load_pct / config.load_bin_pct), top_bin)
+        load_bin = _bin(record.engine_load_pct, config.load_bin_pct, config.load_range_pct[1])
     return (record.vehicle_id,
-            floor(record.engine_rpm / config.rpm_bin),
-            floor(record.speed_kmh / config.speed_bin_kmh),
+            _bin(record.engine_rpm, config.rpm_bin, config.rpm_range[1]),
+            _bin(record.speed_kmh, config.speed_bin_kmh, config.speed_range_kmh[1]),
             load_bin)
+
+
+def _bin(value: float, width: float, maximum: float) -> int:
+    """Bin index; the inclusive range maximum (100 %, 10000 rpm, 300 km/h) joins the top bin."""
+    return min(floor(value / width), ceil(maximum / width) - 1)
 
 
 def robust_stats(values: Iterable[float], scale_floor_c: float) -> ContextStats:
@@ -110,7 +114,7 @@ def build_reference(records: Iterable[Record], config: DetectorConfig, *, use_lo
                     max_contexts: int = DEFAULT_MAX_CONTEXTS) -> ReferenceModel:
     tracker = QualityTracker(config, max_vehicles=max_vehicles)
     values: dict[ContextKey, array[float]] = {}
-    end_us: dict[str, int] = {}
+    last_us: dict[ContextKey, int] = {}
     excluded: Counter[str] = Counter()
     rows = used = 0
     for record in records:
@@ -130,10 +134,13 @@ def build_reference(records: Iterable[Record], config: DetectorConfig, *, use_lo
         series.append(coolant)
         used += 1
         # accepted records are strictly increasing per vehicle, so this is the maximum
-        end_us[key[0]] = record.epoch_us
+        last_us[key] = record.epoch_us
 
     stats = {key: robust_stats(series, config.scale_floor_c)
              for key, series in values.items() if len(series) >= config.min_reference_samples}
+    end_us: dict[str, int] = {}  # leakage boundary: only contexts that contribute to the model
+    for key in stats:
+        end_us[key[0]] = max(end_us.get(key[0], last_us[key]), last_us[key])
     return ReferenceModel(
         config=config,
         use_load=use_load,

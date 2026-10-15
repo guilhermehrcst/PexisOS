@@ -93,8 +93,12 @@ class DetectCommandTests(CliFixture):
         silently overwrite an input file."""
         reference = self.write("ref.csv", csv_text(alternating(0, 80)))
         observed = self.write("obs.csv", csv_text(alternating(DAY, 5)))
-        for destination, message in ((observed, "refusing to overwrite an input"),
-                                     (str(self.dir / "missing" / "s.json"), "No such file")):
+        destinations = [(observed, "refusing to overwrite an input"),
+                        (str(self.dir / "missing" / "s.json"), "No such file"),
+                        (str(self.dir), "not a regular file")]  # review: a directory failed only after output
+        if os.path.exists("/dev/null"):
+            destinations.append(("/dev/null", "not a regular file"))  # never replace a device node
+        for destination, message in destinations:
             code, out, err = self.call("detect", "--reference", reference, "--observations", observed,
                                        "--summary", destination)
             self.assertEqual((code, out), (2, ""), destination)

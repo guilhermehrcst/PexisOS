@@ -13,7 +13,6 @@ import argparse
 import hashlib
 import json
 import os
-import resource
 import sys
 import time
 from collections import defaultdict
@@ -139,21 +138,36 @@ def run_benchmark(profile: Profile, scenarios: Sequence[str] | None = None,
     }
     results["hypotheses"] = evaluate_hypotheses(results["scenarios"])
     seconds["metrics and bootstrap"] = time.perf_counter() - t0
-    usage = resource.getrusage(resource.RUSAGE_SELF)
-    uname = os.uname()  # platform.platform() would spawn `uname -p`
     provenance = {
         "pexislink_version": __version__,
         "code_sha256": code_fingerprint(),
         "python": sys.version.split()[0],
         "implementation": sys.implementation.name,
-        "platform": f"{uname.sysname}-{uname.release}-{uname.machine}",
+        "platform": _platform(),
         "wall_time_s": round(time.perf_counter() - started, 2),
-        "cpu_time_s": round(usage.ru_utime + usage.ru_stime, 2),
-        "peak_rss_mb": round(usage.ru_maxrss / 1024, 1),  # Linux reports KiB
+        "cpu_time_s": round(time.process_time(), 2),
+        "peak_rss_mb": _peak_rss_mb(),
         "seconds_by_stage": {k: round(v, 2) for k, v in seconds.items()},
         "rows_per_second": {k: round(rows_processed[k] / seconds[k]) for k in DETECTORS if seconds[k] > 0},
     }
     return results, provenance
+
+
+def _platform() -> str:
+    uname = getattr(os, "uname", None)  # absent on Windows; platform.platform() would spawn `uname -p`
+    if uname is None:
+        return sys.platform
+    info = uname()
+    return f"{info.sysname}-{info.release}-{info.machine}"
+
+
+def _peak_rss_mb() -> float | None:
+    try:
+        import resource
+    except ImportError:  # Windows: not reported
+        return None
+    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return round(peak / (1024 * 1024 if sys.platform == "darwin" else 1024), 1)  # macOS bytes, Linux KiB
 
 
 def code_fingerprint() -> str:
@@ -407,10 +421,14 @@ def cli_benchmark(argv: Sequence[str]) -> int:
     if unknown:
         print(f"error: unknown scenario(s): {', '.join(unknown)}", file=sys.stderr)
         return 2
+    folder = Path(args.out)
+    try:  # before the run, so a bad destination does not waste it
+        folder.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        print(f"error: cannot create output folder: {exc}", file=sys.stderr)
+        return 2
     progress = None if args.quiet else (lambda message: print(message, file=sys.stderr))
     results, provenance = run_benchmark(PROFILES[args.profile], scenarios, progress)
-    folder = Path(args.out)
-    folder.mkdir(parents=True, exist_ok=True)
     (folder / "results.json").write_text(json.dumps(results, indent=2, sort_keys=True, allow_nan=False) + "\n",
                                          encoding="utf-8")
     (folder / "provenance.json").write_text(json.dumps(provenance, indent=2) + "\n", encoding="utf-8")

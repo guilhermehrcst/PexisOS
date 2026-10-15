@@ -68,6 +68,15 @@ class ExclusionTests(unittest.TestCase):
         ref = model(rows, use_load=True)
         self.assertEqual(list(ref.stats), [("v1", 4, 3, 3)])
 
+    def test_inclusive_rpm_and_speed_maxima_share_the_top_bins(self):
+        """Review: 10000 rpm and 300 km/h are valid but fell into singleton bins."""
+        rows = [row(30 * i, 90 + i % 2, rpm=(9999 if i % 2 else 10000), speed=(299 if i % 2 else 300))
+                for i in range(10)]
+        ref = model(rows)
+        self.assertEqual(list(ref.stats), [("v1", 19, 14, None)])
+        (assessment,) = assess_records(ref, records([row(DAY, 90, rpm=10000, speed=300)]))
+        self.assertEqual(assessment.status, "normal")
+
 
 class ChronologyTests(unittest.TestCase):
     """Leakage boundary: the last reference sample that contributed to the model."""
@@ -91,6 +100,22 @@ class ChronologyTests(unittest.TestCase):
         result = list(assess_records(ref, records(alternating(DAY, 40))))
         self.assertNotIn(("reference_overlap",), {a.reasons for a in result})
         self.assertEqual(result[-1].status, "normal")
+
+    def test_samples_of_discarded_contexts_do_not_move_the_boundary(self):
+        """Review: a lone usable row in a context below the minimum contributes to
+        no statistic, so it must not quarantine later observations."""
+        populated = alternating(0, 10)                       # retained context, ends at t1 = 270 s
+        lone = [row(3000, 90, rpm=4000)]                       # usable row, discarded context, t3
+        ref = model(populated + lone)
+        self.assertEqual(ref.reference_end_us["v1"], records(populated)[-1].epoch_us)
+        (assessment,) = assess_records(ref, records([row(1000, 90)]))   # t1 < t2 < t3
+        self.assertEqual(assessment.status, "normal")
+
+    def test_vehicle_with_only_discarded_contexts_has_no_boundary(self):
+        ref = model([row(30 * i, 90 + i % 2, rpm=500 * i) for i in range(10)])
+        self.assertEqual((ref.vehicles, dict(ref.reference_end_us)), (frozenset(), {}))
+        (assessment,) = assess_records(ref, records([row(60, 90)]))
+        self.assertEqual(assessment.reasons, ("no_reference_vehicle",))
 
     def test_vehicles_without_reference_are_unconstrained(self):
         ref = model(alternating(DAY, 10))
