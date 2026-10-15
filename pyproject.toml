@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=77.0.3"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pexislink"
+version = "0.1.0a0"
+description = "Read-only vehicle telemetry and anomaly detection research"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+keywords = ["telemetry", "anomaly-detection", "vehicle-health"]
+dependencies = []
+
+[project.scripts]
+pexislink = "pexislink.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
