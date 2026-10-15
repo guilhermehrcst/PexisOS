@@ -76,10 +76,12 @@ class CausalityTests(unittest.TestCase):
 
     def test_contaminated_reference_differs_only_for_contaminated_vehicles(self):
         control, dataset = data("normal_operation"), data("contaminated_reference")
+        contaminated = {e.vehicle_id for e in dataset.truth.events if e.kind.startswith("overheat_in_reference")}
+        self.assertEqual(len(contaminated), 4)
         for k in range(8):
             vehicle = f"veh-{k:02d}"
             same = rows_of(dataset.reference_rows, vehicle) == rows_of(control.reference_rows, vehicle)
-            self.assertEqual(same, k > 3, vehicle)
+            self.assertEqual(same, vehicle not in contaminated, vehicle)
 
 
 class PhysicsSanityTests(unittest.TestCase):
@@ -144,9 +146,12 @@ class PhysicsSanityTests(unittest.TestCase):
     def test_unseen_vehicles_have_no_reference_and_unseen_regime_has_no_highway(self):
         dataset = data("unseen_vehicles_and_regimes")
         vehicles = {r[1] for r in dataset.reference_rows}
-        self.assertTrue({"veh-00", "veh-01", "veh-02"}.isdisjoint(vehicles))
-        self.assertEqual(dataset.truth.vehicles_without_reference, {"veh-00", "veh-01", "veh-02"})
-        for vehicle in ("veh-03", "veh-04", "veh-05"):
+        unseen = dataset.truth.vehicles_without_reference
+        self.assertEqual(len(unseen), 3)
+        self.assertTrue(unseen.isdisjoint(vehicles))
+        regime = {e.vehicle_id for e in dataset.truth.events if e.kind == "unseen_regime"}
+        self.assertEqual(len(regime), 3)
+        for vehicle in regime:
             self.assertLess(max(float(r[3]) for r in rows_of(dataset.reference_rows, vehicle)), 80)
             self.assertGreater(max(float(r[3]) for r in rows_of(dataset.observation_rows, vehicle)), 80)
 
@@ -161,9 +166,11 @@ class PhysicsSanityTests(unittest.TestCase):
         """Deliberate assumption violation for hypothesis H6: in severe cold some
         trips are still >= 5 C below the warm level 15 min after the start."""
         slow = 0
-        for k in range(4, 8):  # cold-season vehicles
+        cold = sorted(e.vehicle_id for e in data("seasonal_shift").truth.events if e.kind == "cold_season")
+        self.assertEqual(len(cold), 4)
+        for vehicle in cold:
             segments, current, prev = [], [], None
-            for r in rows_of(data("seasonal_shift").observation_rows, f"veh-{k:02d}"):
+            for r in rows_of(data("seasonal_shift").observation_rows, vehicle):
                 t = epoch(r)
                 if prev is not None and t - prev > 900e6:
                     segments.append(current)
@@ -175,6 +182,31 @@ class PhysicsSanityTests(unittest.TestCase):
             slow += sum(1 for s in segments for t, c in s
                         if 900e6 <= t - s[0][0] < 960e6 and c <= level - 5)
         self.assertGreaterEqual(slow, 5)
+
+    def test_fault_roles_are_drawn_per_seed(self):
+        """Scientific review F3: vehicle ids used to determine the labels in every seed."""
+        faulty = {frozenset(e.vehicle_id for e in generate("abrupt_anomaly", seed, **SMALL).truth.events)
+                  for seed in range(201, 211)}
+        self.assertGreater(len(faulty), 5)
+
+    def test_events_carry_expected_direction_and_horizon(self):
+        directions = {(e.kind, e.direction, e.horizon_us) for e in data("abrupt_anomaly").truth.events}
+        self.assertEqual(directions, {("overheat", 1, DAY_US), ("thermostat_stuck_open", -1, DAY_US)})
+        for e in data("gradual_sensor_drift").truth.events:
+            self.assertEqual((e.direction, e.horizon_us), (1 if e.param("rate_c_per_day") > 0 else -1, None))
+
+    def test_sensitivity_scenarios(self):
+        flicker = data("stress_stuck_flicker")
+        for event in flicker.truth.events:
+            values = {r[4] for r in rows_of(flicker.observation_rows, event.vehicle_id) if epoch(r) >= event.onset_us}
+            self.assertEqual(len(values), 2)
+            self.assertEqual(abs(int(min(values)) - int(max(values))), 1)
+        def first_warm_minute(name):
+            rows = rows_of(data(name).observation_rows, "veh-00")
+            return min((epoch(r) - epoch(rows[0])) / 60e6 for r in rows if int(r[4]) >= 80)
+        self.assertGreater(first_warm_minute("stress_slow_warmup_x0.5"), first_warm_minute("normal_operation"))
+        subtle = {round(e.param("delta_c")) for e in data("stress_subtle_overheat").truth.events}
+        self.assertTrue(subtle <= set(range(3, 8)))
 
     def test_every_scenario_generates(self):
         for name in SCENARIOS:

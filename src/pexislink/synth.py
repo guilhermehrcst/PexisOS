@@ -54,6 +54,10 @@ class Event:
     anomaly       should be detected (recall, delay)
     sensor_fault  should not be reported as 'normal' (false reassurance)
     nuisance      a legitimate or data-quality condition that must not alarm
+
+    ``direction`` is the sign of the deviation the fault produces in the reading
+    (+1 above, -1 below, 0 either); ``horizon_us`` is how soon after onset a
+    detection must occur to count (None: any time before ``end_us``).
     """
 
     vehicle_id: str
@@ -62,9 +66,23 @@ class Event:
     onset_us: int
     end_us: int
     params: tuple[tuple[str, float], ...] = ()
+    direction: int = 0
+    horizon_us: int | None = None
 
     def param(self, name: str) -> float:
         return dict(self.params)[name]
+
+
+def _semantics(kind: str, params: dict[str, float]) -> tuple[int, int | None]:
+    """Expected direction and detection horizon of each injected fault kind.
+    Abrupt faults must be detected within 24 h of onset; gradual drift any time."""
+    if kind == "sensor_drift":
+        return (1 if params["rate_c_per_day"] > 0 else -1), None
+    if kind == "thermostat_stuck_open":
+        return -1, DAY_US
+    if kind.startswith("overheat"):
+        return 1, DAY_US
+    return 0, None
 
 
 @dataclass(frozen=True)
@@ -148,6 +166,7 @@ class Setup:
     thermostat_open: tuple[int, float] | None = None   # (onset_us, delta C at speed)
     drift: tuple[int, float] | None = None             # (onset_us, signed C/day)
     stuck: int | None = None                           # onset_us
+    stuck_flicker: bool = False                        # frozen value flickers by 1 LSB
     payload: tuple[int, float] | None = None           # (onset_us, extra load %)
     eval_ambient_shift_c: float = 0.0
     unreliable: bool = False
@@ -161,6 +180,7 @@ class Options:
     vehicles: int = 8
     dt_s: float = 30.0
     noise_multiplier: float = 1.0
+    heat_multiplier: float = 1.0  # < 1 slows warm-up (sensitivity sweep)
 
 
 @dataclass
@@ -245,7 +265,7 @@ def _simulate(seed: int, k: int, setup: Setup, trips: list[Trip], drive: random.
                 target_temp -= setup.thermostat_open[1] * (0.4 + 0.6 * speed_factor)
             heater = 0.03 if ambient < 5 else 0.0  # cabin heater draws heat in the cold
             if temp < min(p.t_set, target_temp) - 1:
-                heat = p.heat_rate * (0.6 + load / 75) * (0.6 if open_stuck else 1.0)
+                heat = p.heat_rate * opts.heat_multiplier * (0.6 + load / 75) * (0.6 if open_stuck else 1.0)
                 loss = (2e-4 * (2.0 if open_stuck else 1.0) * (temp - ambient) * (1 + speed / 80)) + heater
                 temp = min(temp + (heat - loss) * dt, target_temp + 2.0)  # small thermostat-opening overshoot
             else:
@@ -264,6 +284,8 @@ def _simulate(seed: int, k: int, setup: Setup, trips: list[Trip], drive: random.
                 if stuck_value is None:
                     stuck_value = coolant
                 coolant = stuck_value
+                if setup.stuck_flicker and fault.random() < 0.5:
+                    coolant = str(int(stuck_value) + 1)
             in_eval = now_us >= eval_start_us
             if setup.unreliable and in_eval:
                 u = fault.random()
@@ -389,6 +411,20 @@ def _contaminated(k: int, trips: list[Trip], r: random.Random, s: int, e: int) -
     return Setup(), []
 
 
+def _subtle(k: int, trips: list[Trip], r: random.Random, s: int, e: int) -> Built:
+    if k <= 4:
+        onset, delta = _onset_in_trip(trips, r, s + 2 * DAY_US, s + 12 * DAY_US), r.uniform(3, 7)
+        return Setup(overheat=(onset, delta)), [("overheat", "anomaly", onset, {"delta_c": delta})]
+    return Setup(), []
+
+
+def _stuck_flicker(k: int, trips: list[Trip], r: random.Random, s: int, e: int) -> Built:
+    if k <= 2:
+        onset = _onset_in_trip(trips, r, s + 1 * DAY_US, s + 10 * DAY_US)
+        return Setup(stuck=onset, stuck_flicker=True), [("sensor_stuck_flicker", "sensor_fault", onset, {})]
+    return Setup(), []
+
+
 @dataclass(frozen=True)
 class Scenario:
     name: str
@@ -410,6 +446,10 @@ SCENARIOS: dict[str, Scenario] = {s.name: s for s in (
     Scenario("stress_noise_x2", "Robustness: normal operation with twice the sensor noise.", _normal, Options(noise_multiplier=2.0)),
     Scenario("stress_abrupt_noise_x2", "Robustness: abrupt anomalies with twice the sensor noise.", _abrupt, Options(noise_multiplier=2.0)),
     Scenario("stress_sampling_60s", "Robustness: abrupt anomalies sampled every 60 s instead of 30 s.", _abrupt, Options(dt_s=60.0)),
+    Scenario("stress_slow_warmup_x0.6", "Sensitivity: normal operation with warm-up heating at 0.6x (warm-up longer than the detector's window).", _normal, Options(heat_multiplier=0.6)),
+    Scenario("stress_slow_warmup_x0.5", "Sensitivity: normal operation with warm-up heating at 0.5x.", _normal, Options(heat_multiplier=0.5)),
+    Scenario("stress_stuck_flicker", "Sensitivity: three sensors freeze but flicker by 1 LSB (evades bit-identical stuck rules); no other noise.", _stuck_flicker),
+    Scenario("stress_subtle_overheat", "Sensitivity: five vehicles overheat by only 3-7 C at idle (about the detection threshold).", _subtle),
 )}
 
 
@@ -441,15 +481,22 @@ def generate(scenario: str, seed: int, *, reference_days: int | None = None,
     observed: list[tuple[int, int, int, str, int, Row]] = []  # (arrival, vehicle, position, ...)
     events: list[Event] = []
     no_reference: set[str] = set()
+    # Which vehicle plays which role (faulty or control) is drawn per seed and
+    # scenario, so vehicle ids carry no information about labels. Physics stays
+    # keyed by the vehicle index (paired design across scenarios).
+    roles = list(range(opts.vehicles))
+    _rng(seed, "roles", scenario).shuffle(roles)
 
     for k in range(opts.vehicles):
         vehicle = f"veh-{k:02d}"
         drive = _rng(seed, k, "drive")
         fault = _rng(seed, k, "fault", scenario)
         trips = _schedule(drive, opts.reference_days + opts.eval_days)
-        setup, specs = spec.builder(k, trips, fault, eval_start, eval_end)
+        setup, specs = spec.builder(roles[k], trips, fault, eval_start, eval_end)
         for kind, category, onset, params in specs:
-            events.append(Event(vehicle, kind, category, onset, eval_end, tuple(sorted(params.items()))))
+            direction, horizon = _semantics(kind, params)
+            events.append(Event(vehicle, kind, category, onset, eval_end, tuple(sorted(params.items())),
+                                direction, horizon))
         if not setup.has_reference:
             no_reference.add(vehicle)
         samples = _simulate(seed, k, setup, trips, drive, fault, opts, eval_start)

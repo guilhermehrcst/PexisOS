@@ -59,12 +59,17 @@ class SegmentAndWarmupTests(unittest.TestCase):
 
 class PlausibilityTests(unittest.TestCase):
     def test_range_edges_are_inclusive(self):
-        items = annotate([row(0, -40), row(30, 150), row(60, 90, rpm=0, speed=0, load=0),
+        items = annotate([row(0, -39), row(30, 214), row(60, 90, rpm=0, speed=0, load=0),
                           row(90, 91, rpm=10000, speed=300, load=100)])
         self.assertTrue(all(i.coolant_ok and i.context_ok and i.load_ok for i in items))
 
+    def test_obd_encoding_extremes_are_sentinels(self):
+        """-40 C and 215 C are what OBD-II PID 0x05 reports for a broken sensor."""
+        items = annotate([row(0, -40), row(30, 215)])
+        self.assertTrue(all("coolant_temp_c_sentinel" in i.issues and not i.coolant_plausible for i in items))
+
     def test_out_of_range_values_are_flagged_not_trusted(self):
-        items = annotate([row(0, 215), row(30, -41), row(60, 90, rpm=10001),
+        items = annotate([row(0, 216), row(30, -41), row(60, 90, rpm=10001),
                           row(90, 90, speed=-1), row(120, 91, load=101)])
         self.assertEqual([i.coolant_ok for i in items], [False, False, True, True, True])
         self.assertIn("coolant_temp_c_implausible", items[0].issues)
@@ -73,40 +78,56 @@ class PlausibilityTests(unittest.TestCase):
         self.assertFalse(items[4].load_ok)
         self.assertIn("engine_load_pct_implausible", items[4].issues)
 
+    def test_readings_above_the_old_150_c_ceiling_are_plausible(self):
+        """Code review L1: a real catastrophic overheat must stay assessable."""
+        (item,) = annotate([row(0, 160)])
+        self.assertTrue(item.coolant_plausible)
+
 
 class StuckSensorTests(unittest.TestCase):
+    def flags(self, rows, config=FOCUSED):
+        return ["coolant_stuck_suspected" in i.issues for i in annotate(rows, config)]
+
     def test_identical_across_engine_off_gap(self):
         # 10 minutes driving ending at 90 C, 2 h parked, restart still reading 90 C.
         rows = alternating(0, 20) + [row(600, 90)] + steady(600 + 7200, 6, 90)
-        items = annotate(rows)
-        flags = ["coolant_stuck_suspected" in i.issues for i in items[-6:]]
-        self.assertEqual(flags, [False, False, False, False, True, True])
+        self.assertEqual(self.flags(rows)[-6:], [False, False, False, False, True, True])
 
-    def test_value_change_clears_suspicion(self):
-        rows = alternating(0, 4) + [row(200, 90)] + steady(200 + 7200, 5, 90) + [row(7400 + 300, 75)]
-        items = annotate(rows)
-        self.assertIn("coolant_stuck_suspected", items[-2].issues)
-        self.assertTrue(items[-1].coolant_ok)
+    def test_dithering_frozen_sensor_is_suspected(self):
+        """Code review M2: a frozen sensor flickering by 1 LSB evaded bit-equality rules."""
+        rows = alternating(0, 20) + alternating(7200, 30)  # 90/91 before and after a 2 h park
+        self.assertEqual(self.flags(rows)[20:26], [False, False, False, False, True, True])
+        self.assertTrue(all(self.flags(rows)[24:]))
+
+    def test_single_outlier_does_not_clear_suspicion_but_two_do(self):
+        rows = [row(0, 90)] + steady(7200, 6, 90) + [row(7380, 120), row(7410, 90), row(7440, 90),
+                                                     row(7470, 70), row(7500, 72), row(7530, 90)]
+        flags = self.flags(rows)
+        self.assertTrue(flags[6])                    # suspected
+        self.assertEqual(flags[7:10], [False, True, True])   # a lone outlier, then still suspected
+        self.assertEqual(flags[10:], [False, False, False])  # two deviations clear it
+
+    def test_sentinel_spikes_do_not_reset_the_stuck_state(self):
+        """Scientific review F5: a -40 sentinel used to reset the rule on a frozen sensor."""
+        rows = [row(0, 90)] + steady(7200, 6, 90) + [row(7380, -40)] + steady(7410, 3, 90)
+        self.assertTrue(all(self.flags(rows)[-3:]))
 
     def test_startup_cached_value_is_not_suspicious(self):
         # Some loggers repeat the last value once at start-up, then report real data.
-        # Regression: the flatline rule once counted the 2 h engine-off gap as
-        # "flat time" and flagged the cached sample immediately.
         rows = [row(0, 90), row(7200, 90)] + [row(7230 + 30 * i, 40 + 5 * i) for i in range(10)]
-        self.assertFalse(any("coolant_stuck_suspected" in i.issues for i in annotate(rows)))
+        self.assertFalse(any(self.flags(rows)))
 
     def test_short_gap_does_not_trigger_gap_rule(self):
         rows = [row(0, 90)] + steady(1800, 10, 90)  # 30 min gap < stuck_gap_s
-        self.assertFalse(any("coolant_stuck_suspected" in i.issues for i in annotate(rows)))
+        self.assertFalse(any(self.flags(rows)))
 
-    def test_flatline_rule(self):
-        cfg = DetectorConfig(warmup_s=0, flatline_s=2700)
-        items = annotate(steady(0, 92, 90), cfg)  # 91 intervals * 30 s = 2730 s
-        self.assertEqual([("coolant_stuck_suspected" in i.issues) for i in items].index(True), 90)
+    def test_long_steady_cruise_is_never_suspected(self):
+        """Code review M5: the removed flatline rule flagged 134 of 225 rows of a
+        healthy 105 min cruise at a steady, thermostat-regulated 90 C."""
+        self.assertFalse(any(self.flags(steady(0, 225, 90), DetectorConfig(warmup_s=0))))
 
     def test_realistic_noise_is_never_flagged(self):
-        items = annotate(alternating(0, 400), DetectorConfig(warmup_s=0))
-        self.assertFalse(any("coolant_stuck_suspected" in i.issues for i in items))
+        self.assertFalse(any(self.flags(alternating(0, 400), DetectorConfig(warmup_s=0))))
 
 
 if __name__ == "__main__":

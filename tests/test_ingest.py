@@ -51,7 +51,7 @@ class HeaderTests(FileFixture):
 
     def test_malformed_quoting_is_fatal_with_line_number(self):
         table = TelemetryFile(self.write(HEADER + "\n" + GOOD + "\n" + '2026-10-02T08:01:00Z,"v1,2000,60,90\n'))
-        with self.assertRaisesRegex(InputError, "malformed CSV"):
+        with self.assertRaisesRegex(InputError, "line 3: unterminated quoted field"):
             list(table.records())
 
 
@@ -62,6 +62,7 @@ class RowSyntaxTests(unittest.TestCase):
         rejected = ["2026-10-02T08:00:00", "2026-10-02 08:00:00Z", "20261002T080000Z",
                     "2026-W40-5T08:00Z", "2026-10-02T08Z", "2026-10-02T08:00:60Z",
                     "2026-10-02T08:00:00+14:30", "2026-10-02T08:00:00.1234567Z",
+                    "2026-10-02T08:00:00+05:99", "2026-10-02T08:00:00+13:60", "2026-10-02T08:00:00+24:00",
                     "1969-12-31T23:59:59Z", "2200-01-01T00:00:00Z", "2026-02-30T00:00:00Z",
                     "２026-10-02T08:00:00Z", "2026-10-02T08:00:00Z\n"]
         for text in accepted:
@@ -145,7 +146,7 @@ class LimitTests(FileFixture):
     def test_invalid_utf8_reports_line(self):
         data = (HEADER + "\n" + GOOD + "\n").encode() + b"2026-10-02T08:01:00Z,v\xff,1,1,1\n"
         with self.assertRaisesRegex(InputError, "line 3: invalid UTF-8"):
-            TelemetryFile(self.write(data, binary=True))
+            list(TelemetryFile(self.write(data, binary=True)).records())  # caught by the validation pass
 
     def test_limits_validate_themselves(self):
         for bad in (0, -1, True, 1.5):
@@ -163,7 +164,7 @@ class SnapshotTests(FileFixture):
         self.assertEqual(first[0].vehicle_id, "v1")
         self.assertEqual(len(table.sha256), 64)
 
-    def test_line_endings_and_quoted_newlines_match_csv_module_semantics(self):
+    def test_line_endings_match_csv_module_semantics(self):
         import csv as csv_module
         import io
         from pexislink.ingest import _bounded_lines
@@ -172,17 +173,71 @@ class SnapshotTests(FileFixture):
             HEADER + "\r\n" + GOOD + "\r\n",
             HEADER + "\r" + GOOD + "\r",                 # classic Mac line endings
             HEADER + "\n" + GOOD,                         # no final newline
-            HEADER + "\n" + '2026-10-02T08:00:00Z,"v\n1",2000,60,90\n',  # quoted newline
+            HEADER + "\n" + '"2026-10-02T08:00:00Z","v1",2000,60,90\n',  # quoted fields on one line
             "\n\n" + HEADER + "\n\n" + GOOD + "\n\n",
         ]
         for body in bodies:
             expected = list(csv_module.reader(io.StringIO(body, newline=""), strict=True))
-            actual = list(csv_module.reader(_bounded_lines(body, 1024), strict=True))
+            actual = list(csv_module.reader(_bounded_lines(body.encode(), 1024), strict=True))
             self.assertEqual(actual, expected, repr(body))
+
+    def test_records_may_not_span_lines(self):
+        """Code review M1: a stray quote used to fold 1000 rows into one record."""
+        rows = [GOOD] * 3
+        rows[0] = '2026-10-02T08:00:00Z,"v1,2000,60,90'
+        table = TelemetryFile(self.write(HEADER + "\n" + "\n".join(rows) + "\n"))
+        with self.assertRaisesRegex(InputError, "line 2: unterminated quoted field"):
+            list(table.records())
+        quoted_newline = HEADER + "\n" + '2026-10-02T08:00:00Z,"v\n1",2000,60,90\n'
+        with self.assertRaisesRegex(InputError, "unterminated quoted field"):
+            list(TelemetryFile(self.write(quoted_newline)).records())
 
     def test_line_numbers_are_physical(self):
         table = TelemetryFile(self.write(HEADER + "\n\n" + GOOD + "\n" + "2026-10-02T08:01:00Z,v1,2000,60,91\n"))
         self.assertEqual([r.line for r in table.records()], [3, 4])
+
+
+
+class CodeReviewRegressionTests(FileFixture):
+    """Findings of the independent code review (H1, M4, L3, L7), each reproduced first."""
+
+    def test_wide_header_is_rejected_in_linear_time(self):
+        import time
+        from pexislink import read_samples
+        wide = ",".join(f"c{i}" for i in range(200)) + "\n"
+        with self.assertRaisesRegex(InputError, "too many CSV columns"):
+            TelemetryFile(self.write(wide))
+        legacy = ",".join(["x"] * 80_000) + ",timestamp,vehicle_id,engine_rpm,speed_kmh,coolant_temp_c\n"
+        started = time.perf_counter()
+        with self.assertRaisesRegex(ValueError, "duplicate CSV column"):
+            read_samples(self.write(legacy))
+        self.assertLess(time.perf_counter() - started, 2.0)  # was 25 s with list.count
+
+    def test_invalid_utf8_line_numbers_with_bom_and_cr_line_endings(self):
+        bom = b"\xef\xbb\xbf" + (HEADER + "\n" + GOOD + "\n").encode() + b"\xff\n"
+        with self.assertRaisesRegex(InputError, "line 3: invalid UTF-8"):
+            list(TelemetryFile(self.write(bom, binary=True)).records())
+        cr_only = (HEADER + "\r" + GOOD + "\r").encode() + b"x\xff\r"
+        with self.assertRaisesRegex(InputError, "line 3: invalid UTF-8"):
+            list(TelemetryFile(self.write(cr_only, binary=True)).records())
+
+    def test_leading_blank_lines_before_header(self):
+        self.assertEqual(len(list(TelemetryFile(self.write("\n\r\n" + HEADER + "\n" + GOOD + "\n")).records())), 1)
+
+    def test_duplicate_names_are_escaped_in_diagnostics(self):
+        header = "timestamp,vehicle_id,engine_rpm,speed_kmh,\x1b]0;pwned\x07,\x1b]0;pwned\x07\n"
+        with self.assertRaises(InputError) as caught:
+            TelemetryFile(self.write(header))
+        self.assertNotIn("\x1b", str(caught.exception))
+
+    def test_non_ascii_identifier_is_a_row_issue_not_a_file_error(self):
+        table = TelemetryFile(self.write(HEADER + "\n" + "2026-10-02T08:00:00Z,v\U0001F600,2000,60,90\n"))
+        (record,) = table.records()
+        self.assertIn("vehicle_id_invalid", record.issues)
+
+    def test_regular_file_reads_do_not_preallocate_the_limit(self):
+        table = TelemetryFile(self.write(HEADER + "\n" + GOOD + "\n"), Limits(max_file_bytes=4096 << 20))
+        self.assertEqual(len(list(table.records())), 1)
 
 
 if __name__ == "__main__":

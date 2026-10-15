@@ -49,6 +49,24 @@ class LayeringTests(unittest.TestCase):
             self.assertTrue(imported_modules(module) <= permitted,
                             f"{module} imports {imported_modules(module) - permitted}")
 
+    def test_no_process_is_spawned_at_runtime(self):
+        """Code review L10: platform.platform() used to spawn `uname -p` during a
+        benchmark. Static import checks cannot see that, so spy on process creation."""
+        import io
+        import subprocess
+        from contextlib import redirect_stderr, redirect_stdout
+        from unittest import mock
+
+        from pexislink.benchmark import Profile, run_benchmark
+        from pexislink.cli import main
+
+        examples = PACKAGE.parents[1] / "examples"
+        with mock.patch.object(subprocess.Popen, "__init__", side_effect=AssertionError("spawned a process")), \
+                redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            run_benchmark(Profile("tiny", "dev", (101,), 4, 13), ["normal_operation"])
+            self.assertEqual(main(["detect", "--reference", str(examples / "baseline.csv"),
+                                   "--observations", str(examples / "observations.csv")]), 0)
+
     def test_no_network_or_subprocess_in_the_package(self):
         forbidden = {"socket", "urllib", "http", "subprocess", "requests", "ftplib", "smtplib", "ctypes"}
         for path in PACKAGE.glob("*.py"):

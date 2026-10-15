@@ -10,7 +10,6 @@ from helpers import FOCUSED, alternating, records, row, steady
 
 from pexislink.config import DetectorConfig
 from pexislink.detect import STATUSES, assess_records
-from pexislink.ingest import InputError
 from pexislink.reference import build_reference
 
 DAY = 86_400
@@ -122,13 +121,24 @@ class StuckSensorTests(unittest.TestCase):
         self.assertTrue(all(a.reasons == ("coolant_stuck_suspected",) for a in tail))
         self.assertNotIn("normal", statuses(tail))
 
+    def test_stuck_high_sensor_still_alarms(self):
+        """Code review M5: stuck suspicion used to veto the absolute barrier, so a
+        118 C plateau was silenced. A sensor stuck high must fail towards an alarm."""
+        hot = [row(DAY, 117)] + steady(DAY + 7200, 30, 118)
+        result = run(REFERENCE, hot)
+        self.assertIn("coolant_stuck_suspected", result[-1].quality)
+        self.assertEqual((result[-1].status, result[-1].reasons), ("confirmed_anomaly", ("above_absolute_limit",)))
+
 
 class SensorValidityTests(unittest.TestCase):
     """F-04 counterpart: sentinels are sensor problems, not engine anomalies."""
 
     def test_sentinels_are_insufficient_evidence(self):
-        for sentinel in (215, -41):
+        for sentinel in (215, -40):
             result = run(REFERENCE, steady(DAY, 20, sentinel))
+            self.assertEqual(set(a.reasons for a in result), {("coolant_temp_c_sentinel",)})
+        for impossible in (216, -41):
+            result = run(REFERENCE, steady(DAY, 20, impossible))
             self.assertEqual(set(a.reasons for a in result), {("coolant_temp_c_implausible",)})
 
 
@@ -147,6 +157,12 @@ class AbsoluteBarrierTests(unittest.TestCase):
         self.assertEqual(hot[-1].status, "confirmed_anomaly")
         cool = run(REFERENCE, steady(DAY, 11, 90, vehicle="new"))
         self.assertEqual(set(a.reasons for a in cool), {("no_reference_vehicle",)})
+
+    def test_readings_above_150_c_are_alarms_not_implausible(self):
+        """Code review L1: the barrier used to stop working above 150 C."""
+        result = run(REFERENCE, steady(DAY, 11, 160))
+        self.assertEqual(result[-1].status, "confirmed_anomaly")
+        self.assertIn("above_absolute_limit", result[-1].reasons)
 
     def test_absolute_barrier_works_during_warmup(self):
         result = run(alternating(0, 80), steady(DAY, 11, 118), DetectorConfig())
@@ -173,9 +189,12 @@ class IntegrityTests(unittest.TestCase):
         self.assertEqual(result[9].reasons, ("conflicting_duplicate",))
         self.assertNotIn("confirmed_anomaly", statuses(result))
 
-    def test_leakage_guard_is_fatal(self):
-        with self.assertRaisesRegex(InputError, "leakage"):
-            run(REFERENCE, [row(600, 90)])
+    def test_reference_overlap_is_quarantined_per_record(self):
+        """Code review M3: one overlapping row used to abort the fleet."""
+        result = run(REFERENCE + alternating(0, 40, vehicle="other"),
+                     [row(600, 90), row(DAY, 90, vehicle="other")])
+        self.assertEqual(result[0].reasons, ("reference_overlap",))
+        self.assertEqual(result[1].status, "normal")
 
 
 class OutputContractTests(unittest.TestCase):
@@ -186,6 +205,10 @@ class OutputContractTests(unittest.TestCase):
         self.assertEqual(result[0].reasons, ("unplaceable",))
         self.assertEqual(result[-1].reasons, ("unplaceable",))
         self.assertIn("row_field_count", result[-1].quality)
+
+    def test_direction_property(self):
+        result = run(REFERENCE, [row(DAY, 104), row(DAY + 600, 60), row(DAY + 1200, 91)])
+        self.assertEqual([a.direction for a in result], [1, -1, 0])
 
     def test_json_contract(self):
         (assessment,) = run(REFERENCE, [row(DAY, 91)])

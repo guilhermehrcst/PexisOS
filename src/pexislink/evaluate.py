@@ -1,191 +1,260 @@
 """Offline, event-level evaluation against synthetic ground truth.
 
-This is the only module that reads ``GroundTruth``. Detection code must never
-import it (enforced by tests/test_architecture.py). Detectors are scored only
-from their per-row statuses, aligned 1:1 with the observation rows.
+This is the only module that reads ``GroundTruth``; detection code must never
+import it (enforced by tests/test_architecture.py). Detectors are scored from
+per-row verdicts ``(status, direction)`` aligned 1:1 with observation rows;
+direction is +1 (reading above expectation), -1 (below) or 0 (none).
 
-Definitions (identical for every detector)
-- Alert: within one operating segment (rows no more than ``segment_gap_s``
-  apart), a maximal run of ``confirmed_anomaly`` rows in time order; normal or
-  suspected rows end it, insufficient-evidence rows neither end nor extend it.
-  Each alert onset is what an operator would be notified about.
-- True alert: its onset lies inside an anomaly or sensor-fault interval of the
-  same vehicle; otherwise false.
-- Detected event: at least one confirmed row inside the event interval.
-- Delay: from event onset to the first confirmed row, in wall-clock time and in
-  operating time (time covered by data).
-- Exposure: operating hours covered by observation rows.
-- False reassurance: share of rows inside a sensor-fault interval assessed
+Definitions (identical for every detector; revised after independent review)
+- Expected direction and horizon come from the ground truth: overheat (+1) and
+  stuck-open thermostat (-1) must be detected within 24 h of onset; sensor drift
+  in the sign of its rate, any time before the end of evaluation; sensor faults
+  accept either direction.
+- Detected event: a confirmed anomaly in the expected direction within the
+  horizon. Placebo recall: the same windows and directions applied to every
+  fault-free control vehicle. Excess recall = recall - placebo recall. (Without
+  direction and horizon the placebo saturates for any detector that alarms
+  often, which made the first version of this metric uninformative.)
+- Alert: within one segment (rows no more than ``segment_gap_s`` apart), a
+  maximal run of confirmed rows with the same direction. Normal or suspected
+  rows, or a change of direction, end it; insufficient-evidence rows neither
+  end nor extend it.
+- True alert: onset inside an anomaly or sensor-fault interval of the vehicle,
+  in an accepted direction. Misdirected alert: inside such an interval, in the
+  wrong direction. False alert: outside every such interval.
+- Eligible exposure: operating time outside anomaly and sensor-fault intervals,
+  where a false alert is possible. False alerts are reported per 1000 eligible
+  hours and as the share of eligible trips (segments) with at least one.
+- Coverage: share of rows whose status is not ``insufficient_evidence``; also
+  per nuisance condition, on the rows inside that condition's interval.
+- False reassurance: share of rows inside a sensor-fault interval reported
   ``normal``.
-- Placebo recall: every anomaly interval is copied onto each control vehicle
-  (one without anomaly or sensor-fault events) and "detected" the same way.
-  A detector that alarms often gets high recall by coincidence; recall is only
-  evidence of detection to the extent that it exceeds placebo recall. (Added
-  after the dev split showed v0.1 "detecting" drift at 0.14 C of bias.)
+- Uncertainty: 95 % percentile intervals from a bootstrap over vehicles (the
+  unit within which alerts cluster), 1000 resamples with a fixed seed. For a
+  zero false-alert count the exact Poisson upper bound is also reported; it
+  assumes independent alerts.
 """
 
 from __future__ import annotations
 
-from bisect import bisect_left
+import random
+from bisect import bisect_left, bisect_right
 from collections import defaultdict
-from dataclasses import dataclass, field
-from math import ceil, exp, lgamma, log, sqrt
-from typing import Sequence
+from dataclasses import dataclass, field, fields
+from math import ceil, exp, lgamma, log
+from typing import Callable, Sequence
 
-from .synth import DAY_US, GroundTruth
+from .synth import DAY_US, Event, GroundTruth
 
 US = 1_000_000
-Z95 = 1.959963984540054
+HOUR_US = 3600 * US
+BOOTSTRAP_RESAMPLES = 1000
+BOOTSTRAP_SEED = 20261015
+
+Verdict = tuple[str, int]  # (status, direction)
 
 
 @dataclass
-class Score:
-    """Additive counts so that results can be pooled across seeds."""
+class VehicleTally:
+    """Counts for one vehicle in one dataset: the resampling unit."""
 
-    runs: int = 0
-    failed_runs: int = 0
     rows: int = 0
     assessable: int = 0
     exposure_us: int = 0
+    eligible_exposure_us: int = 0
+    eligible_trips: int = 0
+    trips_with_false_alert: int = 0
     events: int = 0
     detected: int = 0
+    missed_without_evidence: int = 0
     placebo_events: int = 0
     placebo_detected: int = 0
-    missed_without_evidence: int = 0
-    delays_wall_us: list[int] = field(default_factory=list)
-    delays_operating_us: list[int] = field(default_factory=list)
-    drift_bias_c: list[float] = field(default_factory=list)
     alerts: int = 0
     true_alerts: int = 0
+    misdirected_alerts: int = 0
     false_alerts: int = 0
-    false_alerts_in_nuisance: int = 0
     fault_rows: int = 0
     fault_rows_normal: int = 0
     unseen_rows: int = 0
     unseen_rows_normal: int = 0
-    by_kind: dict[str, list[int]] = field(default_factory=dict)  # anomaly kind -> [events, detected]
-    false_alerts_by_kind: dict[str, int] = field(default_factory=dict)  # nuisance kind -> count
+
+
+TALLY_FIELDS = tuple(f.name for f in fields(VehicleTally))
+
+
+@dataclass
+class Score:
+    """Results of one or more runs; ``add`` pools runs across seeds."""
+
+    runs: int = 0
+    failed_runs: int = 0
+    vehicles: list[VehicleTally] = field(default_factory=list)
+    delays_wall_us: dict[str, list[int]] = field(default_factory=dict)       # by anomaly kind
+    delays_operating_us: dict[str, list[int]] = field(default_factory=dict)  # by anomaly kind
+    drift_bias_c: list[float] = field(default_factory=list)
+    by_kind: dict[str, list[int]] = field(default_factory=dict)       # kind -> [events, detected]
+    conditions: dict[str, list[int]] = field(default_factory=dict)    # nuisance kind ->
+    # [rows, assessable rows, false alerts, eligible exposure us]
 
     def add(self, other: Score) -> None:
-        for kind, (events, detected) in other.by_kind.items():
-            pair = self.by_kind.setdefault(kind, [0, 0])
-            pair[0] += events
-            pair[1] += detected
-        for kind, count in other.false_alerts_by_kind.items():
-            self.false_alerts_by_kind[kind] = self.false_alerts_by_kind.get(kind, 0) + count
-        for name, value in vars(other).items():
-            if isinstance(value, list):
-                getattr(self, name).extend(value)
-            elif not isinstance(value, dict):
-                setattr(self, name, getattr(self, name) + value)
+        self.runs += other.runs
+        self.failed_runs += other.failed_runs
+        self.vehicles.extend(other.vehicles)
+        for mine, theirs in ((self.delays_wall_us, other.delays_wall_us),
+                             (self.delays_operating_us, other.delays_operating_us)):
+            for kind, values in theirs.items():
+                mine.setdefault(kind, []).extend(values)
+        self.drift_bias_c.extend(other.drift_bias_c)
+        for target, source, width in ((self.by_kind, other.by_kind, 2), (self.conditions, other.conditions, 4)):
+            for kind, values in source.items():
+                accumulator = target.setdefault(kind, [0] * width)
+                for i, value in enumerate(values):
+                    accumulator[i] += value
 
 
-def score(statuses: Sequence[str] | None, truth: GroundTruth, *, segment_gap_s: float = 900.0) -> Score:
+def _detection_end(event: Event) -> int:
+    if event.horizon_us is None:
+        return event.end_us
+    return min(event.end_us, event.onset_us + event.horizon_us)
+
+
+def _eligible(t: int, fault_windows: tuple[tuple[int, int], ...]) -> bool:
+    """A false alert is possible at ``t`` only outside every fault interval."""
+    return not any(onset <= t <= end for onset, end in fault_windows)
+
+
+def _matches(event: Event, direction: int) -> bool:
+    return event.direction == 0 or direction == event.direction
+
+
+def score(verdicts: Sequence[Verdict] | None, truth: GroundTruth, *, segment_gap_s: float = 900.0) -> Score:
     """Score one detector run on one dataset. ``None`` means the run failed."""
     result = Score(runs=1)
-    if statuses is None:
+    if verdicts is None:
         result.failed_runs = 1
         return result
-    if len(statuses) != len(truth.observation_epochs_us):
-        raise ValueError("statuses must align 1:1 with observation rows")
+    if len(verdicts) != len(truth.observation_epochs_us):
+        raise ValueError("verdicts must align 1:1 with observation rows")
     gap_us = round(segment_gap_s * US)
-    rows_by_vehicle: dict[str, list[tuple[int, int, str]]] = defaultdict(list)
-    for index, (vehicle, epoch_us, status) in enumerate(
-            zip(truth.observation_vehicles, truth.observation_epochs_us, statuses)):
-        rows_by_vehicle[vehicle].append((epoch_us, index, status))
-    events_by_vehicle = defaultdict(list)
+    rows_by_vehicle: dict[str, list[tuple[int, int, str, int]]] = defaultdict(list)
+    for index, (vehicle, epoch_us, (status, direction)) in enumerate(
+            zip(truth.observation_vehicles, truth.observation_epochs_us, verdicts)):
+        rows_by_vehicle[vehicle].append((epoch_us, index, status, direction))
+    events_by_vehicle: dict[str, list[Event]] = defaultdict(list)
     for event in truth.events:
         events_by_vehicle[event.vehicle_id].append(event)
+    faulty = {e.vehicle_id for e in truth.events if e.category != "nuisance"}
+    tallies: dict[str, VehicleTally] = {}
 
-    for vehicle, rows in rows_by_vehicle.items():
+    for vehicle in sorted(rows_by_vehicle):
+        rows = rows_by_vehicle[vehicle]
         rows.sort()
-        times = [t for t, _, _ in rows]
-        # cumulative operating time at each row (gaps beyond a segment do not count)
-        operating = [0] * len(rows)
-        for i in range(1, len(rows)):
-            delta = times[i] - times[i - 1]
-            operating[i] = operating[i - 1] + (delta if delta <= gap_us else 0)
-        result.rows += len(rows)
-        result.exposure_us += operating[-1]
-        result.assessable += sum(1 for _, _, s in rows if s != "insufficient_evidence")
-        if vehicle in truth.vehicles_without_reference:
-            result.unseen_rows += len(rows)
-            result.unseen_rows_normal += sum(1 for _, _, s in rows if s == "normal")
-
+        tally = tallies[vehicle] = VehicleTally()
+        result.vehicles.append(tally)
+        times = [r[0] for r in rows]
+        n = len(rows)
         events = events_by_vehicle.get(vehicle, [])
-        justified = [e for e in events if e.category in ("anomaly", "sensor_fault")]
+        justified = [e for e in events if e.category != "nuisance"]
         nuisance = [e for e in events if e.category == "nuisance"]
+        fault_windows = tuple((e.onset_us, e.end_us) for e in justified)
 
-        in_alert, previous = False, None
-        for t, _, status in rows:
-            if previous is not None and t - previous > gap_us:
-                in_alert = False
-            previous = t
+        operating = [0] * n
+        segment_of = [0] * n
+        for i in range(1, n):
+            delta = times[i] - times[i - 1]
+            if delta > gap_us:
+                segment_of[i] = segment_of[i - 1] + 1
+                operating[i] = operating[i - 1]
+                continue
+            segment_of[i] = segment_of[i - 1]
+            operating[i] = operating[i - 1] + delta
+            if _eligible(times[i - 1], fault_windows) and _eligible(times[i], fault_windows):
+                tally.eligible_exposure_us += delta
+                for e in nuisance:
+                    if e.onset_us <= times[i - 1] and times[i] <= e.end_us:
+                        result.conditions.setdefault(e.kind, [0, 0, 0, 0])[3] += delta
+
+        tally.rows = n
+        tally.assessable = sum(1 for r in rows if r[2] != "insufficient_evidence")
+        tally.exposure_us = operating[-1] if n else 0
+        if vehicle in truth.vehicles_without_reference:
+            tally.unseen_rows = n
+            tally.unseen_rows_normal = sum(1 for r in rows if r[2] == "normal")
+
+        # Alerts and their attribution.
+        false_alert_segments: set[int] = set()
+        current: int | None = None
+        for i, (t, _, status, direction) in enumerate(rows):
+            if i and segment_of[i] != segment_of[i - 1]:
+                current = None
             if status == "confirmed_anomaly":
-                if not in_alert:
-                    result.alerts += 1
-                    if any(e.onset_us <= t <= e.end_us for e in justified):
-                        result.true_alerts += 1
-                    else:
-                        result.false_alerts += 1
+                if current != direction:
+                    tally.alerts += 1
+                    windows = [e for e in justified if e.onset_us <= t <= e.end_us]
+                    if not windows:
+                        tally.false_alerts += 1
+                        false_alert_segments.add(segment_of[i])
                         cause = next((e.kind for e in nuisance if e.onset_us <= t <= e.end_us), None)
                         if cause is not None:
-                            result.false_alerts_in_nuisance += 1
-                            result.false_alerts_by_kind[cause] = result.false_alerts_by_kind.get(cause, 0) + 1
-                in_alert = True
+                            result.conditions.setdefault(cause, [0, 0, 0, 0])[2] += 1
+                    elif any(_matches(e, direction) for e in windows):
+                        tally.true_alerts += 1
+                    else:
+                        tally.misdirected_alerts += 1
+                current = direction
             elif status in ("normal", "suspected_anomaly"):
-                in_alert = False
+                current = None
+        first_of_segment: dict[int, int] = {}
+        for i in range(n):
+            first_of_segment.setdefault(segment_of[i], i)
+        for segment, i in first_of_segment.items():
+            if _eligible(times[i], fault_windows):
+                tally.eligible_trips += 1
+                tally.trips_with_false_alert += segment in false_alert_segments
 
-        for event in events:
-            lo = bisect_left(times, event.onset_us)
-            hi = bisect_left(times, event.end_us + 1)
-            window = rows[lo:hi]
+        for event in nuisance:
+            lo, hi = bisect_left(times, event.onset_us), bisect_right(times, event.end_us)
+            condition = result.conditions.setdefault(event.kind, [0, 0, 0, 0])
+            condition[0] += hi - lo
+            condition[1] += sum(1 for r in rows[lo:hi] if r[2] != "insufficient_evidence")
+
+        for event in justified:
             if event.category == "sensor_fault":
-                result.fault_rows += len(window)
-                result.fault_rows_normal += sum(1 for _, _, s in window if s == "normal")
-            if event.category != "anomaly":
+                lo, hi = bisect_left(times, event.onset_us), bisect_right(times, event.end_us)
+                tally.fault_rows += hi - lo
+                tally.fault_rows_normal += sum(1 for r in rows[lo:hi] if r[2] == "normal")
                 continue
-            result.events += 1
+            lo, hi = bisect_left(times, event.onset_us), bisect_right(times, _detection_end(event))
             pair = result.by_kind.setdefault(event.kind, [0, 0])
             pair[0] += 1
-            hit = next((i for i in range(lo, hi) if rows[i][2] == "confirmed_anomaly"), None)
+            tally.events += 1
+            hit = next((i for i in range(lo, hi)
+                        if rows[i][2] == "confirmed_anomaly" and _matches(event, rows[i][3])), None)
             if hit is None:
-                if all(s == "insufficient_evidence" for _, _, s in window):
-                    result.missed_without_evidence += 1
+                if all(rows[i][2] == "insufficient_evidence" for i in range(lo, hi)):
+                    tally.missed_without_evidence += 1
                 continue
-            result.detected += 1
+            tally.detected += 1
             pair[1] += 1
-            result.delays_wall_us.append(times[hit] - event.onset_us)
-            start = operating[lo] if lo < len(rows) else operating[-1]
-            result.delays_operating_us.append(operating[hit] - start)
+            result.delays_wall_us.setdefault(event.kind, []).append(times[hit] - event.onset_us)
+            result.delays_operating_us.setdefault(event.kind, []).append(operating[hit] - operating[lo])
             if event.kind == "sensor_drift":
                 result.drift_bias_c.append(abs(event.param("rate_c_per_day")) * (times[hit] - event.onset_us) / DAY_US)
 
-    # Placebo control: the same anomaly windows on vehicles that have no fault.
-    faulty = {e.vehicle_id for e in truth.events if e.category in ("anomaly", "sensor_fault")}
-    controls = [rows_by_vehicle[v] for v in sorted(rows_by_vehicle) if v not in faulty]
+    # Placebo control: identical windows and directions on fault-free vehicles.
+    controls = [v for v in sorted(rows_by_vehicle) if v not in faulty]
     for event in (e for e in truth.events if e.category == "anomaly"):
-        for rows in controls:
-            result.placebo_events += 1
-            lo = bisect_left(rows, (event.onset_us,))
-            hi = bisect_left(rows, (event.end_us + 1,))
-            if any(status == "confirmed_anomaly" for _, _, status in rows[lo:hi]):
-                result.placebo_detected += 1
+        end = _detection_end(event)
+        for vehicle in controls:
+            rows, tally = rows_by_vehicle[vehicle], tallies[vehicle]
+            tally.placebo_events += 1
+            lo, hi = bisect_left(rows, (event.onset_us,)), bisect_left(rows, (end + 1,))
+            if any(r[2] == "confirmed_anomaly" and _matches(event, r[3]) for r in rows[lo:hi]):
+                tally.placebo_detected += 1
     return result
 
 
 # ------------------------------------------------------------- statistics
-
-def wilson(successes: int, trials: int, z: float = Z95) -> tuple[float, float] | None:
-    """Wilson score interval for a binomial proportion; None if no trials."""
-    if trials <= 0:
-        return None
-    p = successes / trials
-    denominator = 1 + z * z / trials
-    centre = (p + z * z / (2 * trials)) / denominator
-    half = z * sqrt(p * (1 - p) / trials + z * z / (4 * trials * trials)) / denominator
-    return max(0.0, centre - half), min(1.0, centre + half)
-
 
 def _poisson_cdf(k: int, mean: float) -> float:
     if mean <= 0:
@@ -229,46 +298,115 @@ def quantile(values: Sequence[float], q: float) -> float | None:
     return float(ordered[min(rank, len(ordered)) - 1])
 
 
+def _ratio(numerator: float, denominator: float) -> float | None:
+    return numerator / denominator if denominator else None
+
+
+def _rate_per_1000h(count: float, exposure_us: float) -> float | None:
+    return 1000 * count / (exposure_us / HOUR_US) if exposure_us else None
+
+
+def _excess(s: dict[str, int]) -> float | None:
+    recall, placebo = _ratio(s["detected"], s["events"]), _ratio(s["placebo_detected"], s["placebo_events"])
+    return None if recall is None or placebo is None else recall - placebo
+
+
+_STATISTICS: dict[str, Callable[[dict[str, int]], float | None]] = {
+    "recall": lambda s: _ratio(s["detected"], s["events"]),
+    "placebo_recall": lambda s: _ratio(s["placebo_detected"], s["placebo_events"]),
+    "excess_recall": _excess,
+    "precision": lambda s: _ratio(s["true_alerts"], s["alerts"]),
+    "false_alerts_per_1000h": lambda s: _rate_per_1000h(s["false_alerts"], s["eligible_exposure_us"]),
+    "trips_with_false_alert": lambda s: _ratio(s["trips_with_false_alert"], s["eligible_trips"]),
+    "false_reassurance": lambda s: _ratio(s["fault_rows_normal"], s["fault_rows"]),
+    "coverage": lambda s: _ratio(s["assessable"], s["rows"]),
+}
+
+
+def bootstrap_intervals(tallies: Sequence[VehicleTally]) -> dict[str, list[float] | None]:
+    """95 % percentile intervals, resampling vehicles with replacement."""
+    if not tallies:
+        return {name: None for name in _STATISTICS}
+    columns = {name: [getattr(t, name) for t in tallies] for name in TALLY_FIELDS}
+    rng = random.Random(BOOTSTRAP_SEED)
+    count = len(tallies)
+    values: dict[str, list[float]] = {name: [] for name in _STATISTICS}
+    for _ in range(BOOTSTRAP_RESAMPLES):
+        picks = [rng.randrange(count) for _ in range(count)]
+        sums = {name: sum(column[i] for i in picks) for name, column in columns.items()}
+        for name, statistic in _STATISTICS.items():
+            value = statistic(sums)
+            if value is not None:
+                values[name].append(value)
+    out: dict[str, list[float] | None] = {}
+    for name, samples in values.items():
+        if len(samples) < BOOTSTRAP_RESAMPLES // 2:
+            out[name] = None
+            continue
+        low, high = quantile(samples, 0.025), quantile(samples, 0.975)
+        out[name] = None if low is None or high is None else [round(low, 4), round(high, 4)]
+    return out
+
+
 def metrics(total: Score) -> dict[str, object]:
     """Derived metrics; None means not applicable (never a made-up number)."""
-    exposure_h = total.exposure_us / US / 3600
-    def rate(count: int) -> float | None:
-        return round(1000 * count / exposure_h, 3) if exposure_h > 0 else None
-    def ci(pair: tuple[float, float] | None, scale: float = 1.0) -> list[float] | None:
-        return None if pair is None else [round(pair[0] * scale, 4), round(pair[1] * scale, 4)]
-    fa_low, fa_high = poisson_interval(total.false_alerts)
+    sums = {name: sum(getattr(t, name) for t in total.vehicles) for name in TALLY_FIELDS}
+    point = {name: statistic(sums) for name, statistic in _STATISTICS.items()}
+    intervals = bootstrap_intervals(total.vehicles)
+
+    def r(value: float | None, digits: int = 4) -> float | None:
+        return None if value is None else round(value, digits)
+
+    zero_bound = None
+    if sums["false_alerts"] == 0 and sums["eligible_exposure_us"]:
+        zero_bound = round(1000 * poisson_interval(0)[1] / (sums["eligible_exposure_us"] / HOUR_US), 3)
+    delays = {}
+    for kind in sorted(total.delays_operating_us):
+        operating, wall = total.delays_operating_us[kind], total.delays_wall_us[kind]
+        delays[kind] = {"n": len(operating),
+                        "median_operating_min": _minutes(median(operating)),
+                        "p90_operating_min": _minutes(quantile(operating, 0.9)),
+                        "max_operating_min": _minutes(max(operating)),
+                        "median_wall_h": r((median(wall) or 0) / HOUR_US, 3)}
     return {
         "runs": total.runs,
         "failed_runs": total.failed_runs,
-        "rows": total.rows,
-        "coverage": round(total.assessable / total.rows, 4) if total.rows else None,
-        "exposure_h": round(exposure_h, 2),
-        "anomaly_events": total.events,
-        "detected": total.detected,
-        "recall": round(total.detected / total.events, 4) if total.events else None,
-        "recall_ci95": ci(wilson(total.detected, total.events)),
-        "placebo_recall": round(total.placebo_detected / total.placebo_events, 4) if total.placebo_events else None,
-        "placebo_recall_ci95": ci(wilson(total.placebo_detected, total.placebo_events)),
-        "excess_recall": (round(total.detected / total.events - total.placebo_detected / total.placebo_events, 4)
-                          if total.events and total.placebo_events else None),
-        "missed_without_evidence": total.missed_without_evidence if total.events else None,
-        "alerts": total.alerts,
-        "true_alerts": total.true_alerts,
-        "false_alerts": total.false_alerts,
-        "false_alerts_in_nuisance": total.false_alerts_in_nuisance,
-        "precision": round(total.true_alerts / total.alerts, 4) if total.alerts else None,
-        "precision_ci95": ci(wilson(total.true_alerts, total.alerts)),
-        "false_alerts_per_1000h": rate(total.false_alerts),
-        "false_alerts_per_1000h_ci95": ([round(1000 * fa_low / exposure_h, 3), round(1000 * fa_high / exposure_h, 3)]
-                                         if exposure_h > 0 else None),
-        "median_delay_operating_min": _minutes(median(total.delays_operating_us)),
-        "p90_delay_operating_min": _minutes(quantile(total.delays_operating_us, 0.9)),
-        "median_delay_wall_h": (round(m / US / 3600, 3) if (m := median(total.delays_wall_us)) is not None else None),
-        "median_drift_bias_at_detection_c": (round(b, 3) if (b := median(total.drift_bias_c)) is not None else None),
-        "false_reassurance": round(total.fault_rows_normal / total.fault_rows, 4) if total.fault_rows else None,
-        "normal_rows_on_unseen_vehicles": total.unseen_rows_normal if total.unseen_rows else None,
+        "vehicles": len(total.vehicles),
+        "rows": sums["rows"],
+        "coverage": r(point["coverage"]),
+        "exposure_h": round(sums["exposure_us"] / HOUR_US, 2),
+        "eligible_exposure_h": round(sums["eligible_exposure_us"] / HOUR_US, 2),
+        "anomaly_events": sums["events"],
+        "detected": sums["detected"],
+        "recall": r(point["recall"]),
+        "recall_ci95": intervals["recall"],
+        "placebo_recall": r(point["placebo_recall"]),
+        "placebo_recall_ci95": intervals["placebo_recall"],
+        "excess_recall": r(point["excess_recall"]),
+        "excess_recall_ci95": intervals["excess_recall"],
+        "missed_without_evidence": sums["missed_without_evidence"] if sums["events"] else None,
+        "alerts": sums["alerts"],
+        "true_alerts": sums["true_alerts"],
+        "misdirected_alerts": sums["misdirected_alerts"],
+        "false_alerts": sums["false_alerts"],
+        "precision": r(point["precision"]),
+        "precision_ci95": intervals["precision"],
+        "false_alerts_per_1000h": r(point["false_alerts_per_1000h"], 3),
+        "false_alerts_per_1000h_ci95": intervals["false_alerts_per_1000h"],
+        "false_alerts_zero_count_upper_per_1000h": zero_bound,
+        "trips_with_false_alert": r(point["trips_with_false_alert"]),
+        "trips_with_false_alert_ci95": intervals["trips_with_false_alert"],
+        "false_reassurance": r(point["false_reassurance"]),
+        "false_reassurance_ci95": intervals["false_reassurance"],
+        "normal_rows_on_unseen_vehicles": sums["unseen_rows_normal"] if sums["unseen_rows"] else None,
+        "delays_by_kind": delays,
+        "median_drift_bias_at_detection_c": r(median(total.drift_bias_c), 3),
         "recall_by_kind": {kind: f"{d}/{e}" for kind, (e, d) in sorted(total.by_kind.items())},
-        "false_alerts_by_condition": dict(sorted(total.false_alerts_by_kind.items())),
+        "conditions": {kind: {"rows": c[0],
+                              "coverage": r(_ratio(c[1], c[0])),
+                              "false_alerts": c[2],
+                              "false_alerts_per_1000h": r(_rate_per_1000h(c[2], c[3]), 3)}
+                       for kind, c in sorted(total.conditions.items())},
     }
 
 

@@ -7,19 +7,26 @@ under evaluation cannot leak into its own reference.
 
 Only accepted, warm, plausible, non-stuck samples below the absolute limit are
 used: the reference must describe regulated operation, not transients.
+
+Leakage boundary: ``reference_end_us`` is, per vehicle, the instant of the last
+sample that contributed to the statistics. Information can only flow from
+those samples, so an observation must come strictly after it to be assessed;
+earlier observations are quarantined by the detector (``reference_overlap``).
+A glitched reference row that was excluded (e.g. a far-future timestamp)
+therefore cannot deny a vehicle all of its observations.
 """
 
 from __future__ import annotations
 
 from array import array
-from collections import Counter, defaultdict
+from collections import Counter
 from dataclasses import dataclass, field
 from math import ceil, floor
 from statistics import median
 from typing import Iterable, Mapping
 
 from .config import DetectorConfig
-from .ingest import DEFAULT_MAX_VEHICLES, InputError, Record
+from .ingest import DEFAULT_MAX_CONTEXTS, DEFAULT_MAX_VEHICLES, InputError, Record
 from .quality import Annotated, QualityTracker
 
 # (vehicle_id, rpm bin, speed bin, load bin or None when load is not used)
@@ -41,7 +48,7 @@ class ReferenceModel:
     use_load: bool
     stats: Mapping[ContextKey, ContextStats]
     vehicles: frozenset[str]                # vehicles with at least one usable context
-    last_reference_us: Mapping[str, int]    # latest reference instant per vehicle (leakage guard)
+    reference_end_us: Mapping[str, int]     # last contributing sample per vehicle (leakage boundary)
     rows: int = 0
     used: int = 0
     excluded: Mapping[str, int] = field(default_factory=dict)
@@ -99,27 +106,31 @@ def _exclusion(item: Annotated, config: DetectorConfig, key: ContextKey | None) 
 
 
 def build_reference(records: Iterable[Record], config: DetectorConfig, *, use_load: bool,
-                    max_vehicles: int = DEFAULT_MAX_VEHICLES) -> ReferenceModel:
+                    max_vehicles: int = DEFAULT_MAX_VEHICLES,
+                    max_contexts: int = DEFAULT_MAX_CONTEXTS) -> ReferenceModel:
     tracker = QualityTracker(config, max_vehicles=max_vehicles)
-    values: defaultdict[ContextKey, array[float]] = defaultdict(lambda: array("d"))
-    last_us: dict[str, int] = {}
+    values: dict[ContextKey, array[float]] = {}
+    end_us: dict[str, int] = {}
     excluded: Counter[str] = Counter()
     rows = used = 0
     for record in records:
         rows += 1
         item = tracker.annotate(record)
-        if record.vehicle_id is not None and record.epoch_us is not None:
-            previous = last_us.get(record.vehicle_id)
-            if previous is None or record.epoch_us > previous:
-                last_us[record.vehicle_id] = record.epoch_us
         key = context_key(item, config, use_load)
         reason = _exclusion(item, config, key)
         coolant = record.coolant_temp_c
-        if reason is None and key is not None and coolant is not None:
-            values[key].append(coolant)
-            used += 1
-        else:
+        if reason is not None or key is None or coolant is None or record.epoch_us is None:
             excluded[reason or "context_unusable"] += 1
+            continue
+        series = values.get(key)
+        if series is None:
+            if len(values) >= max_contexts:
+                raise InputError(f"line {record.line}: more than {max_contexts} reference contexts")
+            series = values[key] = array("d")
+        series.append(coolant)
+        used += 1
+        # accepted records are strictly increasing per vehicle, so this is the maximum
+        end_us[key[0]] = record.epoch_us
 
     stats = {key: robust_stats(series, config.scale_floor_c)
              for key, series in values.items() if len(series) >= config.min_reference_samples}
@@ -128,21 +139,8 @@ def build_reference(records: Iterable[Record], config: DetectorConfig, *, use_lo
         use_load=use_load,
         stats=stats,
         vehicles=frozenset(key[0] for key in stats),
-        last_reference_us=last_us,
+        reference_end_us=end_us,
         rows=rows,
         used=used,
         excluded=dict(excluded),
     )
-
-
-def check_chronology(model: ReferenceModel, records: Iterable[Record]) -> None:
-    """Leakage guard: every observation must be strictly after its vehicle's
-    reference period. Raises ``InputError`` on the first violation."""
-    for record in records:
-        if record.vehicle_id is None or record.epoch_us is None:
-            continue
-        end = model.last_reference_us.get(record.vehicle_id)
-        if end is not None and record.epoch_us <= end:
-            raise InputError(
-                f"line {record.line}: observation is not after the end of vehicle "
-                f"{record.vehicle_id!r}'s reference period (chronological leakage guard)")

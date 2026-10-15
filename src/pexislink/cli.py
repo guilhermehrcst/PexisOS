@@ -7,8 +7,10 @@
 The v0.1 invocation ``pexislink --baseline B --observations O`` still runs the
 frozen v0.1 rule with its original output, plus a deprecation notice on stderr.
 
-Exit codes: 0 success, 2 invalid input or usage (no assessments are emitted for
-an invalid ``detect`` run), 1 output pipe closed early.
+Exit codes: 0 success; 2 invalid input or usage (``detect`` then emits no
+assessments: the input is fully validated and the summary destination is
+prepared before the first line is written); 1 output could not be written
+(for example, the pipe was closed early).
 """
 
 from __future__ import annotations
@@ -20,18 +22,19 @@ import sys
 import tempfile
 from collections import Counter
 from pathlib import Path
-from typing import Any, Iterator, Sequence
+from typing import IO, Any, Iterator, Sequence
 
 from . import __version__
 from .config import DetectorConfig
 from .core import analyze, read_samples
 from .detect import STATUSES, assess_records
 from .ingest import DEFAULT_MAX_FILE_BYTES, DEFAULT_MAX_VEHICLES, InputError, Limits, Record, TelemetryFile
-from .reference import build_reference, check_chronology
+from .reference import build_reference
 
 COMMANDS = ("detect", "synth", "benchmark")
 NOTICE = ("Research output. An anomaly is a deviation from this vehicle's own reference; "
           "it is not a diagnosed fault, a failure prediction or a safety assessment.")
+MAX_FILE_MB = 4096
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -42,9 +45,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args[0] == "--version":
         print(__version__)
         return 0
-    if args[0] not in COMMANDS:
-        return _legacy_v01(args)
     try:
+        if args[0] not in COMMANDS:
+            return _legacy_v01(args)
         if args[0] == "detect":
             return _detect(args[1:])
         if args[0] == "synth":
@@ -58,6 +61,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
 
 
+def _file_mb(text: str) -> int:
+    value = int(text)
+    if not 1 <= value <= MAX_FILE_MB:
+        raise argparse.ArgumentTypeError(f"must be between 1 and {MAX_FILE_MB}")
+    return value
+
+
+def _vehicles(text: str) -> int:
+    value = int(text)
+    if not 1 <= value <= 1_000_000:
+        raise argparse.ArgumentTypeError("must be between 1 and 1000000")
+    return value
+
+
 def _detect(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="pexislink detect",
                                      description="v0.2 read-only offline anomaly assessment (JSON Lines).")
@@ -65,9 +82,10 @@ def _detect(argv: list[str]) -> int:
     parser.add_argument("--observations", required=True, help="later CSV to assess")
     parser.add_argument("--config", help="JSON file overriding DetectorConfig defaults (closed schema)")
     parser.add_argument("--summary", help="write a JSON run summary (provenance, counts) to this path")
-    parser.add_argument("--max-file-mb", type=int, default=DEFAULT_MAX_FILE_BYTES >> 20)
-    parser.add_argument("--max-vehicles", type=int, default=DEFAULT_MAX_VEHICLES)
+    parser.add_argument("--max-file-mb", type=_file_mb, default=DEFAULT_MAX_FILE_BYTES >> 20)
+    parser.add_argument("--max-vehicles", type=_vehicles, default=DEFAULT_MAX_VEHICLES)
     args = parser.parse_args(argv)
+    summary_file: _PendingFile | None = None
     try:
         config = DetectorConfig.from_json_file(args.config) if args.config else DetectorConfig()
         limits = Limits(max_file_bytes=args.max_file_mb << 20, max_vehicles=args.max_vehicles)
@@ -75,47 +93,68 @@ def _detect(argv: list[str]) -> int:
         observations = TelemetryFile(args.observations, limits)
         use_load = config.use_load and reference.has_load and observations.has_load
         model = build_reference(reference.records(), config, use_load=use_load,
-                                max_vehicles=limits.max_vehicles)
-        # Validation pass: structure, limits and chronology are checked for the whole
-        # file before the first assessment is written (fail closed, no partial output).
-        check_chronology(model, _vehicle_limited(observations.records(), limits.max_vehicles))
-    except (ValueError, OSError) as exc:
+                                max_vehicles=limits.max_vehicles, max_contexts=limits.max_contexts)
+        # Validation pass: structure and limits are checked for the whole file before
+        # the first assessment is written (fail closed, no partial output).
+        for _ in _vehicle_limited(observations.records(), limits.max_vehicles):
+            pass
+        if args.summary:
+            summary_file = _PendingFile(args.summary, forbidden=(args.reference, args.observations, args.config))
+    except (ValueError, OSError, RecursionError, OverflowError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
     status_counts: Counter[str] = Counter({status: 0 for status in STATUSES})
     reason_counts: Counter[str] = Counter()
     quality_counts: Counter[str] = Counter()
-    write = sys.stdout.write
-    for assessment in assess_records(model, observations.records(), max_vehicles=limits.max_vehicles):
-        status_counts[assessment.status] += 1
-        reason_counts.update(assessment.reasons)
-        quality_counts.update(assessment.quality)
-        write(json.dumps(assessment.to_json(), separators=(",", ":")) + "\n")
-    sys.stdout.flush()
+    try:
+        write = sys.stdout.write
+        for assessment in assess_records(model, observations.records(), max_vehicles=limits.max_vehicles):
+            status_counts[assessment.status] += 1
+            reason_counts.update(assessment.reasons)
+            quality_counts.update(assessment.quality)
+            write(json.dumps(assessment.to_json(), separators=(",", ":"), allow_nan=False) + "\n")
+        sys.stdout.flush()
+    except BrokenPipeError:
+        raise
+    except OSError as exc:
+        if summary_file:
+            summary_file.discard()
+        print(f"error: cannot write assessments: {exc}", file=sys.stderr)
+        return 1
 
-    if args.summary:
-        summary = {
-            "schema": "pexislink.summary.v2",
-            "pexislink_version": __version__,
-            "notice": NOTICE,
-            "config": config.to_dict(),
-            "inputs": {name: {"file": table.name, "sha256": table.sha256, "columns": list(table.columns)}
-                       for name, table in (("reference", reference), ("observations", observations))},
-            "reference_model": model.summary(),
-            "observations": {
-                "rows": sum(status_counts.values()),
-                "status_counts": dict(status_counts),
-                "reason_counts": dict(sorted(reason_counts.items())),
-                "quality_counts": dict(sorted(quality_counts.items())),
-            },
-        }
+    overlaps = reason_counts.get("reference_overlap", 0)
+    if overlaps:
+        print(f"warning: {overlaps} observation row(s) are not after their vehicle's reference period "
+              "and were not assessed (reason reference_overlap)", file=sys.stderr)
+    if summary_file:
         try:
-            write_json_atomic(args.summary, summary)
-        except OSError as exc:
+            summary_file.commit(_summary(config, reference, observations, model,
+                                         status_counts, reason_counts, quality_counts))
+        except (OSError, ValueError) as exc:
             print(f"error: cannot write summary: {exc}", file=sys.stderr)
             return 2
     return 0
+
+
+def _summary(config: DetectorConfig, reference: TelemetryFile, observations: TelemetryFile,
+             model: Any, status_counts: Counter[str], reason_counts: Counter[str],
+             quality_counts: Counter[str]) -> dict[str, Any]:
+    return {
+        "schema": "pexislink.summary.v2",
+        "pexislink_version": __version__,
+        "notice": NOTICE,
+        "config": config.to_dict(),
+        "inputs": {name: {"file": table.name, "sha256": table.sha256, "columns": list(table.columns)}
+                   for name, table in (("reference", reference), ("observations", observations))},
+        "reference_model": model.summary(),
+        "observations": {
+            "rows": sum(status_counts.values()),
+            "status_counts": dict(status_counts),
+            "reason_counts": dict(sorted(reason_counts.items())),
+            "quality_counts": dict(sorted(quality_counts.items())),
+        },
+    }
 
 
 def _vehicle_limited(records: Iterator[Record], max_vehicles: int) -> Iterator[Record]:
@@ -128,18 +167,35 @@ def _vehicle_limited(records: Iterator[Record], max_vehicles: int) -> Iterator[R
         yield record
 
 
-def write_json_atomic(path: str | Path, payload: Any) -> None:
-    """Write JSON via a temporary file and rename, so readers never see a partial file."""
-    target = Path(path)
-    descriptor, temporary = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, indent=2)
-            handle.write("\n")
-        os.replace(temporary, target)
-    except BaseException:
-        Path(temporary).unlink(missing_ok=True)
-        raise
+class _PendingFile:
+    """A temporary file created next to its destination before any output, so a
+    bad destination fails the run early; renamed into place on commit."""
+
+    def __init__(self, path: str, *, forbidden: Sequence[str | None]) -> None:
+        self.target = Path(path)
+        for other in forbidden:
+            if other and self.target.exists() and Path(other).exists() and self.target.samefile(other):
+                raise ValueError(f"refusing to overwrite an input file with the summary: {path}")
+        descriptor, self.temporary = tempfile.mkstemp(dir=self.target.parent, prefix=f".{self.target.name}.",
+                                                      suffix=".tmp")
+        self.handle: IO[str] = os.fdopen(descriptor, "w", encoding="utf-8")
+
+    def commit(self, payload: Any) -> None:
+        try:
+            with self.handle:
+                json.dump(payload, self.handle, indent=2, allow_nan=False)
+                self.handle.write("\n")
+            mask = os.umask(0)
+            os.umask(mask)
+            os.chmod(self.temporary, 0o666 & ~mask)  # mkstemp creates 0600
+            os.replace(self.temporary, self.target)
+        except BaseException:
+            self.discard()
+            raise
+
+    def discard(self) -> None:
+        self.handle.close()
+        Path(self.temporary).unlink(missing_ok=True)
 
 
 def _legacy_v01(argv: list[str]) -> int:
@@ -150,13 +206,15 @@ def _legacy_v01(argv: list[str]) -> int:
     parser.add_argument("--threshold-c", type=float, default=8.0)
     parser.add_argument("--min-baseline", type=int, default=5)
     parser.add_argument("--persistence", type=int, default=2)
+    parser.add_argument("--max-file-mb", type=_file_mb, default=DEFAULT_MAX_FILE_BYTES >> 20)
     args = parser.parse_args(argv)
     print("pexislink: deprecated v0.1 invocation; it runs the frozen v0.1 rule with known "
           "defects (docs/AUDIT-v0.1.md). Use 'pexislink detect'.", file=sys.stderr)
+    max_bytes = args.max_file_mb << 20
     try:
         assessments = analyze(
-            read_samples(args.baseline),
-            read_samples(args.observations),
+            read_samples(args.baseline, max_bytes=max_bytes),
+            read_samples(args.observations, max_bytes=max_bytes),
             threshold_c=args.threshold_c,
             min_baseline=args.min_baseline,
             persistence=args.persistence,

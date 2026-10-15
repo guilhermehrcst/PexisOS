@@ -3,10 +3,16 @@ the metrics themselves with oracle / null / always-alarm / mislabelled detectors
 
 import unittest
 
-from pexislink.evaluate import Score, metrics, poisson_interval, quantile, score, wilson
-from pexislink.synth import Event, GroundTruth, generate
+from pexislink.evaluate import (Score, bootstrap_intervals, metrics, poisson_interval, quantile,
+                                score)
+from pexislink.synth import DAY_US, Event, GroundTruth, generate
 
 MIN = 60_000_000
+HOUR = 60 * MIN
+N = ("normal", 0)
+INS = ("insufficient_evidence", 0)
+UP, DOWN = ("confirmed_anomaly", 1), ("confirmed_anomaly", -1)
+SUSPECT = ("suspected_anomaly", 1)
 
 
 def truth(rows, events, unseen=()):
@@ -15,14 +21,6 @@ def truth(rows, events, unseen=()):
 
 
 class StatisticsTests(unittest.TestCase):
-    def test_wilson_reference_values(self):
-        for (k, n), (lo, hi) in {(8, 10): (0.4902, 0.9433), (0, 10): (0.0, 0.2775),
-                                 (10, 10): (0.7225, 1.0), (1, 2): (0.0945, 0.9055)}.items():
-            got = wilson(k, n)
-            self.assertAlmostEqual(got[0], lo, places=4)
-            self.assertAlmostEqual(got[1], hi, places=4)
-        self.assertIsNone(wilson(0, 0))
-
     def test_exact_poisson_reference_values(self):
         # Garwood intervals (chi-square quantiles), 95 %. The k=100 bounds were
         # re-derived with 50-digit decimal arithmetic (P(X<=99; 81.36399) = 0.975).
@@ -37,51 +35,87 @@ class StatisticsTests(unittest.TestCase):
         self.assertEqual(quantile(list(range(1, 31)), 0.1), 3.0)
         self.assertIsNone(quantile([], 0.5))
 
+    def test_bootstrap_is_deterministic_and_handles_degenerate_input(self):
+        data = generate("abrupt_anomaly", 7, reference_days=4, eval_days=13)
+        s = score([N] * len(data.observation_rows), data.truth)
+        self.assertEqual(bootstrap_intervals(s.vehicles), bootstrap_intervals(s.vehicles))
+        self.assertEqual(bootstrap_intervals(s.vehicles)["false_alerts_per_1000h"], [0.0, 0.0])
+        self.assertIsNone(bootstrap_intervals([])["recall"])
+
 
 class HandComputedScoringTests(unittest.TestCase):
-    def test_alerts_detection_delay_exposure_and_reassurance(self):
-        rows = [("a", i * MIN) for i in range(10)] + [("b", i * MIN) for i in range(6)]
-        events = [Event("a", "overheat", "anomaly", 3 * MIN, 9 * MIN),
-                  Event("b", "sensor_stuck", "sensor_fault", 2 * MIN, 5 * MIN),
-                  Event("b", "load_increase", "nuisance", 0, 5 * MIN)]
-        statuses = (["normal", "confirmed_anomaly", "normal", "insufficient_evidence",
-                     "suspected_anomaly", "confirmed_anomaly", "insufficient_evidence",
-                     "confirmed_anomaly", "normal", "confirmed_anomaly"]
-                    + ["normal", "confirmed_anomaly", "normal", "normal", "insufficient_evidence", "normal"])
-        s = score(statuses, truth(rows, events, unseen={"b"}))
-        self.assertEqual((s.alerts, s.true_alerts, s.false_alerts, s.false_alerts_in_nuisance), (4, 2, 2, 1))
-        self.assertEqual((s.events, s.detected), (1, 1))
-        self.assertEqual(s.delays_wall_us, [2 * MIN])
-        self.assertEqual(s.delays_operating_us, [2 * MIN])
-        self.assertEqual(s.exposure_us, 9 * MIN + 5 * MIN)
-        self.assertEqual((s.fault_rows, s.fault_rows_normal), (4, 3))
-        self.assertEqual((s.unseen_rows, s.unseen_rows_normal), (6, 4))
-        self.assertEqual(s.assessable, 13)
+    def setUp(self):
+        rows = ([("a", i * MIN) for i in range(10)] + [("b", i * MIN) for i in range(6)]
+                + [("c", i * MIN) for i in range(10)])
+        self.events = [Event("a", "overheat", "anomaly", 3 * MIN, 9 * MIN, direction=1, horizon_us=DAY_US),
+                       Event("b", "sensor_stuck", "sensor_fault", 2 * MIN, 5 * MIN),
+                       Event("b", "load_increase", "nuisance", 0, 5 * MIN)]
+        verdicts = ([N, UP, N, INS, SUSPECT, UP, INS, UP, N, DOWN]   # a
+                    + [N, UP, N, N, INS, N]                         # b
+                    + [N, N, N, N, UP, N, N, N, N, N])            # c (control)
+        self.score = score(verdicts, truth(rows, self.events, unseen={"b"}))
+        self.tally = dict(zip("abc", self.score.vehicles))
+
+    def test_alert_attribution_with_direction(self):
+        a, b, c = self.tally["a"], self.tally["b"], self.tally["c"]
+        # a: minute 1 before onset = false; minute 5 after a suspected row = new, true;
+        # minute 7 continues it (insufficient rows neither end nor extend); minute 9
+        # changes direction inside the fault window = misdirected.
+        self.assertEqual((a.alerts, a.false_alerts, a.true_alerts, a.misdirected_alerts), (3, 1, 1, 1))
+        self.assertEqual((b.alerts, b.false_alerts), (1, 1))
+        self.assertEqual((c.alerts, c.false_alerts), (1, 1))
+        self.assertEqual(self.score.conditions["load_increase"][2], 1)  # b's false alert, in the nuisance window
+
+    def test_detection_delay_and_placebo(self):
+        a, c = self.tally["a"], self.tally["c"]
+        self.assertEqual((a.events, a.detected), (1, 1))
+        self.assertEqual(self.score.delays_wall_us["overheat"], [2 * MIN])
+        self.assertEqual(self.score.delays_operating_us["overheat"], [2 * MIN])
+        self.assertEqual((c.placebo_events, c.placebo_detected), (1, 1))  # c alarms upwards at minute 4
+
+    def test_exposure_trips_reassurance_and_coverage(self):
+        a, b, c = self.tally["a"], self.tally["b"], self.tally["c"]
+        self.assertEqual((a.exposure_us, a.eligible_exposure_us), (9 * MIN, 2 * MIN))
+        self.assertEqual((b.exposure_us, b.eligible_exposure_us), (5 * MIN, 1 * MIN))
+        self.assertEqual(c.eligible_exposure_us, 9 * MIN)
+        self.assertEqual([(t.eligible_trips, t.trips_with_false_alert) for t in (a, b, c)], [(1, 1)] * 3)
+        self.assertEqual((b.fault_rows, b.fault_rows_normal), (4, 3))
+        self.assertEqual((b.unseen_rows, b.unseen_rows_normal), (6, 4))
+        self.assertEqual((a.rows, a.assessable), (10, 8))
+
+    def test_horizon_and_direction_are_enforced(self):
+        rows = [("a", 0), ("a", 2 * HOUR)]
+        late = Event("a", "overheat", "anomaly", 0, 10 * HOUR, direction=1, horizon_us=HOUR)
+        self.assertEqual(score([N, UP], truth(rows, [late])).vehicles[0].detected, 0)
+        cold = Event("a", "thermostat_stuck_open", "anomaly", 0, 10 * HOUR, direction=-1, horizon_us=None)
+        tally = score([UP, UP], truth(rows, [cold])).vehicles[0]  # 2 h apart: two trips, two alerts
+        self.assertEqual((tally.detected, tally.misdirected_alerts), (0, 2))
 
     def test_segment_gap_splits_alerts_and_excludes_exposure(self):
         rows = [("a", 0), ("a", MIN), ("a", 100 * MIN), ("a", 101 * MIN)]
-        s = score(["confirmed_anomaly"] * 4, truth(rows, []))
-        self.assertEqual((s.alerts, s.false_alerts), (2, 2))
-        self.assertEqual(s.exposure_us, 2 * MIN)
+        tally = score([UP] * 4, truth(rows, [])).vehicles[0]
+        self.assertEqual((tally.alerts, tally.false_alerts, tally.eligible_trips), (2, 2, 2))
+        self.assertEqual(tally.exposure_us, 2 * MIN)
 
     def test_failed_run_and_alignment(self):
         self.assertEqual(score(None, truth([("a", 0)], [])).failed_runs, 1)
         with self.assertRaises(ValueError):
-            score(["normal"], truth([("a", 0), ("a", 1)], []))
+            score([N], truth([("a", 0), ("a", 1)], []))
 
     def test_not_applicable_metrics_are_none(self):
-        m = metrics(score(["insufficient_evidence"], truth([("a", 0)], [])))
-        for key in ("recall", "precision", "median_delay_operating_min", "false_reassurance",
-                    "median_drift_bias_at_detection_c", "normal_rows_on_unseen_vehicles"):
+        m = metrics(score([INS], truth([("a", 0)], [])))
+        for key in ("recall", "precision", "false_reassurance", "median_drift_bias_at_detection_c",
+                    "normal_rows_on_unseen_vehicles", "excess_recall"):
             self.assertIsNone(m[key], key)
 
     def test_pooling_is_additive(self):
         rows = [("a", 0), ("a", MIN)]
-        one = score(["confirmed_anomaly", "normal"], truth(rows, []))
+        one = score([UP, N], truth(rows, []))
         total = Score()
         total.add(one)
         total.add(one)
-        self.assertEqual((total.runs, total.alerts, total.exposure_us), (2, 2, 2 * MIN))
+        m = metrics(total)
+        self.assertEqual((m["runs"], m["alerts"], m["vehicles"]), (2, 2, 2))
 
 
 class HarnessValidationTests(unittest.TestCase):
@@ -91,40 +125,41 @@ class HarnessValidationTests(unittest.TestCase):
     def setUpClass(cls):
         cls.data = generate("abrupt_anomaly", 7, reference_days=6, eval_days=14)
 
-    def labelled(self, events):
+    def oracle(self, events):
         windows = {}
         for e in events:
             if e.category in ("anomaly", "sensor_fault"):
-                windows.setdefault(e.vehicle_id, []).append((e.onset_us, e.end_us))
-        return ["confirmed_anomaly" if any(a <= t <= b for a, b in windows.get(v, ())) else "normal"
-                for v, t in zip(self.data.truth.observation_vehicles, self.data.truth.observation_epochs_us)]
+                windows.setdefault(e.vehicle_id, []).append((e.onset_us, e.end_us, e.direction or 1))
+        out = []
+        for v, t in zip(self.data.truth.observation_vehicles, self.data.truth.observation_epochs_us):
+            hit = next((d for a, b, d in windows.get(v, ()) if a <= t <= b), None)
+            out.append(("confirmed_anomaly", hit) if hit else N)
+        return out
 
     def test_oracle_null_and_always_alarm(self):
-        oracle = metrics(score(self.labelled(self.data.truth.events), self.data.truth))
-        self.assertEqual((oracle["recall"], oracle["precision"], oracle["false_alerts"]), (1.0, 1.0, 0))
-        null = metrics(score(["insufficient_evidence"] * len(self.data.observation_rows), self.data.truth))
-        self.assertEqual((null["recall"], null["alerts"], null["coverage"], null["precision"]), (0.0, 0, 0.0, None))
+        n = len(self.data.observation_rows)
+        oracle = metrics(score(self.oracle(self.data.truth.events), self.data.truth))
+        self.assertEqual((oracle["recall"], oracle["placebo_recall"], oracle["excess_recall"],
+                          oracle["false_alerts"], oracle["misdirected_alerts"]), (1.0, 0.0, 1.0, 0, 0))
+        self.assertGreater(oracle["excess_recall_ci95"][0], 0)
+        null = metrics(score([INS] * n, self.data.truth))
+        self.assertEqual((null["recall"], null["excess_recall"], null["alerts"], null["coverage"]), (0.0, 0.0, 0, 0.0))
         self.assertEqual(null["missed_without_evidence"], 5)
-        always = metrics(score(["confirmed_anomaly"] * len(self.data.observation_rows), self.data.truth))
-        self.assertEqual(always["recall"], 1.0)
-        self.assertGreater(always["false_alerts"], 50)
-        self.assertLess(always["precision"], 0.5)
-
-    def test_placebo_control_exposes_coincidental_detection(self):
-        oracle = metrics(score(self.labelled(self.data.truth.events), self.data.truth))
-        self.assertEqual((oracle["placebo_recall"], oracle["excess_recall"]), (0.0, 1.0))
-        always = metrics(score(["confirmed_anomaly"] * len(self.data.observation_rows), self.data.truth))
-        self.assertEqual((always["recall"], always["placebo_recall"], always["excess_recall"]), (1.0, 1.0, 0.0))
-        self.assertEqual(always["placebo_recall_ci95"][1], 1.0)
-        # 5 anomaly events x 3 control vehicles (veh-05..07)
-        self.assertEqual(score(["normal"] * len(self.data.observation_rows), self.data.truth).placebo_events, 15)
+        always = metrics(score([UP] * n, self.data.truth))
+        # alarming upwards everywhere "detects" the overheats but not the cold thermostats,
+        # and detects the placebos exactly as often: excess recall 0
+        self.assertEqual((always["recall"], always["placebo_recall"], always["excess_recall"]), (0.6, 0.6, 0.0))
+        self.assertEqual(always["trips_with_false_alert"], 1.0)
 
     def test_mislabelled_oracle_collapses(self):
         """Permutation control: labels moved to other vehicles must not score well."""
-        shifted = [Event(f"veh-{(int(e.vehicle_id[-2:]) + 5) % 8:02d}", e.kind, e.category,
-                         e.onset_us, e.end_us, e.params) for e in self.data.truth.events]
-        wrong = metrics(score(self.labelled(shifted), self.data.truth))
-        self.assertLess(wrong["recall"], 0.5)
+        faulty = sorted({e.vehicle_id for e in self.data.truth.events})
+        others = sorted(set(self.data.truth.observation_vehicles) - set(faulty))
+        moved = dict(zip(faulty, others + faulty))
+        shifted = [Event(moved[e.vehicle_id], e.kind, e.category, e.onset_us, e.end_us, e.params,
+                         e.direction, e.horizon_us) for e in self.data.truth.events]
+        wrong = metrics(score(self.oracle(shifted), self.data.truth))
+        self.assertLess(wrong["excess_recall"], 0.5)
         self.assertLess(wrong["precision"], 0.5)
 
 

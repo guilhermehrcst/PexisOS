@@ -10,6 +10,7 @@ from pathlib import Path
 from pexislink.baselines import fixed_limit, legacy_v01
 from pexislink.benchmark import PROFILES, Profile, evaluate_hypotheses, render_markdown, run_benchmark
 from pexislink.cli import main
+from pexislink.evaluate import metrics, score
 from pexislink.synth import generate
 
 TINY = Profile("tiny", "dev", (101,), 4, 13)
@@ -21,18 +22,25 @@ class ComparatorTests(unittest.TestCase):
         self.assertIsNone(legacy_v01(data.reference_rows, data.observation_rows, cleaned=False))
         cleaned = legacy_v01(data.reference_rows, data.observation_rows, cleaned=True)
         self.assertEqual(len(cleaned), len(data.observation_rows))
-        self.assertIn("insufficient_evidence", cleaned)  # dropped duplicates are explicit
+        self.assertIn(("insufficient_evidence", 0), cleaned)  # dropped duplicates are explicit
 
     def test_cleaning_is_a_no_op_on_clean_data(self):
         data = generate("normal_operation", 101, reference_days=4, eval_days=13)
         self.assertEqual(legacy_v01(data.reference_rows, data.observation_rows, cleaned=False),
                          legacy_v01(data.reference_rows, data.observation_rows, cleaned=True))
 
+    def test_v01_direction_follows_its_delta(self):
+        data = generate("normal_operation", 101, reference_days=4, eval_days=13)
+        verdicts = legacy_v01(data.reference_rows, data.observation_rows, cleaned=True)
+        self.assertTrue({d for s, d in verdicts if s == "confirmed_anomaly"} <= {1, -1})
+        self.assertIn(-1, {d for s, d in verdicts})  # cold starts read below reference
+
     def test_fixed_limit_rule(self):
         rows = [(f"2026-10-02T08:0{i}:00Z", "v", "800", "0", c, "10")
                 for i, c in enumerate(("90", "116", "117", "90", "", "120"))]
-        self.assertEqual(fixed_limit(rows), ["normal", "suspected_anomaly", "confirmed_anomaly", "normal",
-                                             "insufficient_evidence", "suspected_anomaly"])
+        self.assertEqual(fixed_limit(rows), [("normal", 0), ("suspected_anomaly", 1), ("confirmed_anomaly", 1),
+                                             ("normal", 0), ("insufficient_evidence", 0),
+                                             ("suspected_anomaly", 1)])
 
 
 class RunnerTests(unittest.TestCase):
@@ -46,20 +54,49 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(len(provenance["code_sha256"]), 64)
         report = render_markdown(first, provenance)
         self.assertIn("not evidence of real-world accuracy", report)
-        self.assertIn("Placebo recall", report)
+        self.assertIn("Placebo", report)
 
     def test_seed_splits_are_disjoint(self):
         dev = set(PROFILES["dev"].seeds) | set(PROFILES["quick"].seeds)
         self.assertTrue(dev.isdisjoint(PROFILES["full"].seeds))
         self.assertEqual(PROFILES["full"].split, "test")
 
-    def test_hypothesis_verdicts_follow_the_declared_criteria(self):
-        def block(fa, ci, **extra):
-            return {"false_alerts": fa, "false_alerts_per_1000h": fa, "false_alerts_per_1000h_ci95": ci, **extra}
-        scenarios = {"normal_operation": {"results": {"v0.2": block(5, [3.0, 9.0]),
-                                                      "v0.1-cleaned": block(6, [4.0, 10.0])}}}
-        self.assertTrue(evaluate_hypotheses(scenarios)["H1"]["verdict"].startswith("inconclusive"))
-        scenarios["normal_operation"]["results"]["v0.1-cleaned"] = block(50, [40.0, 60.0])
+
+class HypothesisCriteriaTests(unittest.TestCase):
+    """Scientific review F1: a detector that never outputs anything, or one that
+    always alarms, must not be able to support any detection or safety claim."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.verdicts = {}
+        built: dict[str, dict] = {"null": {}, "always": {}}
+        for name in ("normal_operation", "abrupt_anomaly", "gradual_sensor_drift", "load_change",
+                     "unreliable_sensor"):
+            data = generate(name, 101, reference_days=4, eval_days=13)
+            n = len(data.observation_rows)
+            v01 = metrics(score(legacy_v01(data.reference_rows, data.observation_rows, cleaned=True), data.truth))
+            for label, verdicts in (("null", [("insufficient_evidence", 0)] * n),
+                                    ("always", [("confirmed_anomaly", 1)] * n)):
+                m = metrics(score(verdicts, data.truth))
+                built[label][name] = {"results": {"v0.2": m, "v0.2-no-load": m, "v0.2-no-stuck": m,
+                                                  "v0.1-cleaned": v01}}
+        for label, scenarios in built.items():
+            cls.verdicts[label] = {k: h["verdict"] for k, h in evaluate_hypotheses(scenarios).items()}
+
+    def test_degenerate_detectors_support_nothing(self):
+        for label, verdicts in self.verdicts.items():
+            for key in ("H1", "H2a", "H2b", "H3", "H4"):
+                with self.subTest(detector=label, hypothesis=key):
+                    self.assertFalse(verdicts[key].startswith("supported"), verdicts[key])
+
+    def test_inconclusive_when_intervals_overlap(self):
+        def block(fa, ci, trips_ci, coverage=0.5):
+            return {"false_alerts": fa, "false_alerts_per_1000h": fa, "false_alerts_per_1000h_ci95": ci,
+                    "trips_with_false_alert_ci95": trips_ci, "coverage": coverage}
+        scenarios = {"normal_operation": {"results": {"v0.2": block(5, [3.0, 9.0], [0.1, 0.3]),
+                                                      "v0.1-cleaned": block(6, [4.0, 10.0], [0.2, 0.4])}}}
+        self.assertEqual(evaluate_hypotheses(scenarios)["H1"]["verdict"], "inconclusive")
+        scenarios["normal_operation"]["results"]["v0.1-cleaned"] = block(50, [40.0, 60.0], [0.9, 1.0])
         self.assertEqual(evaluate_hypotheses(scenarios)["H1"]["verdict"], "supported")
 
 

@@ -54,7 +54,7 @@ class DetectCommandTests(CliFixture):
         self.assertEqual(len(lines), 41)
         self.assertEqual({line["schema"] for line in lines}, {"pexislink.assessment.v2"})
         self.assertEqual(lines[0]["reasons"], ["warmup_transient"])
-        self.assertEqual(lines[-1]["reasons"], ["coolant_temp_c_implausible"])
+        self.assertEqual(lines[-1]["reasons"], ["coolant_temp_c_sentinel"])
         summary = json.loads(summary_path.read_text())
         self.assertEqual(summary["observations"]["rows"], 41)
         self.assertEqual(len(summary["inputs"]["observations"]["sha256"]), 64)
@@ -69,18 +69,44 @@ class DetectCommandTests(CliFixture):
                                    "--observations", self.write("obs.csv", corrupt))
         self.assertEqual(code, 2)
         self.assertEqual(out, "")
-        self.assertIn("malformed CSV", err)
+        self.assertIn("line 42: unterminated quoted field", err)
 
-    def test_leakage_and_closed_schema_errors_are_fatal(self):
+    def test_reference_overlap_is_reported_per_row_not_fatal(self):
         reference = self.write("ref.csv", csv_text(alternating(0, 80)))
         overlapping = self.write("obs.csv", csv_text(alternating(DAY, 10) + [row(600, 90)]))
         code, out, err = self.call("detect", "--reference", reference, "--observations", overlapping)
-        self.assertEqual((code, out), (2, ""))
-        self.assertIn("leakage", err)
+        self.assertEqual(code, 0)
+        lines = [json.loads(line) for line in out.splitlines()]
+        self.assertEqual(len(lines), 11)
+        self.assertEqual(lines[-1]["reasons"], ["reference_overlap"])
+        self.assertIn("warning: 1 observation row(s)", err)
+
+    def test_closed_schema_errors_are_fatal(self):
+        reference = self.write("ref.csv", csv_text(alternating(0, 80)))
         extra = self.write("extra.csv", csv_text([row(DAY, 90) + ("x",)], HEADER + ",latitude"))
         code, out, err = self.call("detect", "--reference", reference, "--observations", extra)
         self.assertEqual((code, out), (2, ""))
-        self.assertIn("closed schema", err)
+        self.assertIn("too many CSV columns", err)
+
+    def test_summary_destination_is_checked_before_any_output(self):
+        """Code review L2: the summary used to fail only after all output, and could
+        silently overwrite an input file."""
+        reference = self.write("ref.csv", csv_text(alternating(0, 80)))
+        observed = self.write("obs.csv", csv_text(alternating(DAY, 5)))
+        for destination, message in ((observed, "refusing to overwrite an input"),
+                                     (str(self.dir / "missing" / "s.json"), "No such file")):
+            code, out, err = self.call("detect", "--reference", reference, "--observations", observed,
+                                       "--summary", destination)
+            self.assertEqual((code, out), (2, ""), destination)
+            self.assertIn(message, err)
+        self.assertTrue(Path(observed).read_text().startswith("timestamp"))
+
+    def test_numeric_flags_are_bounded(self):
+        reference = self.write("ref.csv", csv_text(alternating(0, 80)))
+        for flag in ("99999999999999999999", "0", "100000000"):
+            with self.assertRaises(SystemExit) as caught, redirect_stderr(io.StringIO()):
+                main(["detect", "--reference", reference, "--observations", reference, "--max-file-mb", flag])
+            self.assertEqual(caught.exception.code, 2)
 
     def test_configuration_file(self):
         reference = self.write("ref.csv", csv_text(alternating(0, 80)))
@@ -128,6 +154,11 @@ class LegacyAndTopLevelTests(CliFixture):
         self.assertEqual((code, out), (2, ""))
         self.assertIn("malformed CSV", err)
 
+    def test_legacy_accepts_a_file_size_flag(self):
+        code, out, _ = self.call("--baseline", str(ROOT / "examples/baseline.csv"),
+                                 "--observations", str(ROOT / "examples/observations.csv"), "--max-file-mb", "1")
+        self.assertEqual((code, len(out.splitlines())), (0, 3))
+
     def test_help_version_and_usage(self):
         self.assertEqual(self.call("--help")[0], 0)
         self.assertEqual(self.call()[0], 2)
@@ -147,6 +178,17 @@ class SubprocessTests(unittest.TestCase):
                                  capture_output=True, text=True, env=env, timeout=60)
         self.assertEqual(missing.returncode, 2)
         self.assertNotIn("Traceback", missing.stderr)
+
+    @unittest.skipUnless(os.path.exists("/dev/full"), "requires /dev/full")
+    def test_output_device_full_exits_1_without_traceback(self):
+        env = dict(os.environ, PYTHONPATH=str(ROOT / "src"))
+        with open("/dev/full", "w") as full:
+            proc = subprocess.run([sys.executable, "-m", "pexislink", "detect",
+                                   "--reference", str(ROOT / "examples/baseline.csv"),
+                                   "--observations", str(ROOT / "examples/observations.csv")],
+                                  stdout=full, stderr=subprocess.PIPE, text=True, env=env, timeout=60)
+        self.assertEqual(proc.returncode, 1, proc.stderr)
+        self.assertNotIn("Traceback", proc.stderr)
 
 
 if __name__ == "__main__":

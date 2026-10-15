@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Iterable, Iterator, Literal
 
-from .ingest import DEFAULT_MAX_VEHICLES, InputError, Record
+from .ingest import DEFAULT_MAX_VEHICLES, Record
 from .quality import Annotated, QualityTracker
 from .reference import ReferenceModel, context_key
 
@@ -36,7 +36,7 @@ STATUSES: tuple[Status, ...] = ("normal", "suspected_anomaly", "confirmed_anomal
                                 "insufficient_evidence")
 
 _COOLANT_ISSUES = ("coolant_temp_c_missing", "coolant_temp_c_invalid",
-                   "coolant_temp_c_implausible", "coolant_stuck_suspected")
+                   "coolant_temp_c_sentinel", "coolant_temp_c_implausible")
 _CONTEXT_ISSUES = tuple(f"{field}_{kind}"
                         for field in ("engine_rpm", "speed_kmh", "engine_load_pct")
                         for kind in ("missing", "invalid", "implausible"))
@@ -58,6 +58,13 @@ class RecordAssessment:
     threshold_c: float | None = None
     reference_n: int | None = None
     run_s: float | None = None
+
+    @property
+    def direction(self) -> int:
+        """+1 reading above expectation, -1 below, 0 for non-anomalous statuses."""
+        if self.status not in ("suspected_anomaly", "confirmed_anomaly"):
+            return 0
+        return 1 if {"above_reference", "above_absolute_limit"} & set(self.reasons) else -1
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -97,33 +104,43 @@ class Detector:
         self._tracker = QualityTracker(model.config, max_vehicles=max_vehicles)
         self._runs: dict[str, _Run] = {}
         self._run_gap_us = round(model.config.run_gap_s * _US)
+        self._confirm_us = round(model.config.confirm_s * _US)
 
     def assess(self, record: Record) -> RecordAssessment:
         vehicle = record.vehicle_id
         if vehicle is not None and record.epoch_us is not None:
-            end = self.model.last_reference_us.get(vehicle)
-            if end is not None and record.epoch_us <= end:  # second leakage barrier
-                raise InputError(f"line {record.line}: observation overlaps the reference period "
-                                 f"of vehicle {vehicle!r} (chronological leakage guard)")
+            end = self.model.reference_end_us.get(vehicle)
+            if end is not None and record.epoch_us <= end:
+                # Leakage barrier, per record: never assess an observation against a
+                # reference that contains later information. The record is excluded
+                # from the vehicle's stream rather than aborting the fleet.
+                return RecordAssessment(record.line, vehicle, record.timestamp, record.epoch_us,
+                                        "insufficient_evidence", ("reference_overlap",), record.issues,
+                                        record.coolant_temp_c)
         item = self._tracker.annotate(record)
 
         if item.integrity != "accepted":
             if item.integrity == "conflicting_duplicate" and vehicle is not None:
                 self._runs.pop(vehicle, None)  # evidence chain is no longer trustworthy
             return self._insufficient(item, item.integrity)
-        if not item.coolant_ok:
+        if not item.coolant_plausible:
             return self._insufficient(item, _first(item.issues, _COOLANT_ISSUES, "coolant_unusable"))
 
         coolant, now = record.coolant_temp_c, record.epoch_us
         if vehicle is None or now is None or coolant is None:
             # Unreachable while quality.py upholds its contract (accepted implies
-            # placeable; coolant_ok implies parsed). Fail safe: never assert normal.
+            # placeable; coolant_plausible implies parsed). Fail safe: never assert normal.
             return self._insufficient(item, "internal_inconsistency")
         cfg = self.config
 
+        # The relative barrier needs a trustworthy reading, a warm engine and a
+        # reference; the absolute barrier only needs a plausible reading, so a
+        # sensor stuck high still fails towards an alarm.
         blocker: str | None = None
         stats = None
-        if item.warmup:
+        if not item.coolant_ok:
+            blocker = "coolant_stuck_suspected"
+        elif item.warmup:
             blocker = "warmup_transient"
         elif vehicle not in self.model.vehicles:
             blocker = "no_reference_vehicle"
@@ -171,11 +188,11 @@ class Detector:
             run = self._runs[vehicle] = _Run(direction, now)
         else:
             run.last_us = now
-        run_s = (now - run.start_us) / _US
-        status: Status = "confirmed_anomaly" if run_s >= cfg.confirm_s else "suspected_anomaly"
+        held_us = now - run.start_us  # integer microseconds, like the config validation
+        status: Status = "confirmed_anomaly" if held_us >= self._confirm_us else "suspected_anomaly"
         return RecordAssessment(record.line, vehicle, record.timestamp, now, status,
                                 tuple(reasons), item.issues, coolant, reference_c, delta,
-                                threshold, reference_n, run_s)
+                                threshold, reference_n, held_us / _US)
 
     def _insufficient(self, item: Annotated, reason: str) -> RecordAssessment:
         record = item.record

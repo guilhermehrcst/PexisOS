@@ -13,9 +13,13 @@ assessment downstream and nothing is dropped silently.
 
 from __future__ import annotations
 
+import codecs
 import csv
 import hashlib
+import os
 import re
+import stat
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from math import isfinite
@@ -28,15 +32,18 @@ CANONICAL_COLUMNS = REQUIRED_COLUMNS + OPTIONAL_COLUMNS
 NUMERIC_FIELDS = ("engine_rpm", "speed_kmh", "coolant_temp_c", "engine_load_pct")
 
 DEFAULT_MAX_FILE_BYTES = 64 * 1024 * 1024
-DEFAULT_MAX_LINE_CHARS = 1024
+DEFAULT_MAX_LINE_BYTES = 1024
 DEFAULT_MAX_ROWS = 2_000_000
 DEFAULT_MAX_VEHICLES = 10_000
+DEFAULT_MAX_CONTEXTS = 100_000
 
 # RFC 3339 profile: explicit 'T', seconds, optional fraction up to microseconds,
-# mandatory offset. re.ASCII matters: in str patterns \d would match any Unicode
-# digit (the v0.1 audit, F-12).
+# mandatory offset with valid hours and minutes (fromisoformat alone accepts
+# "+05:99"). re.ASCII matters: in str patterns \d would match any Unicode digit
+# (the v0.1 audit, F-12).
 _TIMESTAMP = re.compile(
-    r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?(?:Z|[+-][0-9]{2}:[0-9]{2})",
+    r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?"
+    r"(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])",
     re.ASCII,
 )
 _NUMBER = re.compile(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?", re.ASCII)
@@ -58,12 +65,13 @@ class Limits:
     """Explicit resource bounds. Exceeding any of them is an ``InputError``."""
 
     max_file_bytes: int = DEFAULT_MAX_FILE_BYTES
-    max_line_chars: int = DEFAULT_MAX_LINE_CHARS
+    max_line_bytes: int = DEFAULT_MAX_LINE_BYTES
     max_rows: int = DEFAULT_MAX_ROWS
     max_vehicles: int = DEFAULT_MAX_VEHICLES
+    max_contexts: int = DEFAULT_MAX_CONTEXTS
 
     def __post_init__(self) -> None:
-        for name in ("max_file_bytes", "max_line_chars", "max_rows", "max_vehicles"):
+        for name in ("max_file_bytes", "max_line_bytes", "max_rows", "max_vehicles", "max_contexts"):
             value = getattr(self, name)
             if not isinstance(value, int) or isinstance(value, bool) or value < 1:
                 raise ValueError(f"{name} must be a positive integer")
@@ -99,16 +107,18 @@ class ColumnIndex:
     @classmethod
     def from_header(cls, header: Sequence[str]) -> ColumnIndex:
         columns = list(header)
-        duplicates = sorted({name for name in columns if columns.count(name) > 1})
+        if len(columns) > len(CANONICAL_COLUMNS):  # bounded before any per-name work
+            raise InputError(f"too many CSV columns ({len(columns)}); the closed schema has "
+                             f"at most {len(CANONICAL_COLUMNS)}")
+        duplicates = sorted(name for name, count in Counter(columns).items() if count > 1)
         if duplicates:
-            raise InputError(f"duplicate CSV column(s): {', '.join(duplicates)}")
+            raise InputError(f"duplicate CSV column(s): {_shown(duplicates)}")
         missing = [name for name in REQUIRED_COLUMNS if name not in columns]
         if missing:
             raise InputError(f"missing CSV column(s): {', '.join(missing)}")
         unknown = [name for name in columns if name not in CANONICAL_COLUMNS]
         if unknown:
-            shown = ", ".join(repr(name[:40]) for name in unknown[:5])
-            raise InputError(f"unknown CSV column(s) (closed schema): {shown}")
+            raise InputError(f"unknown CSV column(s) (closed schema): {_shown(unknown)}")
         position = {name: i for i, name in enumerate(columns)}
         return cls(
             timestamp=position["timestamp"],
@@ -119,6 +129,11 @@ class ColumnIndex:
             engine_load_pct=position.get("engine_load_pct"),
             width=len(columns),
         )
+
+
+def _shown(names: Sequence[str]) -> str:
+    """repr() keeps terminal control sequences out of diagnostics."""
+    return ", ".join(repr(name[:40]) for name in names[:5])
 
 
 CANONICAL_INDEX = ColumnIndex.from_header(CANONICAL_COLUMNS)
@@ -204,12 +219,32 @@ def parse_rows(rows: Iterable[Sequence[str]], index: ColumnIndex = CANONICAL_IND
 
 
 def read_bounded_bytes(path: str | Path, max_bytes: int) -> bytes:
-    """Read at most ``max_bytes``; works for regular files, pipes and devices."""
+    """Read at most ``max_bytes``; works for regular files, pipes and devices.
+
+    Regular files are read at their actual size (no preallocation of the limit);
+    other inputs are read in 1 MiB chunks until the limit is exceeded.
+    """
+    too_big = InputError(f"{Path(path).name}: input exceeds the {max_bytes}-byte limit")
     with Path(path).open("rb") as source:
-        data = source.read(max_bytes + 1)
-    if len(data) > max_bytes:
-        raise InputError(f"{Path(path).name}: input exceeds the {max_bytes}-byte limit")
-    return data
+        info = os.fstat(source.fileno())
+        if stat.S_ISREG(info.st_mode):
+            if info.st_size > max_bytes:
+                raise too_big
+            data = source.read(info.st_size + 1)
+            if len(data) != info.st_size:
+                raise InputError(f"{Path(path).name}: file changed while being read")
+            return data
+        chunks: list[bytes] = []
+        total = 0
+        while total <= max_bytes:
+            chunk = source.read(min(1 << 20, max_bytes + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+    if total > max_bytes:
+        raise too_big
+    return b"".join(chunks)
 
 
 def decode_utf8(data: bytes) -> str:
@@ -224,18 +259,37 @@ def read_bounded_text(path: str | Path, max_bytes: int = DEFAULT_MAX_FILE_BYTES)
     return decode_utf8(read_bounded_bytes(path, max_bytes))
 
 
-# One physical line with its terminator (\r\n, \r or \n), or a final unterminated
-# line. Iterating matches over the existing string avoids io.StringIO, whose
-# internal UCS-4 buffer silently quadrupled peak memory (measured: 171 MB peak
-# for 37 MB of CSV before this change).
-_LINE = re.compile(r"[^\r\n]*(?:\r\n?|\n)|[^\r\n]+\Z")
+def _bounded_lines(data: bytes, max_line_bytes: int) -> Iterator[str]:
+    """Physical lines (with their \\r\\n, \\r or \\n terminator), decoded one at a time.
 
-
-def _bounded_lines(text: str, max_line_chars: int) -> Iterator[str]:
-    for number, match in enumerate(_LINE.finditer(text), start=1):
-        line = match.group()
-        if len(line) > max_line_chars:
-            raise InputError(f"line {number}: longer than the {max_line_chars}-character limit")
+    - The search for a terminator is bounded, so an endless line costs
+      O(max_line_bytes), not O(file).
+    - Decoding per line keeps memory at the size of the byte snapshot (a decoded
+      ``str`` of a file with one 4-byte character would take 4 bytes per char)
+      and gives exact line numbers for invalid UTF-8.
+    - No field of the closed schema can contain CR or LF, so a line with an odd
+      number of quote characters (an unterminated quoted field) is rejected
+      instead of silently merging later lines into one record.
+    """
+    start, size, number = 0, len(data), 0
+    while start < size:
+        number += 1
+        window = min(size, start + max_line_bytes + 1)
+        hits = [p for p in (data.find(b"\r", start, window), data.find(b"\n", start, window)) if p >= 0]
+        if hits:
+            end = min(hits)
+            stop = end + (2 if data[end:end + 2] == b"\r\n" else 1)
+        elif size - start <= max_line_bytes:
+            end = stop = size  # final line without terminator
+        else:
+            raise InputError(f"line {number}: longer than the {max_line_bytes}-byte limit")
+        if data.count(b'"', start, end) % 2:
+            raise InputError(f"line {number}: unterminated quoted field (a record may not span lines)")
+        try:
+            line = data[start:stop].decode("utf-8")
+        except UnicodeDecodeError:
+            raise InputError(f"line {number}: invalid UTF-8") from None
+        start = stop
         yield line
 
 
@@ -251,33 +305,31 @@ class TelemetryFile:
         self.name = Path(path).name
         self.sha256 = hashlib.sha256(data).hexdigest()
         self.limits = limits
-        self._text = decode_utf8(data)
+        self._data = data[len(codecs.BOM_UTF8):] if data.startswith(codecs.BOM_UTF8) else data
         header = self._header()
         self.index = ColumnIndex.from_header(header)
         self.columns = tuple(header)
         self.has_load = self.index.engine_load_pct is not None
 
-    def _header(self) -> list[str]:
-        reader = csv.reader(_bounded_lines(self._text, self.limits.max_line_chars), strict=True)
+    def _reader(self) -> Iterator[tuple[int, list[str]]]:
+        """Non-blank CSV rows with their physical line numbers."""
+        reader = csv.reader(_bounded_lines(self._data, self.limits.max_line_bytes), strict=True)
         try:
-            header = next(reader, None)
-        except csv.Error as exc:
-            raise InputError(f"line 1: malformed CSV header: {exc}") from None
-        if not header:
-            raise InputError("empty input: a CSV header is required")
-        return header
-
-    def records(self) -> Iterator[Record]:
-        reader = csv.reader(_bounded_lines(self._text, self.limits.max_line_chars), strict=True)
-        rows = 0
-        try:
-            next(reader)  # header, validated in __init__
             for values in reader:
-                if not values:  # blank line
-                    continue
-                rows += 1
-                if rows > self.limits.max_rows:
-                    raise InputError(f"{self.name}: more than {self.limits.max_rows} data rows")
-                yield parse_row(values, reader.line_num, self.index)
+                if values:
+                    yield reader.line_num, values
         except csv.Error as exc:
             raise InputError(f"line {reader.line_num}: malformed CSV: {exc}") from None
+
+    def _header(self) -> list[str]:
+        for _, values in self._reader():
+            return values
+        raise InputError("empty input: a CSV header is required")
+
+    def records(self) -> Iterator[Record]:
+        rows = self._reader()
+        next(rows)  # the header, validated in __init__
+        for count, (line, values) in enumerate(rows, start=1):
+            if count > self.limits.max_rows:
+                raise InputError(f"{self.name}: more than {self.limits.max_rows} data rows")
+            yield parse_row(values, line, self.index)

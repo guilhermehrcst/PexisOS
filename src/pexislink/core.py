@@ -11,7 +11,7 @@ the v0.2 pipeline (``pexislink.detect``).
 
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime
 from math import floor, isfinite
@@ -83,7 +83,7 @@ def read_samples(path: str | Path, *, max_bytes: int = DEFAULT_MAX_FILE_BYTES) -
     samples: list[Sample] = []
     try:
         fieldnames = reader.fieldnames or ()
-        duplicates = sorted({name for name in fieldnames if list(fieldnames).count(name) > 1})
+        duplicates = sorted(name for name, count in Counter(fieldnames).items() if count > 1)
         if duplicates:
             raise ValueError(f"duplicate CSV column(s): {', '.join(duplicates)}")
         missing = set(REQUIRED_COLUMNS) - set(fieldnames)

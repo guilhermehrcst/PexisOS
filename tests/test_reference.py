@@ -8,7 +8,7 @@ from helpers import FOCUSED, alternating, records, row, steady
 from pexislink.config import DetectorConfig
 from pexislink.detect import assess_records
 from pexislink.ingest import InputError
-from pexislink.reference import build_reference, check_chronology, robust_stats
+from pexislink.reference import build_reference, robust_stats
 
 DAY = 86_400
 
@@ -70,16 +70,37 @@ class ExclusionTests(unittest.TestCase):
 
 
 class ChronologyTests(unittest.TestCase):
-    def test_overlap_is_rejected_using_every_placeable_reference_row(self):
-        ref = model(alternating(0, 10) + [row(10_000, 215)])  # implausible row still counts
-        with self.assertRaisesRegex(InputError, "leakage"):
-            check_chronology(ref, records([row(9_000, 90)]))
-        with self.assertRaisesRegex(InputError, "leakage"):  # second, independent barrier
-            list(assess_records(ref, records([row(10_000, 90)])))
+    """Leakage boundary: the last reference sample that contributed to the model."""
+
+    def test_overlapping_observations_are_quarantined_per_record(self):
+        ref = model(alternating(0, 10))
+        result = list(assess_records(ref, records([row(200, 90), row(DAY, 90), row(DAY + 30, 91)])))
+        self.assertEqual(result[0].reasons, ("reference_overlap",))
+        self.assertEqual([a.status for a in result[1:]], ["normal", "normal"])
+
+    def test_excluded_reference_glitch_cannot_deny_a_vehicle(self):
+        """Code review M3: one 2199-dated reference row used to abort the whole run.
+        With the default warm-up the lone future row starts a segment, is excluded,
+        and therefore cannot move the boundary. (A glitched row that does contribute
+        moves it, and that vehicle's earlier observations are quarantined.)"""
+        cfg = DetectorConfig(min_reference_samples=5)
+        glitch = ("2199-01-01T00:00:00Z", "v1", "2000", "60", "90", "30")
+        clean = alternating(0, 40)
+        ref = model(clean + [glitch], cfg)
+        self.assertEqual(ref.reference_end_us["v1"], records(clean)[-1].epoch_us)
+        result = list(assess_records(ref, records(alternating(DAY, 40))))
+        self.assertNotIn(("reference_overlap",), {a.reasons for a in result})
+        self.assertEqual(result[-1].status, "normal")
 
     def test_vehicles_without_reference_are_unconstrained(self):
         ref = model(alternating(DAY, 10))
-        check_chronology(ref, records([row(0, 90, vehicle="new")]))
+        (assessment,) = assess_records(ref, records([row(0, 90, vehicle="new")]))
+        self.assertEqual(assessment.reasons, ("no_reference_vehicle",))
+
+    def test_context_limit(self):
+        rows = [row(30 * i, 90, rpm=500 * i) for i in range(20)]
+        with self.assertRaisesRegex(InputError, "more than 5 reference contexts"):
+            build_reference(records(rows), FOCUSED, use_load=False, max_contexts=5)
 
 
 class DefaultConfigTests(unittest.TestCase):
@@ -92,7 +113,11 @@ class DefaultConfigTests(unittest.TestCase):
     def test_invalid_configurations_are_rejected(self):
         bad = [dict(confirm_s=60, run_gap_s=90), dict(k_scale=float("nan")), dict(warmup_s=-1),
                dict(coolant_range_c=(150.0, -40.0)), dict(use_load=1), dict(min_reference_samples=1),
-               dict(absolute_high_c=0), dict(run_gap_s=1000, segment_gap_s=900, confirm_s=2000)]
+               dict(absolute_high_c=0), dict(run_gap_s=1000, segment_gap_s=900, confirm_s=2000),
+               # code review L1, L4, L9
+               dict(absolute_high_c=160, coolant_range_c=(-40.0, 150.0)), dict(k_scale=10 ** 400),
+               dict(segment_gap_s=1e303), dict(rpm_bin=1e-320), dict(k_scale=1e308),
+               dict(run_gap_s=90.0000006, confirm_s=90.0000007), dict(coolant_sentinels_c=(float("inf"),))]
         for kwargs in bad:
             with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
                 DetectorConfig(**kwargs)
@@ -102,6 +127,18 @@ class DefaultConfigTests(unittest.TestCase):
                          (-30, 140))
         with self.assertRaisesRegex(ValueError, "unknown configuration key"):
             DetectorConfig.from_dict({"k_scal": 3})
+
+    def test_json_file_hazards_are_value_errors(self):
+        import os
+        import tempfile
+        cases = {'{"k_scale": 3, "k_scale": 4}': "duplicate configuration key",
+                 "[" * 100_000 + "]" * 100_000: "nested too deeply"}
+        for text, message in cases.items():
+            with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
+                handle.write(text)
+            self.addCleanup(os.unlink, handle.name)
+            with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
+                DetectorConfig.from_json_file(handle.name)
 
 
 if __name__ == "__main__":

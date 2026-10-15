@@ -8,17 +8,20 @@ state and issue codes.
 Integrity states
     accepted               newer than the vehicle's last accepted record
     duplicate              same instant and identical content (excluded)
-    conflicting_duplicate  same instant, different content (excluded; the
-                           detector also discards the vehicle's evidence run)
+    conflicting_duplicate  same instant as the last accepted record, different
+                           content (excluded; the detector also discards the
+                           vehicle's evidence run)
     out_of_order           older than the last accepted record (excluded)
     unplaceable            no valid timestamp or vehicle id (excluded)
 
 Quality issue codes (added to row-level codes from ``ingest``)
     <field>_implausible     outside the configured physical range
+    coolant_temp_c_sentinel exactly an encoding-extreme value that loggers emit
+                            on sensor faults (OBD-II PID 0x05: -40 C and 215 C)
     warmup_transient        within ``warmup_s`` of a segment start
-    coolant_stuck_suspected reading identical across an engine-off gap of
-                            ``stuck_gap_s`` for ``stuck_min_samples`` samples,
-                            or identical for ``flatline_s``
+    coolant_stuck_suspected after an engine-off gap of ``stuck_gap_s`` the
+                            reading stayed within ``stuck_tolerance_c`` of its
+                            pre-gap value for ``stuck_min_samples`` samples
 """
 
 from __future__ import annotations
@@ -42,23 +45,26 @@ class Annotated:
     segment_start: bool = False
     segment_elapsed_s: float | None = None
     warmup: bool = False
-    coolant_ok: bool = False     # accepted, parsed, plausible, not suspected stuck
-    context_ok: bool = False     # rpm and speed parsed and plausible
-    load_ok: bool = False        # load parsed and plausible (False if column absent)
+    coolant_plausible: bool = False  # accepted, parsed, in range, not a sentinel
+    coolant_ok: bool = False         # coolant_plausible and not suspected stuck
+    context_ok: bool = False         # rpm and speed parsed and plausible
+    load_ok: bool = False            # load parsed and plausible (False if column absent)
 
 
 class _VehicleState:
-    __slots__ = ("last_us", "last_content", "segment_start_us",
-                 "const_value", "const_observed_us", "off_count", "last_coolant_us")
+    __slots__ = ("last_us", "last_content", "segment_start_us", "last_coolant", "last_coolant_us",
+                 "anchor", "anchored", "stuck", "deviations")
 
     def __init__(self) -> None:
         self.last_us: int | None = None
         self.last_content: tuple[object, ...] = ()
         self.segment_start_us = 0
-        self.const_value: float | None = None
-        self.const_observed_us = 0   # in-segment time the current value has been held
-        self.off_count = 0           # identical samples since an engine-off gap
+        self.last_coolant: float | None = None
         self.last_coolant_us: int | None = None
+        self.anchor: float | None = None  # pre-gap reading the post-gap readings are compared with
+        self.anchored = 0                 # consecutive post-gap readings within tolerance of it
+        self.stuck = False
+        self.deviations = 0               # consecutive readings outside tolerance while stuck
 
 
 def _content(record: Record) -> tuple[object, ...]:
@@ -79,7 +85,6 @@ class QualityTracker:
         self._vehicles: dict[str, _VehicleState] = {}
         self._segment_gap_us = round(config.segment_gap_s * _US)
         self._stuck_gap_us = round(config.stuck_gap_s * _US)
-        self._flatline_us = round(config.flatline_s * _US)
 
     def annotate(self, record: Record) -> Annotated:
         if record.epoch_us is None or record.vehicle_id is None:
@@ -120,38 +125,54 @@ class QualityTracker:
             issues.append("warmup_transient")
 
         coolant = record.coolant_temp_c
-        coolant_ok = False
-        if coolant is not None and _within(coolant, cfg.coolant_range_c):
-            coolant_ok = not self._stuck(state, coolant, now)
-            if not coolant_ok:
+        plausible = coolant is not None and _within(coolant, cfg.coolant_range_c)
+        if coolant is not None and coolant in cfg.coolant_sentinels_c:
+            issues.append("coolant_temp_c_sentinel")
+            plausible = False
+        stuck = False
+        if plausible and coolant is not None:
+            stuck = self._stuck(state, coolant, now)
+            if stuck:
                 issues.append("coolant_stuck_suspected")
 
         return Annotated(
             record, "accepted", tuple(issues), segment_start, elapsed_s, warmup,
-            coolant_ok=coolant_ok,
+            coolant_plausible=plausible,
+            coolant_ok=plausible and not stuck,
             context_ok=(_within(record.engine_rpm, cfg.rpm_range)
                         and _within(record.speed_kmh, cfg.speed_range_kmh)),
             load_ok=_within(record.engine_load_pct, cfg.load_range_pct),
         )
 
     def _stuck(self, state: _VehicleState, value: float, now: int) -> bool:
-        """Physics-based stuck-sensor suspicion (two independent rules).
+        """Physics-based stuck-sensor suspicion.
 
-        1. After an engine-off gap >= stuck_gap_s a real coolant reading must
-           have changed (the engine cooled) and must change during warm-up.
-           Identical before and for stuck_min_samples after the gap: suspect.
-        2. Bit-identical for flatline_s of *observed* time (gaps longer than
-           segment_gap_s do not count; rule 1 covers them): suspect.
-        Cost of a false suspicion is abstention, never a false alarm.
+        After an engine-off gap of at least ``stuck_gap_s`` a real coolant reading
+        must have dropped (the engine cooled while parked) and must then rise
+        during warm-up. Readings that stay within ``stuck_tolerance_c`` (1 LSB by
+        default, so a sensor dithering between two codes is covered) of the
+        pre-gap value for ``stuck_min_samples`` samples are suspected stuck.
+        Once suspected, a single outlier does not clear the suspicion (glitches
+        on a frozen sensor); two consecutive deviating readings do.
+        The cost of a false suspicion is abstention, never a false alarm, and
+        the absolute barrier still evaluates suspected readings.
+        A sensor that freezes during a long uninterrupted drive is only
+        suspected after the next engine-off gap (documented limitation).
         """
+        cfg = self.config
         gap = None if state.last_coolant_us is None else now - state.last_coolant_us
-        if value != state.const_value:
-            state.const_value, state.const_observed_us, state.off_count = value, 0, 0
-        else:
-            if gap is not None and gap <= self._segment_gap_us:
-                state.const_observed_us += gap
-            if state.off_count or (gap is not None and gap >= self._stuck_gap_us):
-                state.off_count += 1
-        state.last_coolant_us = now
-        return (state.off_count >= self.config.stuck_min_samples
-                or state.const_observed_us >= self._flatline_us)
+        if gap is not None and gap >= self._stuck_gap_us and not state.stuck:
+            state.anchor, state.anchored, state.deviations = state.last_coolant, 0, 0
+        state.last_coolant, state.last_coolant_us = value, now
+        if state.anchor is None:
+            return False
+        if abs(value - state.anchor) <= cfg.stuck_tolerance_c:
+            state.deviations = 0
+            state.anchored += 1
+            if state.anchored >= cfg.stuck_min_samples:
+                state.stuck = True
+            return state.stuck
+        state.deviations += 1
+        if not state.stuck or state.deviations >= 2:
+            state.anchor, state.anchored, state.stuck, state.deviations = None, 0, False, 0
+        return False
