@@ -91,6 +91,18 @@ class TelemetryTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "malformed CSV"):
                 read_samples(path)
 
+    def test_well_formed_quoted_numeric_csv_field(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "valid-quoted.csv"
+            path.write_text(
+                "timestamp,vehicle_id,engine_rpm,speed_kmh,coolant_temp_c\n"
+                '2026-10-02T08:00:00Z,demo-001,2000,60,"90"\n',
+                encoding="utf-8",
+            )
+            samples = read_samples(path)
+            self.assertEqual(len(samples), 1)
+            self.assertEqual(samples[0].coolant_temp_c, 90.0)
+
     def test_bucket_jitter_is_known_v01_limitation(self):
         # Historical v0.1 comparator: bucket transitions reset sample streaks.
         # v0.2 replaces this with a duration-based evidence rule.
