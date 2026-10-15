@@ -29,6 +29,7 @@ synth ──► rows ─────────────────► any 
 | `config` | Single validated source of every parameter (closed JSON schema) | accept unknown keys |
 | `synth`, `evaluate`, `baselines`, `benchmark` | Offline research harness | be imported by detection code (enforced by `tests/test_architecture.py`) |
 | `core` | Frozen v0.1 rule and API (comparator, backward compatibility) | change its decision rule |
+| `componentx` | v0.3 Stage A: read-only, streaming preflight and provenance manifest for locally supplied Scania Component X v3 files ([COMPONENT-X-PREFLIGHT.md](COMPONENT-X-PREFLIGHT.md)) | import or be imported by detection or evaluation code; decode outcome values; interpret anonymous columns |
 
 ## Invariants (each enforced by tests)
 

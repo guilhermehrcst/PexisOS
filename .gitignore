@@ -218,3 +218,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Third-party datasets and their local manifests are never committed (plan 0002).
+# Synthetic test fixtures live in tests/ and are generated in code.
+/data/
+/datasets/
+/local-data/

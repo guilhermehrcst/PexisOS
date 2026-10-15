@@ -44,10 +44,18 @@ class LayeringTests(unittest.TestCase):
             "evaluate": {"synth"},
             "synth": {"ingest"},
             "baselines": {"core", "ingest"},
+            "componentx": {""},  # package root only (__version__): no detector, no evaluation harness
         }
         for module, permitted in allowed.items():
             self.assertTrue(imported_modules(module) <= permitted,
                             f"{module} imports {imported_modules(module) - permitted}")
+
+    def test_dataset_preflight_is_isolated_from_detection_and_evaluation(self):
+        """v0.3 Stage A: the Component X preflight must not reach, or be reached by, the
+        v0.1 comparator, the v0.2 detector or the benchmark (only the CLI wires it in)."""
+        for path in PACKAGE.glob("*.py"):
+            if path.stem not in ("componentx", "cli"):
+                self.assertNotIn("componentx", imported_modules(path.stem), path.name)
 
     def test_no_process_is_spawned_at_runtime(self):
         """Code review L10: platform.platform() used to spawn `uname -p` during a
@@ -66,6 +74,13 @@ class LayeringTests(unittest.TestCase):
             run_benchmark(Profile("tiny", "dev", (101,), 4, 13), ["normal_operation"])
             self.assertEqual(main(["detect", "--reference", str(examples / "baseline.csv"),
                                    "--observations", str(examples / "observations.csv")]), 0)
+            import tempfile
+
+            from componentx_fixtures import write_dataset  # synthetic files: every reading path runs
+            with tempfile.TemporaryDirectory() as tmp:
+                data = write_dataset(Path(tmp) / "data")
+                self.assertEqual(main(["dataset", "preflight", "--source", "component-x-v3", "--input-dir",
+                                       str(data), "--out", str(Path(tmp) / "m.json")]), 0)
 
     def test_no_network_or_subprocess_in_the_package(self):
         forbidden = {"socket", "urllib", "http", "subprocess", "requests", "ftplib", "smtplib", "ctypes"}
@@ -79,6 +94,15 @@ class LayeringTests(unittest.TestCase):
                 else:
                     continue
                 self.assertEqual(used & forbidden, set(), f"{path.name} imports {used & forbidden}")
+
+    def test_no_process_creation_through_os(self):
+        spawning = {"system", "popen", "fork", "forkpty", "posix_spawn", "posix_spawnp", "startfile",
+                    "spawnl", "spawnle", "spawnlp", "spawnlpe", "spawnv", "spawnve", "spawnvp", "spawnvpe",
+                    "execl", "execle", "execlp", "execlpe", "execv", "execve", "execvp", "execvpe"}
+        for path in PACKAGE.glob("*.py"):
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "os":
+                    self.assertNotIn(node.attr, spawning, f"{path.name} uses os.{node.attr}")
 
 
 if __name__ == "__main__":
