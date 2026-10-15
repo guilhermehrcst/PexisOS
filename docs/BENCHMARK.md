@@ -257,8 +257,8 @@ coverage floor of 0.2 and a non-inferiority margin of 0.1 on excess recall.
 The protocol, the predicted verdicts and the decision rule were committed and
 pushed before this run (ADR 0001 §8, commit `e1b8b70`). The code was unchanged
 (fingerprint `bbb0bc5f…`). It ran on CPython 3.13.16, while run 2 ran on
-3.11.17. Results were byte-identical across 3.11, 3.12 and 3.13 for the quick
-profile; for the full profiles that is inferred, not verified. The first launch failed before Python started
+3.11.17. The version does not change results: re-running run 2's full profile
+on 3.13.16 reproduced its `results.json` byte for byte. The first launch failed before Python started
 (`/usr/bin/time` is not installed in this container); the relaunch is the only
 run. 3,499,273 evaluation rows, 1,857 unique operating hours, 340 events.
 
@@ -387,8 +387,9 @@ PYTHONPATH=src python scripts/error_analysis.py [confirm]                       
 ~~~
 
 - `results.json` is deterministic. The quick profile's file has SHA-256
-  `b4f2388e…` on CPython 3.11.17, 3.12.3 and 3.13.16; CI regenerates it and
-  fails on any difference.
+  `b4f2388e…` on CPython 3.11.17, 3.12.3 and 3.13.16; CI regenerates it on 3.11
+  and fails on any difference. The full test profile gives the same file
+  (`b0f84b79…`) on 3.11.17 and 3.13.16.
 - Determinism was verified on one platform only (Linux x86-64, glibc 2.39), not
   across operating systems or libm implementations.
 - `provenance.json` records versions, the package fingerprint, timings and peak
