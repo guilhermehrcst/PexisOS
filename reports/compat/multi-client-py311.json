@@ -676,7 +676,7 @@
   "command": "PYTHONPATH=src python tests/compat/run_clients.py",
   "environment": {
     "credentials": "none",
-    "git_commit": "ba7a97ee657d155b275df66941e5e3e957688981",
+    "git_commit": "043771a43148727e0ff21178a88c44ebc1bd73c2",
     "implementation": "CPython",
     "model_calls": 0,
     "platform": "Linux-x86_64",
