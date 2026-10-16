@@ -198,7 +198,8 @@ Properties, each verified with the official SDK `Client` in `tests/test_fabric_m
   Any exception yields `policy_error` (deny).
 - **Revocation.** Takes effect at once, including inside a live MCP session. A revoked grant id can never be reused.
 - **Audit.** A bounded, append-only, SHA-256 hash-chained log records each decision and each execution. It holds identifiers and reason codes only, never observation values.
-- **Policy file.** `pexislink.policy.v0` is a closed schema of at most 64 KiB, with duplicate JSON keys and NaN rejected. The loader refuses symlinks (`O_NOFOLLOW`), checks that the file is regular, and verifies the file's identity before, during and after the read (TOCTOU).
+- **Policy file.** `pexislink.policy.v0` is a closed schema of at most 64 KiB, with duplicate JSON keys and NaN rejected. The loader refuses symlinks (`O_NOFOLLOW`), checks that the file is regular, and verifies the file's identity before, during and after the read (TOCTOU). The identity check covers inode, size, mtime and ctime; ctime cannot be restored by a writer, so a same-size rewrite in place is detected.
+- **Audit failure fails closed.** If the audit sink raises, the request returns `internal_error` and no unaudited result is served.
 
 ## 7. Data contracts (`v0`)
 
@@ -252,10 +253,14 @@ The assessment document (`pexislink.assessment.v0`) contains:
 The method runs per declared numeric, assessable signal, over the last `window = 120` stored observations of the entity:
 
 1. Keep only `observed` and `late` values, ordered by `observed_at`.
-2. If the latest observation is older than `stale_after_s`, every signal is `stale`.
+2. Freshness follows **usable** evidence:
+   - if the latest `observed` or `late` observation is older than `stale_after_s`, the overall state is `stale`; a fresh `unknown` record never counts as fresh;
+   - each signal is also `stale` on its own when its latest trustworthy value is older than `stale_after_s`.
 3. With fewer than `min_points = 24` values, the signal is `insufficient`.
 4. Otherwise compare the median of the last `recent = 6` values with the median and MAD of the earlier values. The scale is `max(1.4826·MAD, 0.001·declared range)`.
 5. If `|z| > 4`, the signal is `deviation`; otherwise `nominal`.
+   The overall state is the first match in the order `deviation`, `stale`, `nominal`, `insufficient`.
+   With `signal=` the overall state and confidence are computed from that signal only.
 6. Booleans, enums and signals declared non-assessable (counters) are `unknown`.
 
 Confidence is `low` whenever data is stale, late, unknown or has gaps, and is never `high`.

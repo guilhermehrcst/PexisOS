@@ -7,8 +7,10 @@ values in the same window. It knows nothing about any application domain:
 the only domain input is each signal's declared plausible range.
 
 Conservative by construction:
-  * stale data (latest observation older than the entity's ``stale_after_s``)
-    yields state ``stale`` for every signal: no current claim is made;
+  * freshness follows USABLE evidence: if the latest ``observed``/``late``
+    observation is older than ``stale_after_s`` the overall state is ``stale``
+    (a fresh ``unknown`` record does not count), and each signal is ``stale``
+    when its own latest trustworthy value is older than that;
   * fewer than ``min_points`` trustworthy values yields ``insufficient``;
   * only ``observed`` and ``late`` observations are used; ``unknown`` ones are
     counted but never used as measurements;
@@ -42,29 +44,32 @@ class AssessmentConfig:
     def __post_init__(self) -> None:
         if not (2 <= self.recent < self.min_points <= self.window <= 1000):
             raise ValueError("invalid assessment window")
+        if not all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+                   for v in (self.z_threshold, self.gap_factor, self.min_scale_fraction)):
+            raise ValueError("assessment parameters must be finite numbers")
         if not (self.z_threshold > 0 and self.gap_factor > 1 and 0 < self.min_scale_fraction < 1):
             raise ValueError("invalid assessment parameters")
 
 
-def assess(spec: EntitySpec, window: list[Observation], now: int, config: AssessmentConfig) -> dict:
+def assess(spec: EntitySpec, window: list[Observation], now: int, config: AssessmentConfig,
+           only: str | None = None) -> dict:
+    """``only`` restricts the assessment, including its overall state, to one signal."""
     ordered = sorted(window, key=lambda o: (o.observed_at, o.event_id))
     counts = {s: sum(1 for o in ordered if o.status == s) for s in ("observed", "late", "unknown")}
-    latest = ordered[-1] if ordered else None
-    age_s = round((now - latest.observed_at) / 1e6, 3) if latest else None
+    usable = [o for o in ordered if o.status in ("observed", "late")]
+    latest_any = ordered[-1] if ordered else None
+    latest = usable[-1] if usable else None  # freshness follows usable evidence, never an 'unknown' record
     stale = latest is None or now - latest.observed_at > spec.stale_after_s * 1_000_000  # compare unrounded
     interval_us = spec.expected_interval_s * 1e6
     gaps = sum(1 for a, b in zip(ordered, ordered[1:]) if b.observed_at - a.observed_at > config.gap_factor * interval_us)
-    signals = [_signal(spec, signal.name, ordered, stale, config) for signal in spec.signals]
+    names = [only] if only is not None else [signal.name for signal in spec.signals]
+    signals = [_signal(spec, name, usable, now, config) for name in names]
     states = {s["state"] for s in signals}
     if stale:
         overall = "stale"
-    elif "deviation" in states:
-        overall = "deviation"
-    elif "nominal" in states:
-        overall = "nominal"
     else:
-        overall = "insufficient"
-    confidence = "low" if stale or gaps or counts["late"] or counts["unknown"] else "medium"
+        overall = next((s for s in ("deviation", "stale", "nominal", "insufficient") if s in states), "unknown")
+    confidence = "low" if stale or gaps or counts["late"] or counts["unknown"] or "stale" in states else "medium"
     return {
         "schema_version": ASSESSMENT_SCHEMA,
         "entity_id": spec.entity_id,
@@ -72,32 +77,37 @@ def assess(spec: EntitySpec, window: list[Observation], now: int, config: Assess
         "notice": NOTICE,
         "assessed_at": format_time(now),
         "state": overall,
-        "confidence": confidence if overall != "insufficient" else "low",
+        "confidence": confidence if overall in ("nominal", "deviation") else "low",
         "method": {"name": "robust_recent_vs_baseline_median_mad", **asdict(config)},
         "inputs": {
             "observations_considered": len(ordered),
             "status_counts": counts,
             "first_observed_at": format_time(ordered[0].observed_at) if ordered else None,
-            "last_observed_at": format_time(latest.observed_at) if latest else None,
-            "last_event_id": latest.event_id if latest else None,
+            "last_observed_at": format_time(latest_any.observed_at) if latest_any else None,
+            "last_event_id": latest_any.event_id if latest_any else None,
+            "last_usable_observed_at": format_time(latest.observed_at) if latest else None,
             "gaps": gaps,
         },
-        "freshness": {"age_s": age_s, "stale_after_s": spec.stale_after_s, "stale": stale},
+        "freshness": {"usable_age_s": round((now - latest.observed_at) / 1e6, 3) if latest else None,
+                      "stale_after_s": spec.stale_after_s, "stale": stale,
+                      "basis": "latest observed or late observation; unknown records never count as fresh"},
         "signals": signals,
     }
 
 
-def _signal(spec: EntitySpec, name: str, ordered: list[Observation], stale: bool, config: AssessmentConfig) -> dict:
+def _signal(spec: EntitySpec, name: str, usable: list[Observation], now: int, config: AssessmentConfig) -> dict:
     signal = spec.signal(name)
     base = {"signal": name, "unit": signal.unit}
     if signal.type not in ("number", "integer"):
         return {**base, "state": "unknown", "reason": "not_numeric", "confidence": "low", "evidence": {}}
     if not signal.assessable:
         return {**base, "state": "unknown", "reason": "declared_not_assessable", "confidence": "low", "evidence": {}}
-    values = [o.value(name) for o in ordered if o.status in ("observed", "late") and o.value(name) is not None]
-    evidence: dict = {"trustworthy_values": len(values)}
-    if stale:
-        return {**base, "state": "stale", "reason": "latest_observation_is_stale", "confidence": "low",
+    points = [(o.observed_at, o.value(name)) for o in usable if o.value(name) is not None]
+    values = [v for _, v in points]
+    evidence: dict = {"trustworthy_values": len(values),
+                      "last_value_observed_at": format_time(points[-1][0]) if points else None}
+    if not points or now - points[-1][0] > spec.stale_after_s * 1_000_000:  # per-signal freshness
+        return {**base, "state": "stale", "reason": "latest_trustworthy_value_is_stale", "confidence": "low",
                 "evidence": evidence}
     if len(values) < config.min_points:
         return {**base, "state": "insufficient", "reason": "too_few_trustworthy_values", "confidence": "low",

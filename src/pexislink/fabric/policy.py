@@ -276,7 +276,8 @@ def load_policy_file(path: str | os.PathLike, max_bytes: int = MAX_POLICY_BYTES)
         raise ContractError("policy_unreadable") from None
     try:
         opened = os.fstat(descriptor)
-        if not os.path.samestat(before, opened) or not stat.S_ISREG(opened.st_mode):
+        if not os.path.samestat(before, opened) or not stat.S_ISREG(opened.st_mode) \
+                or opened.st_ctime_ns != before.st_ctime_ns:
             raise ContractError("policy_changed")
         chunks, total = [], 0
         while True:
@@ -288,7 +289,9 @@ def load_policy_file(path: str | os.PathLike, max_bytes: int = MAX_POLICY_BYTES)
                 raise ContractError("policy_too_large")
             chunks.append(chunk)
         after = os.fstat(descriptor)
-        if (after.st_size, after.st_mtime_ns) != (opened.st_size, opened.st_mtime_ns) or total != opened.st_size:
+        # ctime cannot be set back by a writer (unlike mtime via utime): it exposes same-inode rewrites
+        if (after.st_size, after.st_mtime_ns, after.st_ctime_ns) != (opened.st_size, opened.st_mtime_ns,
+                                                                     opened.st_ctime_ns) or total != opened.st_size:
             raise ContractError("policy_changed")
     finally:
         os.close(descriptor)
@@ -296,7 +299,7 @@ def load_policy_file(path: str | os.PathLike, max_bytes: int = MAX_POLICY_BYTES)
         current = os.lstat(path)
     except OSError:
         raise ContractError("policy_changed") from None
-    if not os.path.samestat(before, current):
+    if not os.path.samestat(before, current) or current.st_ctime_ns != before.st_ctime_ns:
         raise ContractError("policy_changed")
     try:
         document = json.loads(b"".join(chunks).decode("utf-8"),
