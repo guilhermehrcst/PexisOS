@@ -328,6 +328,23 @@ class BoundedInputTests(unittest.TestCase):
                 with self.assertRaises(ReplayError):
                     source.finish()
 
+    def test_grown_line_never_reads_more_than_the_remaining_file_budget(self):
+        """A huge line limit cannot allocate the size of an appended long line."""
+        for operation in ("read", "readline"):
+            with self.subTest(operation=operation), tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "grow.csv"
+                path.write_bytes(b"initial")
+                with canreplay.open_input(path, 64, "frame") as source:
+                    with open(path, "ab") as writer:
+                        writer.write(b"x" * (64 * 1024))
+                    with self.assertRaises(ReplayError) as error:
+                        if operation == "readline":
+                            source.readline(1 << 40)
+                        else:
+                            source.read()
+                    self.assertEqual(error.exception.code, "input_changed")
+                    self.assertEqual(source.bytes_read, 65)
+
 
 class OutputSafetyTests(LabCase):
     def test_outputs_may_not_alias_inputs_or_each_other(self):
@@ -388,6 +405,54 @@ class OutputSafetyTests(LabCase):
         self.assertNotEqual(self.out.read_text(), "old records\n")
         self.assertEqual(sorted(p.name for p in self.outdir.iterdir()), ["records.jsonl"])
 
+    def test_old_summary_is_synced_before_records_commit_even_in_another_directory(self):
+        write_inputs(self.inputs)
+        other = self.root / "separate-summary"
+        other.mkdir()
+        summary = other / "summary.json"
+        summary.write_text("stale summary")
+        self.out.write_text("stale records")
+        real_commit = lab_cli._Pending.commit
+        real_sync = lab_cli._fsync_directory
+        events = []
+
+        def commit(pending):
+            events.append(("commit", pending.target))
+            return real_commit(pending)
+
+        def sync(path, *, required=False):
+            events.append(("sync_required" if required else "sync", path))
+            return real_sync(path, required=required)
+
+        with mock.patch.object(lab_cli._Pending, "commit", commit), \
+             mock.patch.object(lab_cli, "_fsync_directory", sync):
+            code, stderr = self.run_lab(summary=summary)
+        self.assertEqual(code, 0, stderr)
+        self.assertTrue(summary.is_file())
+        self.assertEqual(events.count(("sync_required", summary)), 1, events)
+        self.assertLess(events.index(("sync_required", summary)), events.index(("commit", self.out)))
+
+    def test_old_summary_fsync_failure_prevents_records_commit(self):
+        write_inputs(self.inputs)
+        other = self.root / "separate-summary"
+        other.mkdir()
+        summary = other / "summary.json"
+        summary.write_text("old summary")
+        self.out.write_text("old records")
+
+        def cannot_sync(path, *, required=False):
+            if required:
+                raise OSError(5, "synthetic fsync failure")
+            return None
+
+        with mock.patch.object(lab_cli, "_fsync_directory", cannot_sync):
+            code, stderr = self.run_lab(summary=summary)
+        self.assertEqual(code, 1, stderr)
+        self.assertIn("output_write_error", stderr)
+        self.assertEqual(self.out.read_text(), "old records")
+        self.assertFalse(summary.exists())
+        self.assertEqual(sorted(p.name for p in other.iterdir()), [])
+
     def test_interrupt_leaves_no_temporary_files(self):
         write_inputs(self.inputs)
 
@@ -438,6 +503,15 @@ class SafetyGuardTests(LabCase):
     def test_native_library_loading_is_refused(self):
         import ctypes
         self.attempt(lambda: ctypes.CDLL(None))
+
+    def test_low_level_and_joinable_thread_start_are_refused(self):
+        # Python 3.11/3.12 use _thread.start_new_thread; Python 3.13+
+        # may use _thread.start_joinable_thread for threading.Thread.start().
+        import _thread
+        import threading
+
+        self.attempt(lambda: _thread.start_new_thread(lambda: None, ()))
+        self.attempt(lambda: threading.Thread(target=lambda: None, daemon=True).start())
 
     def test_guard_is_inactive_outside_a_replay(self):
         with canreplay.no_device_access():
@@ -576,6 +650,76 @@ class SafetyGuardTests(LabCase):
         self.assertFalse(holder.is_alive())
         self.assertEqual(contender_results, ["safety_guard", "socket_blocked"])
         self.assertEqual(owner_results, ["safety_guard"])
+        self.assertFalse(canreplay._guard["active"])
+
+    def test_inflight_device_audit_finishes_before_guard_finalization(self):
+        """An audit callback paused in device classification cannot outlive the guard.
+
+        The worker and finisher are both pre-existing threads. Only /dev/null
+        is opened, and the callback blocks its open before the syscall.
+        """
+        import threading
+
+        started = threading.Event()
+        entered = threading.Event()
+        release = threading.Event()
+        request_exit = threading.Event()
+        exiting = threading.Event()
+        audit_done = threading.Event()
+        final_done = threading.Event()
+        worker_result, final_result = [], []
+        original_is_device = canreplay._is_device
+
+        def paused_classification(path):
+            if path == "/dev/null":
+                entered.set()
+                if not release.wait(timeout=10):
+                    raise AssertionError("device classifier was not resumed")
+                return True
+            return original_is_device(path)
+
+        def worker():
+            if started.wait(timeout=10):
+                try:
+                    with open("/dev/null", "rb"):
+                        worker_result.append("opened")
+                except canreplay.SafetyViolation:
+                    worker_result.append("blocked")
+            audit_done.set()
+
+        def closer():
+            if request_exit.wait(timeout=10):
+                exiting.set()
+                try:
+                    guard.__exit__(None, None, None)
+                    final_result.append("succeeded")
+                except ReplayError as error:
+                    final_result.append(error.code)
+            final_done.set()
+
+        reader = threading.Thread(target=worker)
+        finisher = threading.Thread(target=closer)
+        reader.start()
+        finisher.start()
+        with mock.patch.object(canreplay, "_is_device", side_effect=paused_classification):
+            guard = canreplay.no_device_access()
+            guard.__enter__()
+            try:
+                started.set()
+                self.assertTrue(entered.wait(timeout=10), "audit callback did not begin")
+                request_exit.set()
+                self.assertTrue(exiting.wait(timeout=10))
+                self.assertFalse(final_done.wait(timeout=0.05), "guard exited before the in-flight audit")
+            finally:
+                release.set()
+            self.assertTrue(audit_done.wait(timeout=10))
+            self.assertTrue(final_done.wait(timeout=10))
+        reader.join(timeout=10)
+        finisher.join(timeout=10)
+        self.assertFalse(reader.is_alive())
+        self.assertFalse(finisher.is_alive())
+        self.assertEqual(worker_result, ["blocked"])
+        self.assertEqual(final_result, ["safety_guard"])
         self.assertFalse(canreplay._guard["active"])
 
     def test_guard_failure_in_the_factory_also_fails_closed(self):
@@ -778,6 +922,25 @@ class CodexReviewTests(LabCase):
             code, stderr = self.run_lab(flag, str(10 ** 16))
             self.assertEqual(code, 2, (flag, stderr))
             self.assertNotIn("Traceback", stderr)
+
+
+class WorkflowSafetyTests(unittest.TestCase):
+    def test_mcp_ci_does_not_mask_unittest_failure_through_tee(self):
+        workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/tests.yml").read_text()
+        step = workflow.split("  fabric-mcp:", 1)[1].split("  compat-openai-agents:", 1)[0]
+        segment = step.split("- name: Run the whole suite with the real SDK installed", 1)[1]
+        segment = segment.split("- name:", 1)[0]
+        self.assertIn("shell: bash", segment)
+        self.assertIn(" | tee ", segment)
+
+    def test_pipefail_propagates_failed_producer(self):
+        import shutil
+        import subprocess
+        if not shutil.which("bash"):
+            self.skipTest("Bash not available")
+        result = subprocess.run(["bash", "--noprofile", "--norc", "-e", "-o", "pipefail",
+                                 "-c", "false | tee /dev/null"], capture_output=True)
+        self.assertNotEqual(result.returncode, 0)
 
 
 if __name__ == "__main__":
