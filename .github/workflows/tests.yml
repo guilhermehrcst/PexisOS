@@ -46,6 +46,14 @@ jobs:
             --summary "$RUNNER_TEMP/demo/summary.json" > "$RUNNER_TEMP/demo/assessments.jsonl"
           python -c "import json, sys; print(json.load(open(sys.argv[1]))['observations']['status_counts'])" \
             "$RUNNER_TEMP/demo/summary.json"
+      - name: Smoke-test the Agent Fabric without the optional MCP SDK
+        env:
+          PYTHONPATH: src
+        run: |
+          python examples/fabric/python_api.py
+          python -m pexislink fabric demo > /dev/null
+          set +e; python -m pexislink fabric mcp-stdio --principal demo:principal:guest; code=$?; set -e
+          test "$code" -eq 3  # mcp_unavailable: the core never requires the SDK
 
   fabric-mcp:
     name: fabric-mcp (real MCP SDK, Python ${{ matrix.python-version }})
@@ -78,7 +86,10 @@ jobs:
       - name: Smoke-test the developer demo
         env:
           PYTHONPATH: src
-        run: python -m pexislink fabric demo > "$RUNNER_TEMP/demo.json" && python -c "import json,sys; d=json.load(open(sys.argv[1])); assert d['audit']['chain_valid']" "$RUNNER_TEMP/demo.json"
+        run: |
+          python -m pexislink fabric demo > "$RUNNER_TEMP/demo.json"
+          python -c "import json,sys; d=json.load(open(sys.argv[1])); assert d['audit']['chain_valid']" "$RUNNER_TEMP/demo.json"
+          python examples/fabric/mcp_client.py demo:principal:guest
 
   benchmark-reproducibility:
     runs-on: ubuntu-latest
