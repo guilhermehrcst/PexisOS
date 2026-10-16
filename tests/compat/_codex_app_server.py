@@ -89,16 +89,27 @@ class CodexAppServer:
         write_config(root / "codex", servers)
         self.stderr_path = root / "app-server.log"
         self._stderr = open(self.stderr_path, "w", encoding="utf-8")
-        self.proc = subprocess.Popen([codex, "app-server"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                     stderr=self._stderr, env=codex_env(root, env), cwd=str(root / "home"),
-                                     text=True, bufsize=1)
-        self._messages: queue.Queue = queue.Queue()
-        self.notifications: list[dict] = []
-        self._next_id = 0
-        threading.Thread(target=self._read, daemon=True).start()
-        self.initialize_result = self.request("initialize", {"clientInfo": {"name": "pexislink-compat",
-                                                                             "version": "0"}})
-        self._send({"jsonrpc": "2.0", "method": "initialized"})
+        try:
+            self.proc = subprocess.Popen([codex, "app-server"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                         stderr=self._stderr, env=codex_env(root, env), cwd=str(root / "home"),
+                                         text=True, bufsize=1)
+        except BaseException:
+            self._stderr.close()
+            raise
+        try:
+            self._messages: queue.Queue = queue.Queue()
+            self.notifications: list[dict] = []
+            self._next_id = 0
+            threading.Thread(target=self._read, daemon=True).start()
+            self.initialize_result = self.request(
+                "initialize", {"clientInfo": {"name": "pexislink-compat", "version": "0"}}
+            )
+            self._send({"jsonrpc": "2.0", "method": "initialized"})
+        except BaseException:
+            # __enter__ has not returned yet: context-manager cleanup will not
+            # run if JSON-RPC initialization fails. Do not strand a process.
+            self.close()
+            raise
 
     def _read(self) -> None:
         for line in self.proc.stdout:
