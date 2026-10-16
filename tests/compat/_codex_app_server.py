@@ -79,6 +79,18 @@ class RpcError(Exception):
         self.error = error
 
 
+class ProtocolError(RuntimeError):
+    """app-server stdout carried something other than a JSON-RPC message object. The offending
+    line is never included: it is untrusted output and could carry anything."""
+
+
+class _Violation:
+    """Queued by the reader in place of a message; ``reason`` names the kind, never the content."""
+
+    def __init__(self, reason: str):
+        self.reason = reason
+
+
 class CodexAppServer:
     """One ``codex app-server`` process over stdio, with an isolated home."""
 
@@ -98,6 +110,7 @@ class CodexAppServer:
             raise
         try:
             self._messages: queue.Queue = queue.Queue()
+            self._violation: str | None = None
             self.notifications: list[dict] = []
             self._next_id = 0
             threading.Thread(target=self._read, daemon=True).start()
@@ -112,11 +125,35 @@ class CodexAppServer:
             raise
 
     def _read(self) -> None:
-        for line in self.proc.stdout:
-            line = line.strip()
-            if line:
-                self._messages.put(json.loads(line))
-        self._messages.put(None)
+        """Queue each stdout message. The first non-JSON-RPC line, or a failure of the stream itself,
+        is queued once as a ``_Violation`` (the consumer then fails fast); later lines are drained and
+        dropped so Codex never blocks on a full pipe. The end-of-stream sentinel is always queued."""
+        violated = False
+        try:
+            for line in self.proc.stdout:
+                line = line.strip()
+                if not line or violated:
+                    continue
+                reason = None
+                try:
+                    message = json.loads(line)
+                except ValueError:
+                    reason = "a line that is not JSON"
+                else:
+                    if not isinstance(message, dict):
+                        reason = "JSON that is not an object"
+                    elif "id" not in message and "method" not in message:
+                        reason = "an object that is not a JSON-RPC message"
+                if reason is None:
+                    self._messages.put(message)
+                else:
+                    violated = True
+                    self._messages.put(_Violation(reason))
+        except Exception as exc:  # undecodable bytes, a closed or failed pipe
+            if not violated:
+                self._messages.put(_Violation(f"an unreadable stream ({type(exc).__name__})"))
+        finally:
+            self._messages.put(None)
 
     def _send(self, message: dict) -> None:
         self.proc.stdin.write(json.dumps(message) + "\n")
@@ -128,9 +165,14 @@ class CodexAppServer:
         self._send({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params})
         deadline = time.monotonic() + self.timeout
         while time.monotonic() < deadline:
+            if self._violation is not None:  # sticky: the stream is no longer trustworthy
+                raise ProtocolError(f"codex app-server stdout carried {self._violation} (during {method})")
             try:
                 message = self._messages.get(timeout=1)
             except queue.Empty:
+                continue
+            if isinstance(message, _Violation):
+                self._violation = message.reason
                 continue
             if message is None:
                 raise RuntimeError(f"codex app-server exited during {method}")
