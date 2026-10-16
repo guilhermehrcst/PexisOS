@@ -1,9 +1,64 @@
 # ADR 0002 (Proposed): Provider-neutral PexisLink Agent/Device Infrastructure
 
-- **Status:** PROPOSED, pending owner and engineering review
-- **Date:** 2026-10-15
+- **Status:** PROPOSED, pending owner and engineering review. The overall direction is still a proposal. A first read-only slice is now **implemented** and merged; see §0 for what is IMPLEMENTED, PROPOSED or BLOCKED.
+- **Date:** 2026-10-15 (reconciled with the merged code on 2026-10-16)
 - **Tracking issue:** [#8](https://github.com/guilhermehrcst/Pexislink/issues/8)
 - **Scope:** long-term product architecture only. This ADR changes **no** code, permissions, deployment or existing release behavior.
+
+## 0. Implementation status (reconciled 2026-10-16)
+
+This ADR was written before any code existed. Since then:
+- **Agent Fabric v0.1** was merged in PR #11 (`f7c6a7a`);
+- the optional **OpenAI Agents SDK compatibility suite** was merged in PR #12 (`3396864`).
+
+The authoritative description of what exists is the code in `src/pexislink/fabric/`, plus these documents:
+- [AGENT-FABRIC.md](../AGENT-FABRIC.md)
+- [AGENT-FABRIC-THREAT-MODEL.md](../AGENT-FABRIC-THREAT-MODEL.md)
+- [AGENT-FABRIC-DECISIONS.md](../AGENT-FABRIC-DECISIONS.md)
+- [COMPAT-OPENAI-AGENTS.md](../COMPAT-OPENAI-AGENTS.md)
+
+The vision in §1–§8 is unchanged. Where the implemented contract differs from the illustrative text below, a **Reconciliation note** marks the difference, and the code wins.
+
+### IMPLEMENTED (in `main`, covered by tests and CI)
+
+| Area | What exists | Evidence |
+|---|---|---|
+| Placement | One local process, standard library only. The core imports no model or provider SDK, no MCP SDK and no cantools. | `tests/test_architecture.py` (`AgentFabricIsolationTests`); compat T15 |
+| Entities | `EntitySpec` (`pexislink.entity.v0`): synthetic, operator-registered identifiers (`namespace:kind:name`), typed signals with units, plausible ranges bounded to ±1e15, enum vocabularies, and timing (`expected_interval_s`, `max_latency_s`, `stale_after_s`). There is no attestation. | `contracts.py`; `test_fabric_contracts.py` |
+| Observations | `pexislink.observation.v0`, closed schema: `schema_version`, `event_id`, `entity_id`, `observed_at`, `received_at` (RFC 3339, `Z` only), `source` (must equal the entity's adapter), `kind`, `payload` (declared signals only; strings only as enum values), `quality`, `provenance`. | `contracts.py`, `store.py`; contract and adversarial tests |
+| Evidence states | `observed`, `late` (derived by the core only), `unknown`, `rejected` (counted, never stored) and `insufficient`. Assessment states are `nominal`, `deviation`, `stale`, `insufficient` and `unknown`. Freshness follows usable evidence, per signal. A numerically unsafe computation abstains and is never `nominal`. | `assess.py`; `test_fabric_final_review.py` |
+| Capabilities | Exactly four read-only capabilities: `observe`, `describe`, `read_history` and `assess`. Any other name, such as `transmit`, `write`, `install`, `scan` or `enroll`, cannot be represented and fails closed as `capability_not_supported`. *Declared* (supported), *available*, *authorized* and *executed* are reported separately. | `contracts.py`, `runtime.py`; T10 and T11 in the threat model |
+| Policy | Deny by default. Exact per-principal, per-entity, per-capability grants with a **mandatory** expiry, immediate revocation and an injectable clock. Every internal fault fails closed. An entity the principal holds no grant for answers `not_found`, the same as an absent one. | `policy.py`; `test_fabric_policy.py` |
+| Identity of the caller | The principal is **assigned by the operator when the session or server starts** (`Fabric.open_session`, or `--principal` for stdio). It is never taken from tool arguments. **There is no cryptographic client authentication**: the trust root is whoever launches the process. | `runtime.py`, `mcp_server.py`; compat T05 |
+| Audit | A bounded, hash-chained, in-memory log. Every attempt leaves a record with an explicit event: `rejected`, `authorization`, `failed` or `completed`. `executed: true` is written only after every final check. A record is committed only after its sink accepts it, and a failing sink fails the call closed. Records hold codes, never payload values or raw arguments. | `policy.py`, `runtime.py`; `AuditSemanticsTests` |
+| Provenance | `source: synthetic_fixture`, `license: project_original`, `generator`, `seed`. Only synthetic data exists. | `contracts.py` |
+| Domain adapters | Three synthetic domains share one contract: a refrigerator, a CAN vehicle built on a test signal table (unknown frames carry an empty payload) and a software service. | `adapters/`; `test_fabric_runtime.py` |
+| MCP transport | Optional, using the official Python SDK (`mcp==2.2.0`, low-level `Server`), **stdio only**. Five tools: `list_entities`, `describe_entity`, `list_capabilities`, `read_observations` and `explain_assessment`, each with a closed input schema whose parity with the core validator is tested. The transport only calls `Session.call`. | `mcp_server.py`; `test_fabric_mcp.py` |
+| Provider compatibility | The published OpenAI Agents SDK (`MCPServerStdio`) passes the 15-case matrix on Python 3.11–3.13, with no model, API key or network. Interoperability findings I1–I6 are documented. | PR #12; `reports/compat/` |
+| Determinism and bounds | Byte-identical demo and replay. Limits on entities, observations per entity, page size, result bytes, payload depth, keys and string length, audit records and grants. Measured resource use is documented. | `AGENT-FABRIC.md` §9–10 |
+
+> **The MCP annotation `readOnlyHint` is not a security boundary.** It is advice to the client. Isolation comes from the absence of any write capability in the contract, the server-side policy and the `no_effects()` audit-hook tripwire. That tripwire is not a sandbox either: native code can bypass Python audit hooks.
+
+### PROPOSED (direction only; no code)
+
+- On-device agents, local gateways representing several devices, and authorized remote connectors (§2 *Execution placements*). Only a single local process exists today.
+- A `recommend` capability. `replay` exists as a determinism property of the store and the demo, not as a separate capability.
+- Wrapping the v0.4 CAN replay lab (PR #10) output as a Fabric adapter. The Fabric's vehicle adapter is currently independent and synthetic.
+- Compatibility gates for Claude Code, Codex CLI and the Claude Agent SDK as MCP clients.
+- **Contracts v0.2:** a possible split of `read_observations` into `read_latest` / `read_history` to resolve interoperability finding I1. This is a migration proposal; the existing tool is neither removed nor renamed.
+- Promotion of the `v0` schemas to a stable public API.
+
+### BLOCKED (require explicit owner authorization and a separate validation)
+
+These are decisions B1–B6 in AGENT-FABRIC-DECISIONS.md:
+- any network transport (HTTP or SSE), hosted connectors or remote clients;
+- any non-read-only capability: write, transmit, control, install, execute, scan or enroll;
+- real devices, buses or services;
+- cryptographic entity or principal identity;
+- persistent storage;
+- a stable public API.
+
+Actuator control (§4) remains out of scope indefinitely.
 
 ## 1. Why this exists
 
@@ -74,6 +129,8 @@ The **Model Context Protocol (MCP)** already standardizes how AI applications ac
 
 **First minimal read-only MCP tool candidates** (names are provisional; freeze only after conformance review):
 
+> **Reconciliation note (IMPLEMENTED).** All five tools exist, **without** the `pexislink.` prefix, as `list_entities`, `describe_entity`, `read_observations`, `explain_assessment` and `list_capabilities`. When an MCP client connects more than one PexisLink server, name collisions are handled on the client side, for example with the OpenAI Agents SDK's `include_server_in_tool_names` (finding I4). `read_observations` takes `mode=latest` (capability `observe`) or `mode=history` (capability `read_history`, paginated by an opaque numeric cursor).
+
 - \`pexislink.list_entities\`: list enrolled pseudonymous entities visible to the caller, with pagination and no network discovery.
 - \`pexislink.describe_entity\`: return declared sensor/capability schemas and last-observed timestamps, never manufacture real-time status.
 - \`pexislink.read_observations\`: read a bounded window of authenticated or synthetic observations for one authorized entity; surface provenance, freshness and quality.
@@ -95,6 +152,17 @@ The **Model Context Protocol (MCP)** already standardizes how AI applications ac
 
 
 ## 3. Minimum event contract (proposed, not yet an implemented API)
+
+> **Reconciliation note (IMPLEMENTED, superseding the example below).** The implemented `pexislink.observation.v0` contract differs from the example as follows:
+> - The version field is `schema_version`, not `schema`.
+> - The producing adapter is `source`, not `adapter`, and it must equal the adapter the entity is registered with.
+> - Timestamps accept only `Z` (UTC), not an arbitrary explicit offset.
+> - `quality.status` may be claimed by an adapter only as `observed` or `unknown`. `late` and the timing flags are derived by the core.
+> - Duplicate `event_id`s within the retention window are **rejected**, not accepted. Out-of-order and delayed events are stored but classified `late`. Arrival order is preserved.
+> - Provenance has `source`, `license`, `generator` and an optional `seed`.
+> - The assessment's abstention outcome is `insufficient` (with `stale` and `unknown`), rather than `insufficient_evidence`.
+>
+> See AGENT-FABRIC.md §7.
 
 Prefer versioned JSON-compatible schemas for the first prototype; retain domain-specific typed payloads rather than forcing all observations into one generic float.
 
@@ -129,6 +197,8 @@ This is an **illustrative proposed shape**. Implementing a final schema requires
 
 MVP capabilities: `observe`, `replay`, `assess`, `recommend` on **synthetic local files only**. There are **no operational device commands**.
 
+> **Reconciliation note (IMPLEMENTED).** The implemented read-only set is `observe`, `describe`, `read_history` and `assess`. `replay` is a determinism property, and `recommend` is not implemented (PROPOSED). The synthetic data is generated in memory from fixed seeds rather than read from files. The only file input is the operator's policy file: a closed schema, symlinks refused, size bounded, identity checked against TOCTOU.
+
 Later designs must separately specify:
 
 - strong identity and pairing where the platform can support it; ownership proof and revocation;
@@ -150,6 +220,8 @@ Build a **local, offline, deterministic synthetic proof of concept** with **thre
 |---|---|---|---|
 | Virtual appliance | Synthetic fridge temperature / compressor state file | irregular cooling cycles | The agent need not run on an appliance |
 | Vehicle | Synthetic CAN replay file from the independently reviewed v0.4 lab | decoded DBC-backed signal | Existing vehicle research can be adapted without changing core behavior |
+
+> **Reconciliation note.** The implemented vehicle adapter decodes in-memory synthetic frames through its own test signal table. It shares no code with the v0.4 lab (PR #10) and does not depend on cantools. Wrapping the lab's output remains PROPOSED.
 | Digital service | Synthetic server uptime/latency/error-count file | latency degradation | The contract is not tied to physical sensors |
 
 The PoC **does not** need three different machine-learning models. Start with one deterministic rule or descriptive summarizer per context. Model inference, cross-agent coordination, energy optimization and live hardware are separate research problems.
@@ -182,7 +254,9 @@ The shared read-only observations must also be exposed through **one optional lo
 - **v0.4 Lab A** `cantools`: follow issue #7, strict read-only offline file replay. A later reviewed adapter may **wrap** its output, not force changes to the experiment.
 - **Source provenance PR #6:** remains independent, with its own review/merge criteria.
 
-Only build a separate `pexislink_agents` module/package after the event and policy contracts pass the synthetic three-domain PoC. Do not split repositories or implement a service mesh without measurements demonstrating a real need. Product diagrams are not implementation evidence.
+Only build a separate `pexislink_agents` module/package after the event and policy contracts pass the synthetic three-domain PoC.
+
+> **Reconciliation note (IMPLEMENTED).** The PoC is the subpackage `pexislink.fabric`, inside the existing distribution, with the MCP transport as one optional module (decision D1). Architecture tests enforce the isolation in both directions. A separate distribution can follow later without API changes. Do not split repositories or implement a service mesh without measurements demonstrating a real need. Product diagrams are not implementation evidence.
 
 ## 7. Alternatives considered
 
@@ -205,4 +279,17 @@ Only build a separate `pexislink_agents` module/package after the event and poli
 6. What precisely does the PexisLink runtime add beyond a basic MCP server, and can an independent developer verify the distinction in minutes?
 7. Which OpenAI and Anthropic client/SDK combinations must form the versioned compatibility gate without requiring the companies' direct endorsement?
 
-**Decision gate:** Approve or revise this direction before authorizing code. Issue #8 is the sole architecture tracker for PexisLink Everywhere.
+### Partial answers from the implemented slice (2026-10-16)
+
+- **Q6.** What a basic MCP server lacks and the runtime adds:
+  - deny-by-default grants bound to an operator-assigned principal;
+  - evidence states derived by the core;
+  - freshness, stale and abstention semantics;
+  - typed, bounded, closed observation contracts;
+  - an audit log with explicit events.
+
+  A developer can verify these in minutes with `pexislink fabric demo` and the MCP examples (AGENT-FABRIC.md §1, §3).
+- **Q7.** One gate exists today: the published OpenAI Agents SDK over stdio, with 15/15 cases on Python 3.11–3.13. Claude Code, Codex CLI and the Claude Agent SDK are PROPOSED gates.
+- **Q1–Q5** remain open.
+
+**Decision gate:** Approve or revise this direction. The first read-only slice has been authorized and merged (PRs #11 and #12). Every item in §0 *PROPOSED* and *BLOCKED* still needs explicit owner approval before code. Issue #8 is the sole architecture tracker for PexisLink Everywhere.
