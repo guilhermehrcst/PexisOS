@@ -13,6 +13,11 @@ license-files = ["LICENSE"]
 keywords = ["telemetry", "anomaly-detection", "vehicle-health"]
 dependencies = []
 
+[project.optional-dependencies]
+# Optional MCP transport for the experimental Agent Fabric. For a reproducible,
+# hash-checked install use requirements/fabric-mcp.txt instead.
+mcp = ["mcp==2.2.0"]
+
 [project.scripts]
 pexislink = "pexislink.cli:main"
 
