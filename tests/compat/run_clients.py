@@ -12,7 +12,7 @@ model would be needed; NOT_SUPPORTED when the client's public interface cannot e
 Skip reasons must start with ``not_run:`` or ``not_supported:``; any other skip counts as FAIL and
 makes the CLI exit nonzero even for a non-required client. Both fixed logical IDs and the full set of
 individual evidence methods must exist. ``--require`` exits 1 unless all methods are present and
-every required ID is PASS (explicitly supported exceptions live in ``EXPECTED_NOT_SUPPORTED``).
+every required evidence method is PASS (except an explicitly documented NOT_SUPPORTED method).
 """
 
 from __future__ import annotations
@@ -138,6 +138,14 @@ EXPECTED_TEST_METHODS = {
         "test_K08_tool_calls_through_claude_code",
     )),
 }
+# An explicitly unsupported method is NOT interchangeable with a passed one.
+# Only this observed Codex sub-check may remain NOT_SUPPORTED without failing
+# --require; every other required evidence method must actually PASS.
+EXPECTED_METHOD_NOT_SUPPORTED = {
+    "openai-agents": frozenset(),
+    "codex-cli": frozenset({"test_C01_negotiated_mcp_protocol_version_is_observable"}),
+    "claude-code": frozenset(),
+}
 EXPECTED_NOT_SUPPORTED = {"codex-cli": set(), "openai-agents": set(), "claude-code": set()}
 LIMITATIONS = {
     "openai-agents": ["I1 strict schema conversion unsatisfiable for read_observations mode=latest",
@@ -193,21 +201,23 @@ def run_module(module: str, prefix: str) -> dict:
     skipped = {t.id(): reason for t, reason in result.skipped}
     per_id: dict[str, list[str]] = defaultdict(list)
     reasons: dict[str, set[str]] = defaultdict(set)
+    method_statuses: dict[str, str] = {}
     for test_id in ids:
         match = re.search(rf"\.test_({prefix}\d\d)_", test_id)
         if not match:
             continue
         key = match.group(1)
         if test_id in failed:
-            per_id[key].append("fail")
+            kind = "fail"
         elif test_id in skipped:
             reason = skipped[test_id]
             kind = "not_run" if reason.startswith("not_run:") else \
                 "not_supported" if reason.startswith("not_supported:") else "fail"
-            per_id[key].append(kind)
             reasons[key].add(reason)
         else:
-            per_id[key].append("pass")
+            kind = "pass"
+        per_id[key].append(kind)
+        method_statuses[test_id.rsplit(".", 1)[-1]] = kind.upper()
     matrix = {}
     for key in sorted(per_id):
         states = per_id[key]
@@ -224,7 +234,8 @@ def run_module(module: str, prefix: str) -> dict:
                        "reasons": sorted(reasons[key])}
     methods = [test_id.rsplit(".", 1)[-1] for test_id in ids
                if re.search(rf"\.test_{prefix}\d\d_", test_id)]
-    return {"matrix": matrix, "failures": sorted(failed), "methods": methods}
+    return {"matrix": matrix, "failures": sorted(failed), "methods": methods,
+            "method_statuses": method_statuses}
 
 
 def matrix_integrity_errors(name: str, spec: dict, matrix: dict, methods: list[str]) -> list[str]:
@@ -255,14 +266,21 @@ def matrix_integrity_errors(name: str, spec: dict, matrix: dict, methods: list[s
     return problems
 
 
-def required_client_errors(name: str, spec: dict, matrix: dict, methods: list[str]) -> list[str]:
-    """Fail if any required method is missing or any required ID did not PASS."""
+def required_client_errors(name: str, spec: dict, matrix: dict, methods: list[str],
+                           method_statuses: dict[str, str]) -> list[str]:
+    """Require each evidence method, not merely one passing subtest per ID."""
     failures = matrix_integrity_errors(name, spec, matrix, methods)
     for test_id in sorted(EXPECTED_TEST_IDS[name]):
         status = matrix.get(test_id, {}).get("status", "MISSING")
         if status != "PASS" and not (status == "NOT_SUPPORTED" and
                                      test_id in EXPECTED_NOT_SUPPORTED[name]):
             failures.append(f"{name}: {test_id} must PASS (got {status})")
+    for method in sorted(EXPECTED_TEST_METHODS[name]):
+        status = method_statuses.get(method, "MISSING")
+        if status == "PASS" or (status == "NOT_SUPPORTED" and
+                                method in EXPECTED_METHOD_NOT_SUPPORTED[name]):
+            continue
+        failures.append(f"{name}: {method} must PASS (got {status})")
     return failures
 
 
@@ -296,7 +314,8 @@ def main() -> int:
                            "NOT_RUN" if "NOT_RUN" in states else "NOT_SUPPORTED"}
         summary = {s: sum(1 for m in run["matrix"].values() if m["status"] == s) for s in STATUSES}
         integrity_errors = matrix_integrity_errors(name, spec, run["matrix"], run["methods"])
-        required_errors = required_client_errors(name, spec, run["matrix"], run["methods"]) if name in args.require else []
+        required_errors = (required_client_errors(name, spec, run["matrix"], run["methods"],
+                                                  run["method_statuses"]) if name in args.require else [])
         clients[name] = {"interface": spec["interface"], "version": client_versions[name],
                          "executed": summary["PASS"] + summary["FAIL"] > 0, "summary": summary,
                          "matrix": run["matrix"], "cases": cases, "failures": run["failures"],
