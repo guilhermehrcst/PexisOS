@@ -85,8 +85,10 @@ no run time. Outputs are byte-identical across runs; across Python 3.11-3.13 onl
 `tool.python` differs (checked on 1,000,000 frames).
 
 **Commit protocol.** Both files are written to temporary files next to their destinations
-and fsync'ed; then an existing summary is removed, the records are renamed into place, the
-directory fsync'ed, and the summary renamed last. Two-file atomicity is not claimed: **the
+and fsync'ed. An existing summary is removed and **its directory fsync'ed before the records
+are committed**, even if the files live in different directories. If the summary-directory
+fsync fails, no new records are committed. Records are then renamed into place, their directory
+fsync'ed, and the summary renamed last. Two-file atomicity is not claimed: **the
 summary is the commit marker**. A records file without a summary whose `records.sha256`
 matches is an interrupted run. A run that fails before the commit leaves previous outputs
 untouched. A failure or Ctrl-C during the commit can leave the new records without a summary
@@ -127,22 +129,26 @@ payload. A gate failure commits nothing.
    FIFOs, sockets). Paths are resolved against the current directory before the check, so
    `//dev/null`, `/./dev/null` or a `chdir("/dev")` do not bypass it. A refusal fails the run
    with exit 11 whether library code catches it or not, and so does a thread that was started
-   during the replay and is still alive afterwards. Tests try each of these from inside the
-   decoder. In a fresh process the cantools import itself runs under the guard without a
-   refusal.
+   during the replay and is still alive afterwards. The audited low-level thread-start
+   events (_thread.start_new_thread and Python 3.13+ _thread.start_joinable_thread) are also
+   refused before a worker can start. Audit callbacks, guard activation, and finalization
+   share a lock, so a device classification in flight cannot complete after the guard exits.
+   Tests try these paths from synthetic decoders. In a fresh process the cantools import
+   itself runs under the guard without a refusal.
 
    Not covered (documented gaps): a direct call to the private `_posixsubprocess.fork_exec`
    (no audit event); a path opened relative to a `dir_fd` (the hook does not see the
    directory); system calls made by native code; activity of other threads after the replay
-   (only threads still alive are detected). While active, the guard also refuses these events
-   in unrelated threads of the same process. In the pinned tree, `_posixsubprocess` and
+   (other activity after guard deactivation is not controlled). While active, the guard
+   also refuses these events in unrelated threads of the same process. In the pinned tree, `_posixsubprocess` and
    `multiprocessing` appear nowhere; threads and name resolution appear only in python-can
    bus and interface modules (`can/bus.py`, `can/notifier.py`, `can/interfaces/...`), which run
    only when a bus is created, which the lab never does.
 3. **Inputs.** `lstat` and a same-file check before reading, `O_NOFOLLOW` where available,
-   byte caps enforced while streaming (the DBC is read with a bounded `read`), and
-   size/mtime/ctime/path identity compared after reading. A writer that restores size, mtime
-   and ctime while a file is read is not detected.
+   byte caps enforced **before** each read or readline allocation, at most the remaining
+   file budget plus a one-byte growth lookahead, even when the line limit is much larger
+   than the frame-file byte limit. Size/mtime/ctime/path identity is compared after reading.
+   A writer that restores size, mtime and ctime while a file is read is not detected.
 
 ## 6. Dependencies and licences
 
@@ -221,3 +227,16 @@ All findings were reproduced; each fix has a test that fails on `aaac4dd`
 | P2: an absurd `--max-dbc-kb` overflowed the read size and gave a traceback | every limit is bounded to 1..2^40; anything else is a usage error (exit 2) |
 
 Both have tests in `CodexReviewTests` that fail on `3a0d6fb`.
+
+## 11. Safety gate after the ADR merge
+
+The latest Codex review of Lab A identified four risks, addressed in this branch:
+
+| Severity | Fix and test |
+|---|---|
+| P1 | Device-path audit in flight while the guard closes: synchronization around callback classification and finalization, with a deterministic held-callback regression |
+| P1 | A growing unterminated CSV row exceeding the file budget: read and readline allocations bounded by the remaining bytes plus one lookahead byte |
+| P1 | Low-level threads absent from threading.enumerate: block both CPython raw/joinable thread-start audit events, with regression tests |
+| P2 | Old summary surviving a crash after new records are committed: fsync the summary directory after unlink, fail closed if unsupported, then commit records |
+
+The Fabric MCP job now explicitly sets a Bash shell with pipefail so unittest failures cannot be hidden by tee. These are defense-in-depth measures for an offline lab, not an OS sandbox. Independent re-review and CI on the final HEAD are still required before merge.
