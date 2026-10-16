@@ -71,6 +71,13 @@ STATIC = {
                   "billable model calls; no authorized, reproducible, credential-free test is possible",
     },
 }
+# Independent expected-ID manifest: deleting or renaming a test cannot silently
+# reduce the required conformance gate. This MUST NOT be inferred from discovery.
+EXPECTED_TEST_IDS = {
+    "openai-agents": frozenset(f"T{i:02d}" for i in range(1, 16)),
+    "codex-cli": frozenset(f"C{i:02d}" for i in range(1, 14)),
+    "claude-code": frozenset(f"K{i:02d}" for i in range(1, 9)),
+}
 EXPECTED_NOT_SUPPORTED = {"codex-cli": set(), "openai-agents": set(), "claude-code": set()}
 LIMITATIONS = {
     "openai-agents": ["I1 strict schema conversion unsatisfiable for read_observations mode=latest",
@@ -158,6 +165,39 @@ def run_module(module: str, prefix: str) -> dict:
     return {"matrix": matrix, "failures": sorted(failed)}
 
 
+def matrix_integrity_errors(name: str, spec: dict, matrix: dict) -> list[str]:
+    """Enforce a fixed test-ID contract, independently from test discovery.
+
+    A green subset is not a green suite: a missing or renamed test is a failed
+    evidence gate, including for clients not present in the current environment.
+    """
+    expected = EXPECTED_TEST_IDS[name]
+    discovered = set(matrix)
+    mapped = {test_id for ids in spec["cases"].values() for test_id in ids}
+    problems = []
+    for label, ids in (("missing_test_ids", expected - discovered),
+                       ("unexpected_test_ids", discovered - expected),
+                       ("unrecognized_case_mappings", mapped - expected)):
+        if ids:
+            problems.append(f"{name}: {label}: {', '.join(sorted(ids))}")
+    if set(spec["cases"]) != set(CASES):
+        problems.append(f"{name}: case_categories_do_not_match_the_declared_matrix")
+    if any(not ids for ids in spec["cases"].values()):
+        problems.append(f"{name}: empty_case_category")
+    return problems
+
+
+def required_client_errors(name: str, spec: dict, matrix: dict) -> list[str]:
+    """Fail if even one required ID is missing or did not fully pass."""
+    failures = matrix_integrity_errors(name, spec, matrix)
+    for test_id in sorted(EXPECTED_TEST_IDS[name]):
+        status = matrix.get(test_id, {}).get("status", "MISSING")
+        if status != "PASS" and not (status == "NOT_SUPPORTED" and
+                                     test_id in EXPECTED_NOT_SUPPORTED[name]):
+            failures.append(f"{name}: {test_id} must PASS (got {status})")
+    return failures
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--json", type=Path)
@@ -187,17 +227,15 @@ def main() -> int:
                            "PASS" if all(s == "PASS" for s in states) else
                            "NOT_RUN" if "NOT_RUN" in states else "NOT_SUPPORTED"}
         summary = {s: sum(1 for m in run["matrix"].values() if m["status"] == s) for s in STATUSES}
+        integrity_errors = matrix_integrity_errors(name, spec, run["matrix"])
+        required_errors = required_client_errors(name, spec, run["matrix"]) if name in args.require else []
         clients[name] = {"interface": spec["interface"], "version": client_versions[name],
                          "executed": summary["PASS"] + summary["FAIL"] > 0, "summary": summary,
                          "matrix": run["matrix"], "cases": cases, "failures": run["failures"],
+                         "integrity_errors": integrity_errors, "required_errors": required_errors,
                          "limitations": LIMITATIONS.get(name, [])}
-        if run["failures"]:
+        if run["failures"] or integrity_errors or required_errors:
             exit_code = 1
-        if name in args.require:
-            bad = [k for k, m in run["matrix"].items()
-                   if m["status"] != "PASS" and k not in EXPECTED_NOT_SUPPORTED[name]]
-            if bad or not run["matrix"]:
-                exit_code = 1
     for name, spec in STATIC.items():
         clients[name] = {"interface": spec["interface"], "version": client_versions[name], "executed": False,
                          "summary": {s: 0 for s in STATUSES} | {spec["status"]: len(CASES)},
