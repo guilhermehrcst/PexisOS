@@ -455,6 +455,7 @@ _BLOCKED_EVENTS = ("socket.__new__", "socket.connect", "socket.bind", "socket.se
                    "os.forkpty", "os.startfile", "ctypes.dlopen", "ctypes.dlsym",
                    "socket.getaddrinfo", "socket.gethostbyname", "socket.gethostbyaddr", "socket.getnameinfo")
 _guard = {"active": False, "violations": 0}
+_guard_lock = threading.Lock()  # serialize the process-global audit guard; concurrent/nested calls fail closed
 _hook_installed = False
 
 
@@ -491,34 +492,44 @@ def _is_device(path: str) -> bool:
 
 @contextmanager
 def no_device_access() -> Iterator[None]:
-    """Refuse sockets, processes, native libraries and device files while active.
+    """Refuse sockets, processes, native libraries and devices during one replay.
 
-    Audit hooks cannot be removed, so one hook is installed once per process and
-    only acts inside this context. A violation that library code swallowed is
-    still counted and fails the run afterwards.
+    The audit hook and its state are process-global, so a second nested or
+    concurrent replay is rejected rather than disabling the first replay's guard.
+    A rejected entry also invalidates the active replay even if swallowed.
+    This is defense in depth, not an OS sandbox.
     """
     global _hook_installed
-    if not _hook_installed:
-        sys.addaudithook(_audit)
-        _hook_installed = True
-    threads_before = {id(thread) for thread in threading.enumerate()}
-    _guard.update(active=True, violations=0)
-    pending: BaseException | None = None
-    try:
-        yield
-    except BaseException as error:  # finish the checks below before anything propagates; an uncaught
-        pending = error             # SafetyViolation was already counted by the hook, so it ends as exit 11
-    finally:
-        _guard["active"] = False
-    # A thread started during the replay could act after the guard switched off: fail closed.
-    if any(id(thread) not in threads_before and thread.is_alive() for thread in threading.enumerate()):
+    if not _guard_lock.acquire(blocking=False):
         _guard["violations"] += 1
-    if _guard["violations"]:  # takes precedence over any other error (e.g. a parser that caught the refusal)
-        raise ReplayError("safety_guard",
-                          "replay code attempted device, network, process or thread activity") from pending
-    if pending is not None:
-        raise pending
-
+        raise ReplayError("safety_guard", "another replay guard is already active")
+    try:
+        if not _hook_installed:
+            sys.addaudithook(_audit)
+            _hook_installed = True
+        threads_before = {id(thread) for thread in threading.enumerate()}
+        _guard.update(active=True, violations=0)
+        pending: BaseException | None = None
+        try:
+            yield
+        except BaseException as error:
+            pending = error  # validate the guard before propagating the original exception
+        finally:
+            try:
+                if any(id(thread) not in threads_before and thread.is_alive()
+                       for thread in threading.enumerate()):
+                    _guard["violations"] += 1
+                if _guard["violations"]:
+                    raise ReplayError(
+                        "safety_guard",
+                        "replay code attempted device, network, process, thread or nested replay activity",
+                    ) from pending
+                if pending is not None:
+                    raise pending
+            finally:
+                _guard["active"] = False
+    finally:
+        _guard_lock.release()
 
 # --------------------------------------------------------------- replay
 
