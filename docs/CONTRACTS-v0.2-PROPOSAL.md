@@ -23,7 +23,7 @@ contract has no way to say "absent" in a strict-mode payload, where every proper
 | Option | I1 | I2 | Compatibility | Assessment |
 |---|---|---|---|---|
 | A. Keep `read_observations`; drop the `if/then` and silently ignore `cursor`/`limit` for latest | resolved | no | Additive in the schema, but **changes semantics**: a forbidden argument becomes ignored | Rejected. Silently ignoring input violates the closed-schema principle and hides model mistakes |
-| B. Keep `read_observations`; make `cursor`/`limit` nullable (`null` ≡ absent) and drop `if/then` | partly (latest still cannot carry a non-null cursor or limit, but the strict schema is satisfiable) | resolved | Changes accepted inputs of an existing name | Weaker. The capability union `observe|read_history` stays on one tool |
+| B. Keep `read_observations`; make `cursor`/`limit` nullable (`null` ≡ absent) and drop `if/then` | partly (latest still cannot carry a non-null cursor or limit, but the strict schema is satisfiable) | resolved | Changes accepted inputs of an existing name | Weaker. The capability union (`observe` plus `read_history`) stays on one tool |
 | **C. Split into `read_latest` and `read_history`, each with a flat schema, and `null` ≡ absent for optional fields of the new tools only** | resolved (no conditional exists) | resolved for the new tools | **Additive:** new names, old name unchanged | **Recommended** |
 | D. Split only, with no nullable fields | resolved for `read_latest`; `read_history` under strict conversion would require a non-null `cursor` on the first page | no | Additive | Insufficient |
 
@@ -34,10 +34,14 @@ read_latest  { "entity_id": <id> }                                        requir
              additionalProperties: false            capability: observe
 read_history { "entity_id": <id>,
                "cursor": {"type": ["string","null"], "pattern": "^[0-9]{1,18}$"},
-               "limit":  {"type": ["integer","null"], "minimum": 1, "maximum": 50} }
+               "limit":  {"type": ["integer","null"], "minimum": 1, "maximum": <max_page>} }
              required: [entity_id]                  additionalProperties: false
              capability: read_history
 ```
+
+`<max_page>` is the active `FabricLimits.max_page` (default 50), exactly as the existing
+`read_observations` history schema derives it today (`_limit_schema(limits.max_page)` in
+`src/pexislink/fabric/runtime.py`). It is not a fixed 50.
 
 Semantics: `null` for `cursor` or `limit` means exactly "absent", and nothing else (no default
 inference). Results are byte-identical to `read_observations` with `mode=latest` and `mode=history`
