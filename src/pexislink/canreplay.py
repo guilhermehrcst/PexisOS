@@ -588,10 +588,16 @@ def _unsafe_descriptor(fd: int, unix_inodes: frozenset[str] | None = None) -> st
 
 
 def _inherited_descriptor_problems() -> list[str] | None:
-    """Unsafe descriptors open in this process, or None when they cannot be enumerated."""
+    """Unsafe open descriptors, or None if descriptor scanning is unavailable off Linux.
+
+    On Linux, inability to enumerate /proc/self/fd is a safety-guard failure,
+    never evidence that no unsafe descriptors are open.
+    """
     try:
         names = os.listdir("/proc/self/fd")
     except OSError:
+        if sys.platform.startswith("linux"):
+            raise ReplayError("safety_guard", "cannot inspect open file descriptors") from None
         return None
     inodes = _local_socket_inodes()
     _socket_snapshot["unix"] = inodes if inodes is not None else frozenset()
