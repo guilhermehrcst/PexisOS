@@ -128,7 +128,7 @@ No temporary file is left in either case.
 | 8 | `input_symlink` | an input is a symbolic link (never followed) |
 | 9 | `input_too_large`, `line_too_long` | file bytes, line length, row count, DBC size |
 | 10 | `input_changed` | an input grew past its cap, was rewritten (size, mtime or ctime differ) or replaced while read |
-| 11 | `safety_guard` | replay code attempted socket, name-resolution, process, process-signal (`os.kill`, `os.killpg`, `signal.pthread_kill`), thread, native-library, device or kernel-file (`/proc`, `/sys`) access, whether or not the refusal was caught, or left a thread running; the audit hook was refused, receives no events, or its probe was rejected by another hook; an open descriptor refers to a device, a kernel control file or a non-local socket, or its target cannot be inspected; a descriptor opened during the replay and still open at its end refers to any of these |
+| 11 | `safety_guard` | replay code attempted socket, name-resolution, process, process-signal (`os.kill`, `os.killpg`, `signal.pthread_kill`), thread, native-library, device or kernel-file (`/proc`, `/sys`) access, whether or not the refusal was caught, or left a thread running; the audit hook was refused, receives no events, or its probe was rejected by another hook; an open descriptor refers to a device (including a serial TTY), a kernel control file or a non-local socket, or its target cannot be inspected; a descriptor opened during the replay and still open at its end refers to any of these |
 | 12 | `output_too_large` | the records file or the summary would exceed `--max-output-mb` (checked before the write; nothing is committed) |
 
 stderr carries `error: <code>: <message>` with an optional line number, never a path or
@@ -184,8 +184,9 @@ During a replay, `no_device_access()`:
   At exit the guard is deactivated *before* the native entry points are restored, both under
   that lock, so a native entry point is never reachable while the guard is active.
 - **Checks open descriptors (Linux).** Before activation, it fails closed if any open descriptor
-  refers to a character device (other than the null device or a terminal), a block device, a file
-  under `/proc` or `/sys`, a socket that is not AF_UNIX (CAN, packet, netlink, IP), or an
+  refers to a character device (except `/dev/null`, Linux Unix98 PTY slaves with major 136–143,
+  or `/dev/tty` with major/minor 5:0), a block device, a file under `/proc` or `/sys`,
+  a socket that is not AF_UNIX (CAN, packet, netlink, IP), or an
   unidentifiable object. If `/proc/self/fd` cannot be enumerated on Linux, the replay fails
   with `safety_guard` (exit 11), rather than proceeding without this check, and so does a live
   descriptor whose target cannot be read (a regular file could be a kernel control file). A
@@ -214,6 +215,10 @@ under the guard without a refusal.
   that an untrusted local actor can modify is outside the guarantee.
 - **Output directory.** Shared writable directories without the sticky bit are refused rather
   than defended. A process running as the same user can still interfere with the outputs.
+- **Terminal descriptors.** The Linux character-device allowlist permits `/dev/tty` (5:0)
+  because it is the controlling terminal interface. It cannot prove whether that controlling
+  terminal ultimately connects to physical serial equipment; use an isolated runtime if that
+  distinction is a security requirement.
 - **Descriptor checks off Linux.** The descriptor check needs `/proc/self/fd` and
   `/proc/self/net/unix`, so it is not performed elsewhere. Socket families other than AF_UNIX are
   refused by default, and an inherited AF_UNIX socket is trusted as local IPC.
