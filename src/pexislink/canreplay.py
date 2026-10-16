@@ -28,6 +28,7 @@ Frame CSV contract (Lab A), exactly this header and no quoting:
 
 from __future__ import annotations
 
+import _thread
 import hashlib
 import logging
 import math
@@ -516,7 +517,10 @@ def no_device_access() -> Iterator[None]:
     The hook and counters are process-global. Activation, competing entry,
     audited side-effect classification, and finalization share one re-entrant
     lock. A callback already classifying a device path must finish before the
-    replay can deactivate the guard. This is defense in depth, never a sandbox.
+    replay can deactivate the guard. Raw thread entry points are also patched
+    while active because older Python versions lack the necessary audit event.
+    Pre-saved aliases and native calls bypass this fallback; this is defense
+    in depth, never a sandbox.
     """
     global _hook_installed
     with _guard_lock:
@@ -527,6 +531,32 @@ def no_device_access() -> Iterator[None]:
             sys.addaudithook(_audit)
             _hook_installed = True
         threads_before = {id(thread) for thread in threading.enumerate()}
+        # CPython 3.11 may not emit audit events for raw _thread starts.
+        # Intercept the public low-level entry point and threading's cached
+        # alias during this local replay. Saved native references and native
+        # code remain outside this best-effort Python guard.
+        saved_raw_start = _thread.start_new_thread
+        saved_thread_start = threading.Thread.start
+        saved_thread_alias = getattr(threading, "_start_new_thread", None)
+
+        def reject_raw_start(*args: Any, **kwargs: Any) -> Any:
+            with _guard_lock:
+                if _guard["active"]:
+                    _guard["violations"] += 1
+                    raise SafetyViolation("_thread.start_new_thread")
+            return saved_raw_start(*args, **kwargs)
+
+        def reject_thread_start(thread: threading.Thread, *args: Any, **kwargs: Any) -> Any:
+            with _guard_lock:
+                if _guard["active"]:
+                    _guard["violations"] += 1
+                    raise SafetyViolation("threading.Thread.start")
+            return saved_thread_start(thread, *args, **kwargs)
+
+        _thread.start_new_thread = reject_raw_start
+        threading.Thread.start = reject_thread_start
+        if saved_thread_alias is not None:
+            threading._start_new_thread = reject_raw_start
         _guard.update(active=True, violations=0)
 
     pending: BaseException | None = None
@@ -543,6 +573,13 @@ def no_device_access() -> Iterator[None]:
                     _guard["violations"] += 1
                 violations = _guard["violations"]
             finally:
+                # Restore patched entry points under the same lock before
+                # disabling the guard. Audited effects still remain blocked
+                # until classification and the final violation check end.
+                _thread.start_new_thread = saved_raw_start
+                threading.Thread.start = saved_thread_start
+                if saved_thread_alias is not None:
+                    threading._start_new_thread = saved_thread_alias
                 _guard["active"] = False
         if violations:
             raise ReplayError(
