@@ -24,6 +24,10 @@ unchanged.
 client, credential or model call that is not available. `NOT_SUPPORTED`: the client's public
 interface cannot express the check. A skip without a `not_run:` or `not_supported:` reason counts as
 `FAIL`, so a silent skip can never be reported as passing (`tests/compat/run_clients.py`).
+Every client's discovered ids must equal its fixed manifest in `EXPECTED_TEST_IDS` (C01–C13, T01–T15,
+K01–K08), and `--require CLIENT` passes only when every one of them is present and PASS. A renamed or
+deleted test therefore fails the run instead of silently shrinking the matrix (self-tests in
+`tests/test_compat_runner.py` and `tests/test_compat_runner_e2e.py`).
 
 ## Clients
 
