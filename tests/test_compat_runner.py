@@ -202,9 +202,6 @@ class WorkflowFailurePropagationTests(unittest.TestCase):
         self.assertNotEqual(run.returncode, 0)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class ReviewCodeRabbit8a8c9fbTests(unittest.TestCase):
     """CodeRabbit full review of 8a8c9fb."""
@@ -232,3 +229,7 @@ class ReviewCodeRabbit8a8c9fbTests(unittest.TestCase):
                  redirect_stdout(io.StringIO()):
                 self.assertEqual(run_clients.main(), 0)
             self.assertIsNone(json.loads(report.read_text())["environment"]["git_commit"])
+
+
+if __name__ == "__main__":
+    unittest.main()
