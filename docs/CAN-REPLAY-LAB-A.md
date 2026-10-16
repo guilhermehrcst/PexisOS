@@ -124,11 +124,11 @@ No temporary file is left in either case.
 | 4 | `invalid_dbc` | not UTF-8, over the message or signal limits, not parseable in strict mode, or a rejected construct (section 2) |
 | 5 | frame contract | `invalid_header`, `csv_quoting`, `field_count`, `invalid_utf8`, `invalid_line` (stray CR/NUL), `invalid_timestamp`, `invalid_arbitration_id`, `invalid_extended_flag`, `arbitration_id_out_of_range`, `invalid_data_hex` |
 | 6 | `unsupported_frame` | more than 8 data bytes |
-| 7 | `input_unreadable` | missing, not a regular file, permission |
+| 7 | `input_unreadable` | missing, not a regular file, permission, or an I/O error while reading it (e.g. `EIO`) |
 | 8 | `input_symlink` | an input is a symbolic link (never followed) |
 | 9 | `input_too_large`, `line_too_long` | file bytes, line length, row count, DBC size |
 | 10 | `input_changed` | an input grew past its cap, was rewritten (size, mtime or ctime differ) or replaced while read |
-| 11 | `safety_guard` | replay code attempted socket, name-resolution, process, thread, native-library, device or kernel-file (`/proc`, `/sys`) access, whether or not the refusal was caught, or left a thread running; the audit hook was refused or receives no events; an open descriptor refers to a device, a kernel control file or a non-local socket, or its target cannot be inspected; a descriptor opened during the replay and still open at its end refers to any of these |
+| 11 | `safety_guard` | replay code attempted socket, name-resolution, process, process-signal (`os.kill`, `os.killpg`, `signal.pthread_kill`), thread, native-library, device or kernel-file (`/proc`, `/sys`) access, whether or not the refusal was caught, or left a thread running; the audit hook was refused, receives no events, or its probe was rejected by another hook; an open descriptor refers to a device, a kernel control file or a non-local socket, or its target cannot be inspected; a descriptor opened during the replay and still open at its end refers to any of these |
 | 12 | `output_too_large` | the records file or the summary would exceed `--max-output-mb` (checked before the write; nothing is committed) |
 
 stderr carries `error: <code>: <message>` with an optional line number, never a path or
@@ -167,7 +167,8 @@ During a replay, `no_device_access()`:
 - **Refuses audited effects.** It refuses socket creation, `connect`, `bind`, `sendto`,
   `sendmsg` and name resolution (`getaddrinfo`, `gethostbyname`, `gethostbyaddr`,
   `getnameinfo`). It also refuses the audited process entry points (`subprocess.Popen`,
-  `os.system`, `os.exec*`, `os.posix_spawn`, `os.spawn*`, `os.fork`, `os.forkpty`),
+  `os.system`, `os.exec*`, `os.posix_spawn`, `os.spawn*`, `os.fork`, `os.forkpty`), process-control
+  signals (`os.kill`, `os.killpg`, `signal.pthread_kill`),
   `ctypes.dlopen` and `ctypes.dlsym`, and the thread-start events where CPython emits them
   (`_thread.start_new_thread` from 3.12, `_thread.start_joinable_thread` from 3.13).
 - **Refuses device and kernel paths.** It refuses opening anything that is not a regular file or
@@ -355,3 +356,16 @@ Regressions are in `CodexReview0470737Tests` (`tests/test_canreplay.py`). Each o
 
 The summary `notice` text changes, so summaries differ from earlier versions in that field only.
 The schema name `pexislink.can-replay.v1` is unchanged.
+
+## 14. Second batch of the Codex review of `0470737` (5 P2)
+
+These findings were triaged on `5b4d578` by the owner. Regressions are in
+`CodexReview0470737SecondBatchTests`, and each fails on `5b4d578`.
+
+| Finding | Fix | Regression test |
+|---|---|---|
+| Another audit hook rejecting the probe escaped as a traceback (exit 1) | the rejection becomes `safety_guard` (exit 11) | `test_rejected_audit_probe_becomes_safety_guard` |
+| Closing a writer whose flush failed (ENOSPC) raised from `discard()`, leaving the temp file and masking the error | `discard()` never raises; the unlink always runs; the original `output_write_error` is reported | `test_temporary_file_is_removed_even_when_closing_a_failed_writer_raises` |
+| `os.kill`/`os.killpg` were not refused | `os.kill`, `os.killpg` and `signal.pthread_kill` are refused (emitted on 3.11-3.13) | `test_process_control_signals_are_refused` |
+| An I/O error while reading an input was reported as `output_write_error` | input-side `OSError` from read, readline and fstat becomes `input_unreadable` (exit 7) | `test_input_read_failure_is_an_input_error` |
+| Handlers on `cantools.*` child loggers (`propagate=False`) could print DBC-controlled text | the drop filter covers handlers on every existing `cantools.*` child logger during parsing | `test_handlers_on_cantools_child_loggers_are_silenced` |
