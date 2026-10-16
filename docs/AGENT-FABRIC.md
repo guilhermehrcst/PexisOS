@@ -89,7 +89,7 @@ PYTHONPATH=src python examples/fabric/mcp_client.py demo:principal:analyst
 PYTHONPATH=src python examples/fabric/mcp_client.py demo:principal:guest
 ~~~
 
-Expected `pexislink fabric demo` output, abridged. The output is byte-identical on every run and on Python 3.11, 3.12 and 3.13, SHA-256 `a7673188…cc0e15`:
+Expected `pexislink fabric demo` output, abridged. The output is byte-identical on every run and on Python 3.11, 3.12 and 3.13, SHA-256 `36ef9ef3…bb21a0`:
 
 ```text
 ingest              fridge-01: observed 222, late 7, unknown 1 · synthetic-01: observed 718, unknown 17 · checkout-api: observed 390
@@ -100,7 +100,7 @@ guest.nonexistent                 {"error": {"code": "not_found", ...}}
 spoofed_principal_argument        {"error": {"code": "invalid_arguments", ...}}
 write_tool_absent                 {"error": {"code": "unknown_tool", ...}}
 after_revocation.analyst_fridge   {"error": {"code": "access_denied", "reason": "revoked", ...}}
-audit                             {"records": 17, "executed": 7, "denied": 5, "chain_valid": true}
+audit                             {"records": 19, "executed": 7, "denied": 5, "chain_valid": true}
 ```
 
 Expected `examples/fabric/mcp_client.py demo:principal:guest` output:
@@ -152,7 +152,7 @@ Error codes are stable and messages fixed. Errors never include argument values,
 - **declared**: the entity supports the capability;
 - **available**: the entity has data to answer;
 - **authorized**: this session may use the capability now;
-- **executed**: the audit log has a record with `executed: true` for each completed call.
+- **executed**: the audit log has a record with `executed: true` only when a result has been computed, has passed the result-size bound and is returned to the caller.
 
 ## 5. MCP integration
 
@@ -199,6 +199,7 @@ Properties, each verified with the official SDK `Client` in `tests/test_fabric_m
 - **Revocation.** Takes effect at once, including inside a live MCP session. A revoked grant id can never be reused.
 - **Audit.** A bounded, append-only, SHA-256 hash-chained log records each decision and each execution. It holds identifiers and reason codes only, never observation values.
 - **Policy file.** `pexislink.policy.v0` is a closed schema of at most 64 KiB, with duplicate JSON keys and NaN rejected. The loader refuses symlinks (`O_NOFOLLOW`), checks that the file is regular, and verifies the file's identity before, during and after the read (TOCTOU). The identity check covers inode, size, mtime and ctime; ctime cannot be restored by a writer, so a same-size rewrite in place is detected.
+- **Every attempt is audited.** Unknown tools and invalid arguments are recorded with a reason code only: the operation becomes `<unknown>` for an unknown tool, and raw arguments are never stored. The log is bounded by `max_audit`.
 - **Audit failure fails closed.** If the audit sink raises, the request returns `internal_error` and no unaudited result is served.
 
 ## 7. Data contracts (`v0`)
@@ -230,7 +231,7 @@ The entity document (`pexislink.entity.v0`) has these parts:
 
 - identity, kind, display name and adapter;
 - `declared_capabilities`;
-- typed signals, with unit, plausible range, enum vocabulary and an `assessable` flag;
+- typed signals, with unit, plausible range (bounded to ±1e15 so that range arithmetic cannot overflow), enum vocabulary and an `assessable` flag;
 - timing: `expected_interval_s`, `max_latency_s` and `stale_after_s`.
 
 The assessment document (`pexislink.assessment.v0`) contains:
@@ -257,7 +258,7 @@ The method runs per declared numeric, assessable signal, over the last `window =
    - if the latest `observed` or `late` observation is older than `stale_after_s`, the overall state is `stale`; a fresh `unknown` record never counts as fresh;
    - each signal is also `stale` on its own when its latest trustworthy value is older than `stale_after_s`.
 3. With fewer than `min_points = 24` values, the signal is `insufficient`.
-4. Otherwise compare the median of the last `recent = 6` values with the median and MAD of the earlier values. The scale is `max(1.4826·MAD, 0.001·declared range)`.
+4. Otherwise compare the median of the last `recent = 6` values with the median and MAD of the earlier values. The scale is `max(1.4826·MAD, 0.001·declared range)`. If any intermediate value is non-finite, the signal is `unknown` (`numerically_unsafe`), never `nominal`. This is a second barrier behind the ±1e15 range bound.
 5. If `|z| > 4`, the signal is `deviation`; otherwise `nominal`.
    The overall state is the first match in the order `deviation`, `stale`, `nominal`, `insufficient`.
    With `signal=` the overall state and confidence are computed from that signal only.

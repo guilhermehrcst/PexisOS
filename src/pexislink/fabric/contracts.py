@@ -55,6 +55,7 @@ QUALITY_FLAGS = ADAPTER_FLAGS | TIMING_FLAGS
 PROVENANCE_SOURCES = frozenset({"synthetic_fixture"})
 PROVENANCE_LICENSES = frozenset({"project_original"})
 SIGNAL_TYPES = frozenset({"number", "integer", "boolean", "enum"})
+MAX_SIGNAL_MAGNITUDE = 1e15  # declared ranges must lie within +/- this, so medians, MADs and spans stay finite
 
 # Grammars. Identifiers are lowercase, colon-separated, and cannot contain
 # '/', '\\', '..' at a segment start, whitespace or control characters.
@@ -168,8 +169,9 @@ class SignalSpec:
         numeric = self.type in ("number", "integer")
         if numeric != (self.minimum is not None and self.maximum is not None):
             raise ContractError("invalid_range", "signal.range")
-        if numeric and not (_finite(self.minimum) and _finite(self.maximum) and self.minimum < self.maximum):
-            raise ContractError("invalid_range", "signal.range")
+        if numeric and not (_finite(self.minimum) and _finite(self.maximum) and self.minimum < self.maximum
+                            and max(abs(self.minimum), abs(self.maximum)) <= MAX_SIGNAL_MAGNITUDE):
+            raise ContractError("invalid_range", "signal.range")  # bounded: range arithmetic can never overflow
         if (self.type == "enum") != bool(self.values):
             raise ContractError("invalid_enum", "signal.values")
         if self.type == "enum" and (len(self.values) > 16 or len(set(self.values)) != len(self.values)

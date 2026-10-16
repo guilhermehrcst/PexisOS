@@ -119,6 +119,10 @@ def _signal(spec: EntitySpec, name: str, usable: list[Observation], now: int, co
     scale = max(1.4826 * mad, floor)
     recent_median = median(recent)
     z = (recent_median - centre) / scale
+    if not all(math.isfinite(v) for v in (centre, mad, floor, scale, recent_median, z)) or scale <= 0:
+        # defence in depth behind the contract's magnitude bound: never turn overflow into 'nominal'
+        return {**base, "state": "unknown", "reason": "numerically_unsafe", "confidence": "low",
+                "evidence": evidence}
     deviation = abs(z) > config.z_threshold
     evidence.update({
         "baseline_values": len(baseline), "baseline_median": _r(centre), "baseline_mad": _r(mad),
@@ -132,5 +136,5 @@ def _signal(spec: EntitySpec, name: str, usable: list[Observation], now: int, co
 
 
 def _r(value: float) -> float:
-    rounded = round(float(value), 6)
-    return 0.0 if rounded == 0 or not math.isfinite(rounded) else rounded
+    rounded = round(float(value), 6)  # callers guarantee finiteness; non-finite values never reach here
+    return 0.0 if rounded == 0 else rounded

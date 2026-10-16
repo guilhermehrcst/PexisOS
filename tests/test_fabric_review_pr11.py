@@ -160,5 +160,131 @@ class PolicyRewriteInPlaceTests(unittest.TestCase):
             self.assertEqual(ctx.exception.code, "policy_changed")
 
 
+# --- Independent owner review of 03e8406 -----------------------------------------------------------
+
+
+class NumericSafetyTests(unittest.TestCase):
+    """P1: finite but huge ranges must never turn an overflow into a 'nominal' verdict."""
+
+    def test_contract_rejects_ranges_whose_arithmetic_could_overflow(self):
+        from pexislink.fabric import SignalSpec
+        from pexislink.fabric.contracts import MAX_SIGNAL_MAGNITUDE
+        for low, high in ((-1e308, 1e308), (0.0, 1e300), (-1e16, 0.0)):
+            with self.assertRaises(ContractError, msg=(low, high)):
+                SignalSpec("x", "number", None, low, high)
+        SignalSpec("x", "number", None, -MAX_SIGNAL_MAGNITUDE, MAX_SIGNAL_MAGNITUDE)  # the bound itself is fine
+
+    def test_reviewer_scenario_at_the_largest_accepted_range_is_a_deviation(self):
+        from pexislink.fabric import SignalSpec
+        from pexislink.fabric.contracts import MAX_SIGNAL_MAGNITUDE, EntitySpec
+        big = MAX_SIGNAL_MAGNITUDE
+        spec = EntitySpec(entity_id="test:numeric:big", kind="test.numeric", display_name="Big range",
+                          adapter="synthetic:test-v0", capabilities=frozenset({"assess"}),
+                          signals=(SignalSpec("x", "number", None, -big, big),), expected_interval_s=60,
+                          max_latency_s=120, stale_after_s=600)
+        fabric = Fabric(clock=ManualClock(T0 + 30 * 60_000_000))
+        fabric.register(spec)
+        fabric.policy.add_grant(grant("g:1", ALICE, "test:numeric:big", {"assess"}))
+        from pexislink.fabric.adapters._common import observation
+        for i in range(30):
+            t = T0 + i * 60_000_000
+            fabric.ingest(observation(event_id=f"b-{i}", entity_id="test:numeric:big", adapter="synthetic:test-v0",
+                                      kind="test.numeric", observed_at=t, received_at=t,
+                                      payload={"x": 0.0 if i < 24 else big}, generator="tests.fabric", seed=0))
+        result = fabric.open_session(ALICE).call("explain_assessment", {"entity_id": "test:numeric:big"})
+        self.assertEqual((result["state"], result["signals"][0]["state"]), ("deviation", "deviation"))
+
+    def test_overflow_behind_the_contract_abstains_instead_of_nominal(self):
+        """Defence in depth: if an unsafe range ever reached the assessment, it must abstain."""
+        from pexislink.fabric.assess import assess
+        from pexislink.fabric.contracts import Observation
+        spec = appliance.entity()
+        signal = spec.signal("temperature_c")
+        object.__setattr__(signal, "minimum", -1e308)  # bypass the contract on purpose
+        object.__setattr__(signal, "maximum", 1e308)
+        try:
+            window = [Observation(f"o-{i}", FRIDGE, T0 + i * 60_000_000, T0 + i * 60_000_000, appliance.ADAPTER_ID,
+                                  "appliance.telemetry", (("temperature_c", 0.0 if i < 24 else 1e308),), "observed",
+                                  (), ()) for i in range(30)]
+            result = assess(spec, window, T0 + 30 * 60_000_000, AssessmentConfig(), only="temperature_c")
+        finally:
+            object.__setattr__(signal, "minimum", -40.0)
+            object.__setattr__(signal, "maximum", 40.0)
+        self.assertEqual(result["signals"][0]["state"], "unknown")
+        self.assertEqual(result["signals"][0]["reason"], "numerically_unsafe")
+        self.assertNotEqual(result["state"], "nominal")
+
+
+class HistoryCursorSchemaTests(unittest.TestCase):
+    """P2: the published history cursor schema is exactly what the core accepts."""
+
+    def test_parity_for_cursors(self):
+        try:
+            import jsonschema
+        except ImportError:
+            self.skipTest("not_run: jsonschema not installed (installed with the MCP SDK)")
+        specs = tool_specs(FabricLimits())
+        fabric, _ = world([grant("g:1", ALICE, FRIDGE)])
+        session = fabric.open_session(ALICE)
+        validator = jsonschema.Draft202012Validator(specs["read_observations"]["input_schema"])
+        for cursor in ("1", "0", "42", "9" * 18, "9" * 19, "abc", "1a", "-1", "1.0", "", "\u00b2", "\uff11"):
+            args = {"entity_id": FRIDGE, "mode": "history", "cursor": cursor}
+            try:
+                session.call("read_observations", args)
+                core_ok = True
+            except FabricError as error:
+                core_ok = error.code != "invalid_arguments"
+            self.assertEqual(validator.is_valid(args), core_ok, repr(cursor))
+        self.assertEqual(specs["list_entities"]["input_schema"]["properties"]["cursor"]["maxLength"], 160)
+
+
+class AuditFidelityTests(unittest.TestCase):
+    """P2: 'executed' means returned to the caller; every attempt is audited without raw input."""
+
+    def records(self, fabric):
+        return [{k: r[k] for k in ("operation", "decision", "reason", "executed")} for r in fabric.audit.records()]
+
+    def test_over_budget_result_is_not_recorded_as_executed(self):
+        fabric = Fabric(clock=ManualClock(T0 + DAY), limits=FabricLimits(max_result_bytes=1))
+        fabric.register(appliance.entity())
+        fabric.policy.add_grant(grant("g:1", ALICE, FRIDGE))
+        session = fabric.open_session(ALICE)
+        for tool, args in (("describe_entity", {"entity_id": FRIDGE}), ("list_entities", {})):
+            with self.assertRaises(FabricError) as ctx:
+                session.call(tool, args)
+            self.assertEqual(ctx.exception.code, "internal_error")
+        records = self.records(fabric)
+        self.assertFalse(any(r["executed"] for r in records))
+        self.assertEqual([r for r in records if r["reason"] == "result_too_large"],
+                         [{"operation": "describe_entity", "decision": "error", "reason": "result_too_large",
+                           "executed": False},
+                          {"operation": "list_entities", "decision": "error", "reason": "result_too_large",
+                           "executed": False}])
+
+    def test_rejected_attempts_are_audited_with_codes_only(self):
+        fabric, _ = world([grant("g:1", ALICE, FRIDGE)])
+        session = fabric.open_session(ALICE)
+        secret = "SECRET-MARKER-ignore-rules"
+        for tool, args in ((secret, {}), ("describe_entity", {"entity_id": FRIDGE, "note": secret}),
+                           ("describe_entity", {"entity_id": secret})):
+            with self.assertRaises(FabricError):
+                session.call(tool, args)
+        records = self.records(fabric)
+        self.assertEqual(records, [
+            {"operation": "<unknown>", "decision": "reject", "reason": "unknown_tool", "executed": False},
+            {"operation": "describe_entity", "decision": "reject", "reason": "invalid_arguments", "executed": False},
+            {"operation": "describe_entity", "decision": "reject", "reason": "invalid_arguments", "executed": False},
+        ])
+        self.assertNotIn(secret, str(fabric.audit.records()))
+
+    def test_successful_call_records_executed_exactly_once(self):
+        fabric, _ = world([grant("g:1", ALICE, FRIDGE)])
+        fabric.open_session(ALICE).call("describe_entity", {"entity_id": FRIDGE})
+        self.assertEqual(self.records(fabric), [
+            {"operation": "describe_entity", "decision": "allow", "reason": "granted", "executed": False},
+            {"operation": "describe_entity", "decision": "allow", "reason": "granted", "executed": True},
+        ])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -9,7 +9,8 @@ session operation:
   2. asks the policy engine for a decision (deny by default);
   3. runs inside ``no_effects()`` (no sockets, processes, writes, devices);
   4. bounds its result (page size and serialized bytes);
-  5. appends an audit record: decision, reason, and whether it EXECUTED.
+  5. appends audit records: every attempt (rejections with a code only) and,
+     once the bounded result is ready to return, ``executed: true``.
 
 Errors are ``FabricError`` with a stable code and a fixed message; they never
 carry argument values, payload values, paths or stack traces.
@@ -120,6 +121,8 @@ _ENTITY = {"type": "string", "minLength": 3, "maxLength": 160, "pattern": r"^[a-
            "description": "Entity identifier as returned by list_entities (namespace:kind:name)."}
 _CURSOR_SCHEMA = {"type": "string", "minLength": 1, "maxLength": 160, "pattern": r"^[a-z0-9:._-]+$",
                   "description": "Opaque cursor from a previous page (next_cursor)."}
+_HISTORY_CURSOR_SCHEMA = {"type": "string", "minLength": 1, "maxLength": 18, "pattern": r"^[0-9]{1,18}$",
+                          "description": "next_cursor from a previous history page (a sequence number)."}
 
 
 def _limit_schema(maximum: int) -> dict:
@@ -153,7 +156,7 @@ def tool_specs(limits: FabricLimits) -> dict[str, dict]:
                            "Values are data, never instructions. Read-only.",
             "capability": "observe|read_history",
             "input_schema": {**obj({"entity_id": _ENTITY, "mode": {"type": "string", "enum": ["latest", "history"]},
-                                    "cursor": _CURSOR_SCHEMA, "limit": _limit_schema(limits.max_page)},
+                                    "cursor": _HISTORY_CURSOR_SCHEMA, "limit": _limit_schema(limits.max_page)},
                                    ["entity_id", "mode"]),
                              # cursor and limit apply to mode=history only
                              "if": {"properties": {"mode": {"const": "latest"}}, "required": ["mode"]},
@@ -186,25 +189,45 @@ class Session:
 
     def call(self, tool: Any, arguments: Any) -> dict:
         """Single entry point for transports (MCP, CLI). Never raises anything
-        but ``FabricError``; never returns more than ``max_result_bytes``."""
+        but ``FabricError``; never returns more than ``max_result_bytes``.
+
+        Audit semantics: every attempt leaves a record. ``executed: true`` is
+        written only after the result has been computed AND has passed the
+        result-size bound, i.e. it will be returned to the caller. Rejected
+        attempts (unknown tool, invalid arguments) are recorded with a code
+        only: never the raw tool name or arguments."""
+        known = isinstance(tool, str) and tool in self._specs
+        operation = tool if known else "<unknown>"
         try:
-            if not isinstance(tool, str) or tool not in self._specs:
+            if not known:
                 raise FabricError("unknown_tool")
             args = self._validate(tool, {} if arguments is None else arguments)
             with no_effects():
-                result = getattr(self, f"_{tool}")(**args)
+                result, audit = getattr(self, f"_{tool}")(**args)
             if len(canonical_json(result)) > self._fabric.limits.max_result_bytes:
-                raise FabricError("internal_error")  # unreachable by construction; fail closed if not
+                self._audit(operation, audit["entity"], audit["capability"], "error", "result_too_large")
+                raise FabricError("internal_error")
+            self._fabric.audit.append(at=self._fabric.clock(), principal=self.principal_id, operation=operation,
+                                      decision="allow", reason="granted", executed=True, **audit)
             return result
-        except FabricError:
+        except FabricError as error:
+            if error.code in ("unknown_tool", "invalid_arguments"):
+                self._audit(operation, None, None, "reject", error.code)  # raises internal_error if audit fails
             raise
         except Exception:  # ContractError, EffectBlocked, an audit sink failure or a bug: fail closed, disclose nothing
             try:
-                self._fabric.audit.append(at=self._fabric.clock(), principal=self.principal_id,
-                                          operation=str(tool)[:32], entity=None, capability=None, decision="error",
-                                          reason="internal_error", executed=False)
-            except Exception:
+                self._audit(operation, None, None, "error", "internal_error")
+            except FabricError:
                 pass  # the audit path itself failed; the request still fails closed
+            raise FabricError("internal_error") from None
+
+    def _audit(self, operation: str, entity: str | None, capability: str | None, decision: str,
+               reason: str) -> None:
+        try:
+            self._fabric.audit.append(at=self._fabric.clock(), principal=self.principal_id, operation=operation,
+                                      entity=entity, capability=capability, decision=decision, reason=reason,
+                                      executed=False)
+        except Exception:
             raise FabricError("internal_error") from None
 
     # --- argument validation (closed schema, mirrors tool_specs) ---
@@ -256,29 +279,29 @@ class Session:
                    not in ("no_grant", "unknown_entity", "capability_not_declared", "policy_error")
                    for c in sorted(self._fabric.declared(entity_id) or ()))
 
-    def _executed(self, operation: str, entity_id: str | None, capability: str, **extra: Any) -> None:
-        self._fabric.audit.append(at=self._fabric.clock(), principal=self.principal_id, operation=operation,
-                                  entity=entity_id, capability=capability, decision="allow", reason="granted",
-                                  executed=True, **extra)
+    @staticmethod
+    def _done(entity_id: str | None, capability: str, **extra: Any) -> dict:
+        """Audit fields for a computed result; ``call`` records them once the result is deliverable."""
+        return {"entity": entity_id, "capability": capability, **extra}
 
     # --- operations ---
 
-    def _list_entities(self, cursor: str | None = None, limit: int | None = None) -> dict:
+    def _list_entities(self, cursor: str | None = None, limit: int | None = None) -> tuple[dict, dict]:
         limit = limit or self._fabric.limits.max_page
         visible = [e for e in self._fabric.store.entity_ids() if (cursor is None or e > cursor)
                    and self._decide("list_entities", e, Capability.DESCRIBE.value, quiet=True).allowed]
         page = visible[:limit]
         items = [{"entity_id": e, "kind": self._fabric.store.spec(e).kind,
                   "display_name": self._fabric.store.spec(e).display_name} for e in page]
-        self._executed("list_entities", None, Capability.DESCRIBE.value, returned=len(items))
-        return {"entities": items, "next_cursor": page[-1] if len(visible) > limit else None}
+        result = {"entities": items, "next_cursor": page[-1] if len(visible) > limit else None}
+        return result, self._done(None, Capability.DESCRIBE.value, returned=len(items))
 
-    def _describe_entity(self, entity_id: str) -> dict:
+    def _describe_entity(self, entity_id: str) -> tuple[dict, dict]:
         spec = self._require("describe_entity", entity_id, Capability.DESCRIBE.value)
-        self._executed("describe_entity", entity_id, Capability.DESCRIBE.value)
-        return {"entity": spec.to_dict(), "memory": self._fabric.store.stats(entity_id)}
+        result = {"entity": spec.to_dict(), "memory": self._fabric.store.stats(entity_id)}
+        return result, self._done(entity_id, Capability.DESCRIBE.value)
 
-    def _list_capabilities(self, entity_id: str) -> dict:
+    def _list_capabilities(self, entity_id: str) -> tuple[dict, dict]:
         spec = self._require("list_capabilities", entity_id, Capability.DESCRIBE.value)
         has_data = self._fabric.store.latest(entity_id) is not None
         rows = []
@@ -289,31 +312,33 @@ class Session:
                          "available": declared and (has_data or capability is Capability.DESCRIBE),
                          "authorized": decision.allowed,
                          "reason": decision.reason})
-        self._executed("list_capabilities", entity_id, Capability.DESCRIBE.value)
-        return {"entity_id": entity_id, "capabilities": rows,
-                "note": "declared = supported by the entity; authorized = granted to this session now; "
-                        "available = has the data to answer; executed = recorded in the audit log per call. "
-                        "Only read-only capabilities exist."}
+        result = {"entity_id": entity_id, "capabilities": rows,
+                  "note": "declared = supported by the entity; authorized = granted to this session now; "
+                          "available = has the data to answer; executed = audit record written when a result is "
+                          "actually returned. "
+                          "Only read-only capabilities exist."}
+        return result, self._done(entity_id, Capability.DESCRIBE.value)
 
     def _read_observations(self, entity_id: str, mode: str, cursor: str | None = None,
-                           limit: int | None = None) -> dict:
+                           limit: int | None = None) -> tuple[dict, dict]:
         store, now = self._fabric.store, self._fabric.clock()
         if mode == "latest":
             if cursor is not None or limit is not None:
                 raise FabricError("invalid_arguments")
             spec = self._require("read_observations", entity_id, Capability.OBSERVE.value)
             found = store.latest(entity_id)
-            self._executed("read_observations", entity_id, Capability.OBSERVE.value, returned=int(found is not None))
             if found is None:
-                return {"entity_id": entity_id, "mode": "latest", "observation": None, "state": "insufficient",
-                        "freshness": None}
+                result = {"entity_id": entity_id, "mode": "latest", "observation": None, "state": "insufficient",
+                          "freshness": None}
+                return result, self._done(entity_id, Capability.OBSERVE.value, returned=int(found is not None))
             seq, obs = found
             age_s = round((now - obs.observed_at) / 1e6, 3)
             stale = now - obs.observed_at > spec.stale_after_s * 1_000_000  # compare unrounded
-            return {"entity_id": entity_id, "mode": "latest", "seq": seq, "observation": obs.to_dict(),
-                    "freshness": {"evaluated_at": format_time(now), "age_s": age_s,
-                                  "stale_after_s": spec.stale_after_s, "stale": stale,
-                                  "current": not stale and obs.status == "observed"}}
+            result = {"entity_id": entity_id, "mode": "latest", "seq": seq, "observation": obs.to_dict(),
+                      "freshness": {"evaluated_at": format_time(now), "age_s": age_s,
+                                    "stale_after_s": spec.stale_after_s, "stale": stale,
+                                    "current": not stale and obs.status == "observed"}}
+            return result, self._done(entity_id, Capability.OBSERVE.value, returned=int(found is not None))
         if cursor is not None and not (cursor.isascii() and cursor.isdigit() and len(cursor) <= 18):
             raise FabricError("invalid_arguments")
         self._require("read_observations", entity_id, Capability.READ_HISTORY.value)
@@ -331,18 +356,17 @@ class Session:
             page.append(record)
             used += size
         stats = store.stats(entity_id)
-        self._executed("read_observations", entity_id, Capability.READ_HISTORY.value, returned=len(page))
-        return {"entity_id": entity_id, "mode": "history", "items": page,
-                "next_cursor": str(page[-1]["seq"]) if more and page else None,
-                "retention": {"oldest_available_seq": stats["oldest_seq"], "evicted": stats["evicted"],
-                              "truncated_before_cursor": stats["oldest_seq"] is not None
-                              and after + 1 < stats["oldest_seq"] and stats["evicted"] > 0}}
+        result = {"entity_id": entity_id, "mode": "history", "items": page,
+                  "next_cursor": str(page[-1]["seq"]) if more and page else None,
+                  "retention": {"oldest_available_seq": stats["oldest_seq"], "evicted": stats["evicted"],
+                                "truncated_before_cursor": stats["oldest_seq"] is not None
+                                and after + 1 < stats["oldest_seq"] and stats["evicted"] > 0}}
+        return result, self._done(entity_id, Capability.READ_HISTORY.value, returned=len(page))
 
-    def _explain_assessment(self, entity_id: str, signal: str | None = None) -> dict:
+    def _explain_assessment(self, entity_id: str, signal: str | None = None) -> tuple[dict, dict]:
         spec = self._require("explain_assessment", entity_id, Capability.ASSESS.value)
         if signal is not None and spec.signal(signal) is None:
             raise FabricError("invalid_arguments")
         window = self._fabric.store.window(entity_id, self._fabric.assessment.window)
         result = assess(spec, window, self._fabric.clock(), self._fabric.assessment, only=signal)
-        self._executed("explain_assessment", entity_id, Capability.ASSESS.value)
-        return result
+        return result, self._done(entity_id, Capability.ASSESS.value)
