@@ -534,7 +534,9 @@ def _in_kernel_tree(resolved: str) -> bool:
 
 
 def _local_socket_inodes() -> frozenset[str] | None:
-    """Inodes of this process' AF_UNIX sockets (Linux), or None when that cannot be determined."""
+    """Inodes of the AF_UNIX sockets in this network namespace (Linux), or None if unavailable.
+
+    Only membership is used: a socket descriptor whose inode is listed here is AF_UNIX."""
     try:
         with open("/proc/self/net/unix", "rb") as table:
             rows = table.read(64 << 20).splitlines()[1:]
