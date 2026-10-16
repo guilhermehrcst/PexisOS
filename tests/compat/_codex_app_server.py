@@ -160,6 +160,8 @@ class CodexAppServer:
         self.proc.stdin.flush()
 
     def request(self, method: str, params: dict) -> dict:
+        if self._violation is not None:  # checked before writing: the server may already be gone
+            raise ProtocolError(f"codex app-server stdout carried {self._violation} (during {method})")
         self._next_id += 1
         request_id = self._next_id
         self._send({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params})

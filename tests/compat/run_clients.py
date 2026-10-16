@@ -346,7 +346,7 @@ def main() -> int:
     try:
         commit = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"], capture_output=True, text=True,
                                 timeout=10).stdout.strip() or None
-    except OSError:
+    except (OSError, subprocess.TimeoutExpired):
         commit = None
     try:
         from mcp_types.version import LATEST_PROTOCOL_VERSION

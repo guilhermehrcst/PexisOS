@@ -84,6 +84,9 @@ for count, line in enumerate(sys.stdin, 1):
     late = mode.startswith("late_")
     kind = mode[len("late_"):] if late else mode
     if (count == 1 and not late) or (count > 1 and late):
+        if kind == "exit":
+            send(bad["invalid_json"])
+            sys.exit(0)  # a violation followed by the process going away
         if kind == "bad_utf8":
             send(b"\xff\xfe" + SECRET.encode() + b"\n")
         elif kind != "ok":
@@ -160,6 +163,16 @@ class DriverStdoutProtocolTests(unittest.TestCase):
             self.assert_fails_fast_and_quietly(lambda: server.request("mcpServerStatus/list", {}))
             self.assert_fails_fast_and_quietly(lambda: server.request("thread/start", {}))  # sticky
             self.assertNotIn("SECRET-PAYLOAD", repr(server.notifications))
+        finally:
+            server.close()
+        self.assert_process_reaped()
+
+    def test_a_dead_server_after_a_violation_still_reports_the_violation(self):
+        server = self.start("late_exit")
+        try:
+            self.assert_fails_fast_and_quietly(lambda: server.request("mcpServerStatus/list", {}))
+            server.proc.wait(timeout=10)  # stdin is now a broken pipe
+            self.assert_fails_fast_and_quietly(lambda: server.request("thread/start", {}))
         finally:
             server.close()
         self.assert_process_reaped()

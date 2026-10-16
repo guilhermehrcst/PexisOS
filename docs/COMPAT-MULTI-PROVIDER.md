@@ -25,7 +25,10 @@ client, credential or model call that is not available. `NOT_SUPPORTED`: the cli
 interface cannot express the check. A skip without a `not_run:` or `not_supported:` reason counts as
 `FAIL`, so a silent skip can never be reported as passing (`tests/compat/run_clients.py`).
 Every client's discovered ids must equal its fixed manifest in `EXPECTED_TEST_IDS` (C01–C13, T01–T15,
-K01–K08), and `--require CLIENT` passes only when every one of them is present and PASS. A renamed or
+K01–K08), and `--require CLIENT` passes only when every one of them is present and PASS. The one
+exception is `NOT_SUPPORTED` for an entry explicitly allowlisted in `EXPECTED_NOT_SUPPORTED` (ids) or
+`EXPECTED_METHOD_NOT_SUPPORTED` (methods); today that is only the Codex C01 sub-check
+`test_C01_negotiated_mcp_protocol_version_is_observable`. Anything else not PASS fails. A renamed or
 deleted test therefore fails the run instead of silently shrinking the matrix (self-tests in
 `tests/test_compat_runner.py` and `tests/test_compat_runner_e2e.py`).
 

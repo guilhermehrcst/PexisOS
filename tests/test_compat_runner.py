@@ -177,14 +177,23 @@ class ReviewDd1576aTests(unittest.TestCase):
         self.assertTrue(run_clients.client_executed("openai-agents", statuses))
 
 
+BASH_SHELL_LINE = r"(?m)^[ \t]+shell:[ \t]+bash[ \t]*(?:#.*)?$"
+
+
 class WorkflowFailurePropagationTests(unittest.TestCase):
     def test_fabric_mcp_step_enables_pipefail_for_tee(self):
         workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/tests.yml").read_text()
         fabric = workflow.split("\n  fabric-mcp:", 1)[1].split("\n  compat-openai-agents:", 1)[0]
         step = fabric.split("- name: Run the whole suite with the real SDK installed", 1)[1]
         step = step.split("- name:", 1)[0]
-        self.assertIn("shell: bash", step)
+        self.assertRegex(step, BASH_SHELL_LINE)  # exactly bash: `bash {0}` would drop pipefail
         self.assertIn(" | tee ", step)
+
+    def test_shell_pattern_rejects_a_custom_bash_invocation(self):
+        for line in ("        shell: bash", "        shell: bash   # enforce pipefail"):
+            self.assertRegex(line, BASH_SHELL_LINE)
+        for line in ("        shell: bash {0}", "        shell: bash -e {0}", "        shell: sh"):
+            self.assertNotRegex(line, BASH_SHELL_LINE)
 
     @unittest.skipUnless(shutil.which("bash"), "Bash not available on this platform")
     def test_pipefail_exposes_a_failed_test_producer(self):
@@ -195,3 +204,31 @@ class WorkflowFailurePropagationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReviewCodeRabbit8a8c9fbTests(unittest.TestCase):
+    """CodeRabbit full review of 8a8c9fb."""
+
+    def test_git_commit_lookup_timeout_records_a_null_commit(self):
+        spec = run_clients.CLIENTS["claude-code"]
+        result = {"matrix": {key: {"status": "PASS"} for key in run_clients.EXPECTED_TEST_IDS["claude-code"]},
+                  "methods": sorted(run_clients.EXPECTED_TEST_METHODS["claude-code"]), "failures": [],
+                  "method_statuses": {m: "PASS" for m in run_clients.EXPECTED_TEST_METHODS["claude-code"]}}
+        real_run = run_clients.subprocess.run
+
+        def run(cmd, *args, **kwargs):
+            if cmd and cmd[0] == "git":
+                raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout", 10))
+            return real_run(cmd, *args, **kwargs)
+
+        import json
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            report = Path(tmp) / "report.json"
+            with mock.patch.object(run_clients, "CLIENTS", {"claude-code": spec}), \
+                 mock.patch.object(run_clients, "run_module", return_value=result), \
+                 mock.patch.object(run_clients.subprocess, "run", run), \
+                 mock.patch.object(run_clients.sys, "argv", ["run_clients.py", "--json", str(report)]), \
+                 redirect_stdout(io.StringIO()):
+                self.assertEqual(run_clients.main(), 0)
+            self.assertIsNone(json.loads(report.read_text())["environment"]["git_commit"])
