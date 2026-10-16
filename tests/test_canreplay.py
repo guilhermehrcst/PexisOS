@@ -504,6 +504,80 @@ class SafetyGuardTests(LabCase):
             worker.join(timeout=5)
             self.assertFalse(worker.is_alive())
 
+    def test_guard_activation_race_cannot_erase_concurrent_violation(self):
+        """Reproduce Codex P1: park owner before it finishes initialization.
+
+        A competing replay must not be able to trigger a refusal and create a
+        socket in the interval before the owner marks the guard active.
+        Socket *creation* only; there is never a network connection.
+        """
+        import threading
+
+        original_enumerate = threading.enumerate
+        paused = threading.Event()
+        resume = threading.Event()
+        attempting = threading.Event()
+        completed = threading.Event()
+        owner_identity = [None]
+        contender_results = []
+        owner_results = []
+
+        def pause_during_setup():
+            if threading.get_ident() == owner_identity[0] and not paused.is_set():
+                paused.set()
+                if not resume.wait(timeout=10):
+                    raise AssertionError("guard setup was not resumed")
+            return original_enumerate()
+
+        def owner():
+            owner_identity[0] = threading.get_ident()
+            try:
+                with canreplay.no_device_access():
+                    if not completed.wait(timeout=10):
+                        raise AssertionError("contender did not finish")
+            except ReplayError as failure:
+                owner_results.append(failure.code)
+            except BaseException as failure:
+                owner_results.append(type(failure).__name__)
+
+        def contender():
+            if not paused.wait(timeout=10):
+                contender_results.append("owner_not_paused")
+                completed.set()
+                return
+            attempting.set()
+            try:
+                with canreplay.no_device_access():
+                    contender_results.append("entered")
+            except ReplayError as failure:
+                contender_results.append(failure.code)
+            # A socket constructor is observable and safe; no connect/send.
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM):
+                    contender_results.append("socket_allowed")
+            except canreplay.SafetyViolation:
+                contender_results.append("socket_blocked")
+            finally:
+                completed.set()
+
+        other = threading.Thread(target=contender)
+        holder = threading.Thread(target=owner)
+        with mock.patch.object(threading, "enumerate", pause_during_setup):
+            other.start()
+            holder.start()
+            try:
+                self.assertTrue(paused.wait(timeout=10))
+                self.assertTrue(attempting.wait(timeout=10))
+            finally:
+                resume.set()
+            other.join(timeout=10)
+            holder.join(timeout=10)
+        self.assertFalse(other.is_alive())
+        self.assertFalse(holder.is_alive())
+        self.assertEqual(contender_results, ["safety_guard", "socket_blocked"])
+        self.assertEqual(owner_results, ["safety_guard"])
+        self.assertFalse(canreplay._guard["active"])
+
     def test_guard_failure_in_the_factory_also_fails_closed(self):
         def factory(text, limits):
             try:
