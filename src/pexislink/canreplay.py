@@ -175,13 +175,24 @@ class InputFile:
     sha: Any
     bytes_read: int = 0
 
+    def _bounded_size(self, requested: int) -> int:
+        """Bound the I/O allocation *before* reading a growing file.
+
+        The single extra byte detects an over-budget input promptly. This
+        applies to read() and readline(), including a caller-provided huge
+        --max-line-bytes value, not merely to _account() after allocation.
+        """
+        remaining = self.max_bytes - self.bytes_read
+        budget = max(0, remaining) + 1
+        return min(requested, budget) if requested >= 0 else budget
+
     def read(self, size: int = -1) -> bytes:
-        data = self.handle.read(size)
+        data = self.handle.read(self._bounded_size(size))
         self._account(data)
         return data
 
-    def readline(self, limit: int) -> bytes:
-        data = self.handle.readline(limit)
+    def readline(self, limit: int = -1) -> bytes:
+        data = self.handle.readline(self._bounded_size(limit))
         self._account(data)
         return data
 
@@ -453,9 +464,10 @@ def _signals(message: MessageSpec, values: Mapping[str, object]) -> list[dict[st
 _BLOCKED_EVENTS = ("socket.__new__", "socket.connect", "socket.bind", "socket.sendto", "socket.sendmsg",
                    "subprocess.Popen", "os.system", "os.exec", "os.posix_spawn", "os.spawn", "os.fork",
                    "os.forkpty", "os.startfile", "ctypes.dlopen", "ctypes.dlsym",
-                   "socket.getaddrinfo", "socket.gethostbyname", "socket.gethostbyaddr", "socket.getnameinfo")
+                   "socket.getaddrinfo", "socket.gethostbyname", "socket.gethostbyaddr", "socket.getnameinfo",
+                   "_thread.start_new_thread", "_thread.start_joinable_thread")
 _guard = {"active": False, "violations": 0}
-_guard_lock = threading.Lock()  # serialize the process-global audit guard; concurrent/nested calls fail closed
+_guard_lock = threading.RLock()  # audit callbacks and guard finalization must share this synchronization
 _hook_installed = False
 
 
@@ -464,14 +476,21 @@ class SafetyViolation(RuntimeError):
 
 
 def _audit(event: str, args: tuple[Any, ...]) -> None:
-    if not _guard["active"]:
+    # Ignore irrelevant audit events before acquiring the shared guard lock.
+    if event != "open" and not event.startswith(_BLOCKED_EVENTS):
         return
-    blocked = event.startswith(_BLOCKED_EVENTS)
-    if event == "open" and args and isinstance(args[0], (str, bytes, os.PathLike)):
-        blocked = _is_device(os.fsdecode(args[0]))
-    if blocked:
-        _guard["violations"] += 1
-        raise SafetyViolation(event)
+    # Hold the lock throughout device-path classification. In particular,
+    # finalization cannot deactivate the guard while an in-flight callback
+    # is blocked inside realpath/stat, then miss its violation.
+    with _guard_lock:
+        if not _guard["active"]:
+            return
+        blocked = event.startswith(_BLOCKED_EVENTS)
+        if event == "open" and args and isinstance(args[0], (str, bytes, os.PathLike)):
+            blocked = _is_device(os.fsdecode(args[0]))
+        if blocked:
+            _guard["violations"] += 1
+            raise SafetyViolation(event)
 
 
 def _is_device(path: str) -> bool:
@@ -494,10 +513,10 @@ def _is_device(path: str) -> bool:
 def no_device_access() -> Iterator[None]:
     """Refuse audited network, device and process effects during one replay.
 
-    The hook and counters are process-global. Protect BOTH guard activation and
-    rejection of concurrent entry with the same lock, so a rejected contender
-    cannot run between lock ownership and activation or lose its violation in
-    an initialization reset. This is defense in depth, never a sandbox.
+    The hook and counters are process-global. Activation, competing entry,
+    audited side-effect classification, and finalization share one re-entrant
+    lock. A callback already classifying a device path must finish before the
+    replay can deactivate the guard. This is defense in depth, never a sandbox.
     """
     global _hook_installed
     with _guard_lock:
