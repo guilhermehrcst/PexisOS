@@ -1506,6 +1506,51 @@ class CodexReview0470737SecondBatchTests(LabCase):
                 child.propagate = True
 
 
+@unittest.skipUnless(sys.platform.startswith("linux"), "Linux character-device major policy")
+class CodeRabbitSerialTTYTests(LabCase):
+    """CodeRabbit PR #10: a serial TTY must not bypass inherited-device checks."""
+
+    def test_non_pty_tty_descriptors_are_rejected(self):
+        # Simulate a terminal FD backed by serial hardware without opening actual hardware.
+        # The old isatty-only policy incorrectly allowed all these device majors.
+        import stat
+        from types import SimpleNamespace
+
+        for name, major, minor in (("ttyS0", 4, 64), ("ttyUSB0", 188, 0),
+                                   ("ttyACM0", 166, 0), ("console", 5, 1)):
+            with self.subTest(device=name):
+                info = SimpleNamespace(st_mode=stat.S_IFCHR | 0o600,
+                                       st_rdev=os.makedev(major, minor))
+                with mock.patch.object(canreplay.os, "fstat", return_value=info), \
+                     mock.patch.object(canreplay.os, "readlink", return_value=f"/dev/{name}"), \
+                     mock.patch.object(canreplay.os, "isatty", return_value=True):
+                    self.assertEqual(canreplay._unsafe_descriptor(98765), "serial terminal device")
+
+    def test_linux_safe_terminal_allowlist_is_precise(self):
+        import stat
+        from types import SimpleNamespace
+
+        for major, minor in ((136, 0), (139, 2), (143, 255), (5, 0)):
+            with self.subTest(major=major, minor=minor):
+                info = SimpleNamespace(st_mode=stat.S_IFCHR | 0o600,
+                                       st_rdev=os.makedev(major, minor))
+                with mock.patch.object(canreplay.os, "fstat", return_value=info), \
+                     mock.patch.object(canreplay.os, "readlink", return_value="/dev/pts/0"), \
+                     mock.patch.object(canreplay.os, "isatty", return_value=True):
+                    self.assertIsNone(canreplay._unsafe_descriptor(98765))
+
+    def test_non_linux_tty_behavior_is_preserved(self):
+        import stat
+        from types import SimpleNamespace
+
+        info = SimpleNamespace(st_mode=stat.S_IFCHR | 0o600, st_rdev=os.makedev(188, 0))
+        with mock.patch.object(canreplay.os, "fstat", return_value=info), \
+             mock.patch.object(canreplay.os, "readlink", return_value="/dev/ttyUSB0"), \
+             mock.patch.object(canreplay.os, "isatty", return_value=True), \
+             mock.patch.object(canreplay.sys, "platform", "darwin"):
+            self.assertIsNone(canreplay._unsafe_descriptor(98765))
+
+
 class WorkflowSafetyTests(unittest.TestCase):
     def test_mcp_ci_does_not_mask_unittest_failure_through_tee(self):
         workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/tests.yml").read_text()

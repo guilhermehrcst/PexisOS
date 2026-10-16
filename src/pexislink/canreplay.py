@@ -569,9 +569,11 @@ def _unsafe_descriptor(fd: int, unix_inodes: frozenset[str] | None = None) -> st
     """Why an open descriptor could reach hardware or the network, or None when it cannot.
 
     Allowed: regular files and directories outside the kernel trees, pipes/FIFOs, anonymous
-    kernel objects (epoll, eventfd), terminals, the null device and AF_UNIX sockets. Anything
-    else (character or block devices, CAN/packet/netlink/IP sockets, kernel control files, or a
-    type that cannot be identified) is unsafe. The identification needs /proc (Linux)."""
+    kernel objects (epoll, eventfd), /dev/null and AF_UNIX sockets. Linux only allows terminal
+    character devices when they are Unix98 PTY slaves (major 136-143) or /dev/tty (5:0);
+    serial TTYs are refused even if isatty() is true. Off Linux, any TTY remains allowed.
+    Other devices, non-local sockets and unidentifiable objects are unsafe. The Linux
+    descriptor identification requires /proc."""
     try:
         info = os.fstat(fd)
     except OSError:
@@ -597,8 +599,15 @@ def _unsafe_descriptor(fd: int, unix_inodes: frozenset[str] | None = None) -> st
         return None
     if stat.S_ISCHR(mode):
         try:
-            if info.st_rdev == os.stat(os.devnull).st_rdev or os.isatty(fd):
+            if info.st_rdev == os.stat(os.devnull).st_rdev:
                 return None
+            if os.isatty(fd):
+                if not sys.platform.startswith("linux"):
+                    return None
+                major, minor = os.major(info.st_rdev), os.minor(info.st_rdev)
+                if 136 <= major <= 143 or (major, minor) == (5, 0):
+                    return None
+                return "serial terminal device"
         except OSError:
             pass
         return "character device"
