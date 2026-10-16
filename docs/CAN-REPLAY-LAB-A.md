@@ -174,9 +174,10 @@ During a replay, `no_device_access()`:
 - **Checks open descriptors (Linux).** Before activation, it fails closed if any open descriptor
   refers to a character device (other than the null device or a terminal), a block device, a file
   under `/proc` or `/sys`, a socket that is not AF_UNIX (CAN, packet, netlink, IP), or an
-  unidentifiable object. Pipes, anonymous kernel objects (epoll, eventfd), AF_UNIX sockets and
-  regular files are allowed. Descriptors opened during the replay go through the audited `open`
-  checks above.
+  unidentifiable object. If `/proc/self/fd` cannot be enumerated on Linux, the replay fails
+  with `safety_guard` (exit 11), rather than proceeding without this check. Pipes, anonymous
+  kernel objects (epoll, eventfd), AF_UNIX sockets and regular files are allowed. Descriptors
+  opened during the replay go through the audited `open` checks above.
 - **Fails the run on any violation.** A refusal fails the run with exit 11 whether or not library
   code catches it, and so does a thread started during the replay that is still alive afterwards.
 

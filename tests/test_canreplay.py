@@ -1133,6 +1133,39 @@ class CodexReview7242970Tests(LabCase):
             self.assertIn(reason, stderr)
             self.assert_no_output()
 
+    def test_unavailable_proc_fd_enumeration_fails_closed_on_linux(self):
+        # The previous implementation returned None on OSError, which was
+        # treated as a clean descriptor scan. This test failed on c83025d.
+        write_inputs(self.inputs)
+        real_listdir = os.listdir
+
+        def denied_proc_fd(path):
+            if os.fspath(path) == "/proc/self/fd":
+                raise PermissionError(13, "synthetic procfs access denied")
+            return real_listdir(path)
+
+        with mock.patch.object(canreplay.os, "listdir", side_effect=denied_proc_fd):
+            code, stderr = self.run_lab()
+        self.assertEqual(code, 11, stderr)
+        self.assertIn("safety_guard", stderr)
+        self.assertIn("cannot inspect open file descriptors", stderr)
+        self.assert_no_output()
+
+    def test_missing_proc_fd_enumeration_fails_closed_on_linux(self):
+        write_inputs(self.inputs)
+        real_listdir = os.listdir
+
+        def missing_proc_fd(path):
+            if os.fspath(path) == "/proc/self/fd":
+                raise FileNotFoundError(2, "synthetic procfs not mounted")
+            return real_listdir(path)
+
+        with mock.patch.object(canreplay.os, "listdir", side_effect=missing_proc_fd):
+            code, stderr = self.run_lab()
+        self.assertEqual(code, 11, stderr)
+        self.assertIn("cannot inspect open file descriptors", stderr)
+        self.assert_no_output()
+
     def test_local_pipes_and_unix_sockets_are_allowed(self):
         write_inputs(self.inputs)
         left, right = socket.socketpair(socket.AF_UNIX)
