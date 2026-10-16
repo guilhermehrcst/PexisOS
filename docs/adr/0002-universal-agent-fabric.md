@@ -30,7 +30,7 @@ The vision in §1–§8 is unchanged. Where the implemented contract differs fro
 | Capabilities | Exactly four read-only capabilities: `observe`, `describe`, `read_history` and `assess`. Any other name, such as `transmit`, `write`, `install`, `scan` or `enroll`, cannot be represented and fails closed as `capability_not_supported`. *Declared* (supported), *available*, *authorized* and *executed* are reported separately. | `contracts.py`, `runtime.py`; T10 and T11 in the threat model |
 | Policy | Deny by default. Exact per-principal, per-entity, per-capability grants with a **mandatory** expiry, immediate revocation and an injectable clock. Every internal fault fails closed. An entity the principal holds no grant for answers `not_found`, the same as an absent one. | `policy.py`; `test_fabric_policy.py` |
 | Identity of the caller | The principal is **assigned by the operator when the session or server starts** (`Fabric.open_session`, or `--principal` for stdio). It is never taken from tool arguments. **There is no cryptographic client authentication**: the trust root is whoever launches the process. | `runtime.py`, `mcp_server.py`; compat T05 |
-| Audit | A bounded, hash-chained, in-memory log. Every attempt leaves a record with an explicit event: `rejected`, `authorization`, `failed` or `completed`. `executed: true` is written only after every final check. A record is committed only after its sink accepts it, and a failing sink fails the call closed. Records hold codes, never payload values or raw arguments. | `policy.py`, `runtime.py`; `AuditSemanticsTests` |
+| Audit | A bounded, hash-chained, in-memory log. The runtime attempts to append explicit `rejected`, `authorization`, `failed` or `completed` events for calls. **A record is committed only when its sink accepts it**; if the sink fails, the call fails closed, but that attempt is **not guaranteed to leave an audit record**. `executed: true` is written only after final checks. Records hold codes, never payload values or raw arguments. | `policy.py`, `runtime.py`; `AuditSemanticsTests` |
 | Provenance | `source: synthetic_fixture`, `license: project_original`, `generator`, `seed`. Only synthetic data exists. | `contracts.py` |
 | Domain adapters | Three synthetic domains share one contract: a refrigerator, a CAN vehicle built on a test signal table (unknown frames carry an empty payload) and a software service. | `adapters/`; `test_fabric_runtime.py` |
 | MCP transport | Optional, using the official Python SDK (`mcp==2.2.0`, low-level `Server`), **stdio only**. Five tools: `list_entities`, `describe_entity`, `list_capabilities`, `read_observations` and `explain_assessment`, each with a closed input schema whose parity with the core validator is tested. The transport only calls `Session.call`. | `mcp_server.py`; `test_fabric_mcp.py` |
@@ -153,7 +153,7 @@ The transport exposes these exact names from `Session.tools()`; authorization an
 
 ## 3. Observation contract (IMPLEMENTED experimental v0)
 
-The active, closed `pexislink.observation.v0` contract is implemented in `src/pexislink/fabric/contracts.py`; the JSON below illustrates a valid synthetic refrigerator observation matching the source adapter, signal names, quality vocabulary and provenance used by the demo.
+The active, closed `pexislink.observation.v0` contract is implemented in `src/pexislink/fabric/contracts.py`; the JSON below reproduces the first observation of `adapters.appliance.generate(seed=1)` (event ID, timestamps and payload included), using the source adapter, quality vocabulary and provenance of the demo.
 
 ```json
 {
@@ -164,7 +164,7 @@ The active, closed `pexislink.observation.v0` contract is implemented in `src/pe
   "received_at": "2026-01-01T00:00:01Z",
   "source": "synthetic:appliance-v0",
   "kind": "appliance.telemetry",
-  "payload": {"temperature_c": 4.1, "compressor_on": true, "cycle_count": 2},
+  "payload": {"temperature_c": 4.05, "compressor_on": false, "cycle_count": 0},
   "quality": {"status": "observed", "flags": []},
   "provenance": {
     "source": "synthetic_fixture",
