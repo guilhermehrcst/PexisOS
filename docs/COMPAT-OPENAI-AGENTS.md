@@ -51,7 +51,7 @@ async with MCPServerStdio(params=params, name="pexislink") as server:
 | openai-agents (local run only) | **0.24.0** (released 2026-10-15) | PyPI, separate venv, not hash-locked | Executed once to check the version named in the compatibility kit. It is too new for the lock under D9. Bump it after 2026-10-29. |
 | mcp / mcp-types | 2.2.0 | the same pin as `requirements/fabric-mcp.txt` | Used by both the server and the SDK client in one environment |
 | Negotiated MCP protocol | `2026-07-28` | read from the live session | Client and server both run mcp 2.2.0 |
-| PexisLink server | Agent Fabric 0.1.0, stacked on PR #11 head `fc77757` | this repository | No server code was changed for this suite |
+| PexisLink server | Agent Fabric 0.1.0, included in `main` via PR #11 merge `f7c6a7a` | this repository | No server code was changed for this suite |
 
 The compatibility kit is a curated bundle of upstream files, with byte-for-byte hashes, from `openai/codex` (Apache-2.0) and `openai/openai-agents-python` (MIT).
 - It was verified with its own `verify_bundle.py` (26 files PASS) and **read only**.
