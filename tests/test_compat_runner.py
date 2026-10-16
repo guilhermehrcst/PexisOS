@@ -133,6 +133,50 @@ class CompatibilityMatrixIntegrityTests(unittest.TestCase):
         self.assertEqual(matrix["C01"]["status"], "FAIL")
 
 
+class ReviewDd1576aTests(unittest.TestCase):
+    """Codex review of dd1576a: pinned case mapping, PASS from recorded outcomes, honest ``executed``."""
+
+    def test_remapping_a_case_to_another_valid_id_is_rejected(self):
+        spec = copy.deepcopy(run_clients.CLIENTS["codex-cli"])
+        spec["cases"]["expired_and_revoked"] = ["C06"]  # forged-identity evidence posing as revocation
+        methods = sorted(run_clients.EXPECTED_TEST_METHODS["codex-cli"])
+        matrix = {test_id: {"status": "PASS"} for test_id in run_clients.EXPECTED_TEST_IDS["codex-cli"]}
+        errors = run_clients.matrix_integrity_errors("codex-cli", spec, matrix, methods)
+        self.assertIn("codex-cli: case_mapping_differs_from_pinned_manifest: expired_and_revoked", errors)
+
+    def test_declared_mappings_equal_the_pinned_manifest(self):
+        for name, spec in run_clients.CLIENTS.items():
+            self.assertEqual({case: tuple(ids) for case, ids in spec["cases"].items()},
+                             run_clients.EXPECTED_CASE_MAPPINGS[name], name)
+
+    def test_methods_without_a_recorded_outcome_are_never_pass(self):
+        class SuiteLevelSkip(unittest.TestCase):
+            @classmethod
+            def setUpClass(cls):
+                raise unittest.SkipTest("prerequisite missing")
+
+            def test_C01_first(self):
+                pass
+
+            def test_C02_second(self):
+                pass
+
+        suite = unittest.defaultTestLoader.loadTestsFromTestCase(SuiteLevelSkip)
+        with mock.patch.object(run_clients.unittest.defaultTestLoader, "loadTestsFromName", return_value=suite):
+            run = run_clients.run_module("unused", "C")
+        self.assertEqual(run["failures"], [])  # unittest itself reports no failure here
+        self.assertEqual({k: m["status"] for k, m in run["matrix"].items()}, {"C01": "FAIL", "C02": "FAIL"})
+        self.assertEqual(set(run["method_statuses"].values()), {"FAIL"})
+
+    def test_provider_independent_passes_do_not_mark_a_client_executed(self):
+        statuses = {m: "NOT_RUN" for m in run_clients.EXPECTED_TEST_METHODS["openai-agents"]}
+        for method in run_clients.PROVIDER_INDEPENDENT_METHODS["openai-agents"]:
+            statuses[method] = "PASS"
+        self.assertFalse(run_clients.client_executed("openai-agents", statuses))
+        statuses["test_T03_authorized_synthetic_entity_is_readable"] = "PASS"
+        self.assertTrue(run_clients.client_executed("openai-agents", statuses))
+
+
 class WorkflowFailurePropagationTests(unittest.TestCase):
     def test_fabric_mcp_step_enables_pipefail_for_tee(self):
         workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/tests.yml").read_text()

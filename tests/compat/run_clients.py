@@ -147,6 +147,34 @@ EXPECTED_METHOD_NOT_SUPPORTED = {
     "claude-code": frozenset(),
 }
 EXPECTED_NOT_SUPPORTED = {"codex-cli": set(), "openai-agents": set(), "claude-code": set()}
+# Independent pin of every case -> evidence-id mapping. Accepting any *known* id is not enough:
+# pointing "expired_and_revoked" at C06 would report revocation evidence that was never collected.
+EXPECTED_CASE_MAPPINGS = {
+    name: {case: tuple(ids) for case, ids in mapping.items()} for name, mapping in {
+        "openai-agents": {"initialize": ["T01"], "configured_vs_executed": ["T03"], "discover_five_tools": ["T02"],
+                          "authorized_query": ["T03"], "denied_access": ["T04"], "forged_identity": ["T05"],
+                          "expired_and_revoked": ["T06"], "session_isolation": ["T11"],
+                          "schemas_and_pagination": ["T07"], "error_sanitization": ["T10"], "determinism": ["T12"],
+                          "no_write_tools_no_effects": ["T13"], "process_shutdown": ["T14"]},
+        "codex-cli": {"initialize": ["C01"], "configured_vs_executed": ["C02"], "discover_five_tools": ["C03"],
+                      "authorized_query": ["C04"], "denied_access": ["C05"], "forged_identity": ["C06"],
+                      "expired_and_revoked": ["C07"], "session_isolation": ["C08"], "schemas_and_pagination": ["C09"],
+                      "error_sanitization": ["C10"], "determinism": ["C11"], "no_write_tools_no_effects": ["C12"],
+                      "process_shutdown": ["C13"]},
+        "claude-code": {"initialize": ["K02"], "configured_vs_executed": ["K01", "K02", "K03", "K04"],
+                        "discover_five_tools": ["K07"], "authorized_query": ["K08"], "denied_access": ["K08"],
+                        "forged_identity": ["K08"], "expired_and_revoked": ["K08"], "session_isolation": ["K08"],
+                        "schemas_and_pagination": ["K08"], "error_sanitization": ["K08"], "determinism": ["K08"],
+                        "no_write_tools_no_effects": ["K02", "K08"], "process_shutdown": ["K06"]},
+    }.items()
+}
+# Methods that exercise PexisLink itself, not the client: their PASS never means the client ran.
+PROVIDER_INDEPENDENT_METHODS = {
+    "openai-agents": frozenset({"test_T15_core_imports_and_runs_without_the_agents_sdk_or_codex",
+                                "test_T15_no_source_file_imports_a_provider_sdk"}),
+    "codex-cli": frozenset(),
+    "claude-code": frozenset(),
+}
 LIMITATIONS = {
     "openai-agents": ["I1 strict schema conversion unsatisfiable for read_observations mode=latest",
                       "I2 null for optional arguments is rejected", "I3 server_initialize_result is None",
@@ -183,6 +211,18 @@ def cli_version(env_var: str) -> str | None:
     return out.stdout.strip().splitlines()[-1] if out.returncode == 0 and out.stdout.strip() else None
 
 
+class _RecordingResult(unittest.TestResult):
+    """A TestResult that records successes explicitly, so PASS is derived only from them."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.succeeded: set[str] = set()
+
+    def addSuccess(self, test: unittest.TestCase) -> None:
+        super().addSuccess(test)
+        self.succeeded.add(test.id())
+
+
 def run_module(module: str, prefix: str) -> dict:
     suite = unittest.defaultTestLoader.loadTestsFromName(module)
     ids: list[str] = []
@@ -195,7 +235,7 @@ def run_module(module: str, prefix: str) -> dict:
             ids.append(item.id())
 
     walk(suite)
-    result = unittest.TestResult()
+    result = _RecordingResult()
     suite.run(result)
     failed = {t.id() for t, _ in result.failures + result.errors}
     skipped = {t.id(): reason for t, reason in result.skipped}
@@ -214,8 +254,11 @@ def run_module(module: str, prefix: str) -> dict:
             kind = "not_run" if reason.startswith("not_run:") else \
                 "not_supported" if reason.startswith("not_supported:") else "fail"
             reasons[key].add(reason)
-        else:
+        elif test_id in result.succeeded:
             kind = "pass"
+        else:  # no recorded outcome (e.g. a class-level setUpClass skip/error): never assume it passed
+            kind = "fail"
+            reasons[key].add("no recorded outcome for " + test_id.rsplit(".", 1)[-1])
         per_id[key].append(kind)
         method_statuses[test_id.rsplit(".", 1)[-1]] = kind.upper()
     matrix = {}
@@ -261,6 +304,10 @@ def matrix_integrity_errors(name: str, spec: dict, matrix: dict, methods: list[s
         problems.append(f"{name}: duplicate_test_methods")
     if set(spec["cases"]) != set(CASES):
         problems.append(f"{name}: case_categories_do_not_match_the_declared_matrix")
+    changed = sorted(case for case in set(spec["cases"]) | set(EXPECTED_CASE_MAPPINGS[name])
+                     if tuple(spec["cases"].get(case, ())) != EXPECTED_CASE_MAPPINGS[name].get(case))
+    if changed:
+        problems.append(f"{name}: case_mapping_differs_from_pinned_manifest: {', '.join(changed)}")
     if any(not ids for ids in spec["cases"].values()):
         problems.append(f"{name}: empty_case_category")
     return problems
@@ -282,6 +329,12 @@ def required_client_errors(name: str, spec: dict, matrix: dict, methods: list[st
             continue
         failures.append(f"{name}: {method} must PASS (got {status})")
     return failures
+
+
+def client_executed(name: str, method_statuses: dict[str, str]) -> bool:
+    """True only when a client-dependent method actually ran (PASS or FAIL)."""
+    return any(status in ("PASS", "FAIL") for method, status in method_statuses.items()
+               if method not in PROVIDER_INDEPENDENT_METHODS[name])
 
 
 def main() -> int:
@@ -317,7 +370,7 @@ def main() -> int:
         required_errors = (required_client_errors(name, spec, run["matrix"], run["methods"],
                                                   run["method_statuses"]) if name in args.require else [])
         clients[name] = {"interface": spec["interface"], "version": client_versions[name],
-                         "executed": summary["PASS"] + summary["FAIL"] > 0, "summary": summary,
+                         "executed": client_executed(name, run["method_statuses"]), "summary": summary,
                          "matrix": run["matrix"], "cases": cases, "failures": run["failures"],
                          "integrity_errors": integrity_errors, "required_errors": required_errors,
                          "limitations": LIMITATIONS.get(name, [])}
