@@ -65,11 +65,15 @@ def assess(spec: EntitySpec, window: list[Observation], now: int, config: Assess
     names = [only] if only is not None else [signal.name for signal in spec.signals]
     signals = [_signal(spec, name, usable, now, config) for name in names]
     states = {s["state"] for s in signals}
+    unsafe = any(s["reason"] == "numerically_unsafe" for s in signals)
     if stale:
         overall = "stale"
     else:
         overall = next((s for s in ("deviation", "stale", "nominal", "insufficient") if s in states), "unknown")
-    confidence = "low" if stale or gaps or counts["late"] or counts["unknown"] or "stale" in states else "medium"
+        if overall == "nominal" and unsafe:
+            overall = "unknown"  # a signal could not be computed: the entity as a whole is not shown as normal
+    confidence = "low" if (stale or gaps or counts["late"] or counts["unknown"] or "stale" in states
+                           or unsafe) else "medium"
     return {
         "schema_version": ASSESSMENT_SCHEMA,
         "entity_id": spec.entity_id,
@@ -118,9 +122,13 @@ def _signal(spec: EntitySpec, name: str, usable: list[Observation], now: int, co
     floor = (signal.maximum - signal.minimum) * config.min_scale_fraction
     scale = max(1.4826 * mad, floor)
     recent_median = median(recent)
+    # Defence in depth behind the contract's magnitude bound: overflow (inf/nan) or an underflowed
+    # zero scale must never become evidence of normality. Abstain instead.
+    if not (all(math.isfinite(v) for v in (centre, mad, floor, scale, recent_median)) and scale > 0):
+        return {**base, "state": "unknown", "reason": "numerically_unsafe", "confidence": "low",
+                "evidence": evidence}
     z = (recent_median - centre) / scale
-    if not all(math.isfinite(v) for v in (centre, mad, floor, scale, recent_median, z)) or scale <= 0:
-        # defence in depth behind the contract's magnitude bound: never turn overflow into 'nominal'
+    if not math.isfinite(z):
         return {**base, "state": "unknown", "reason": "numerically_unsafe", "confidence": "low",
                 "evidence": evidence}
     deviation = abs(z) > config.z_threshold

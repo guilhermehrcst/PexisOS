@@ -182,6 +182,32 @@ class InMemoryClientTests(unittest.TestCase):
         self.run_client(ALICE, script)
         self.assertEqual(events, [])
 
+    def test_published_read_schema_and_cursor_round_trip_over_the_real_client(self):
+        async def script(client):
+            tools = {t.name: t for t in (await client.list_tools()).tools}
+            schema = tools["read_observations"].input_schema
+            first = await client.call_tool("read_observations", {"entity_id": FRIDGE, "mode": "history",
+                                                                 "limit": 3.0})  # JSON integer-valued float
+            cursor = first.structured_content["next_cursor"]
+            second = await client.call_tool("read_observations", {"entity_id": FRIDGE, "mode": "history",
+                                                                  "cursor": cursor, "limit": 3})
+            bad = [await client.call_tool("read_observations", args) for args in (
+                {"entity_id": FRIDGE, "mode": "history", "cursor": "abc"},
+                {"entity_id": FRIDGE, "mode": "history", "cursor": "9" * 19},
+                {"entity_id": FRIDGE, "mode": "latest", "limit": 1})]
+            return schema, first, second, bad
+
+        for mode in self.MODES:
+            schema, first, second, bad = self.run_client(ALICE, script, mode)
+            self.assertEqual(schema["properties"]["cursor"]["pattern"], "^[0-9]{1,18}$")
+            self.assertEqual(schema["if"]["properties"]["mode"], {"const": "latest"})
+            self.assertFalse(first.is_error)
+            self.assertEqual(len(first.structured_content["items"]), 3)
+            self.assertEqual(second.structured_content["items"][0]["seq"],
+                             first.structured_content["items"][-1]["seq"] + 1)
+            for result in bad:
+                self.assertEqual(body(result)["error"]["code"], "invalid_arguments", mode)
+
     def test_build_server_requires_a_bound_session(self):
         with self.assertRaises(TypeError):
             build_server(self.fabric)

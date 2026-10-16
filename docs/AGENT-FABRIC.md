@@ -138,7 +138,7 @@ Request-side tools are listed below. All are read-only, and every input schema i
 
 Error codes are stable and messages fixed. Errors never include argument values, payloads, paths or stack traces:
 
-- `invalid_arguments`
+- `invalid_arguments`: structural, matching the published schema exactly. A semantic case carries a `reason`, for example `unknown_signal` when the signal is not declared by that entity. Integer arguments accept JSON numbers with a zero fractional part (`1.0`), as JSON Schema does.
 - `unknown_tool`
 - `not_found`
 - `access_denied`, with a `reason` from `no_grant`, `expired`, `revoked` or `not_yet_valid`
@@ -152,7 +152,7 @@ Error codes are stable and messages fixed. Errors never include argument values,
 - **declared**: the entity supports the capability;
 - **available**: the entity has data to answer;
 - **authorized**: this session may use the capability now;
-- **executed**: the audit log has a record with `executed: true` only when a result has been computed, has passed the result-size bound and is returned to the caller.
+- **executed**: the audit log has an `event: "completed"` record with `executed: true` only when a result has been computed, has passed every final check (including the result-size bound) and `Session.call` is about to return it. Delivery by a transport such as MCP is a separate boundary and is not asserted.
 
 ## 5. MCP integration
 
@@ -199,7 +199,13 @@ Properties, each verified with the official SDK `Client` in `tests/test_fabric_m
 - **Revocation.** Takes effect at once, including inside a live MCP session. A revoked grant id can never be reused.
 - **Audit.** A bounded, append-only, SHA-256 hash-chained log records each decision and each execution. It holds identifiers and reason codes only, never observation values.
 - **Policy file.** `pexislink.policy.v0` is a closed schema of at most 64 KiB, with duplicate JSON keys and NaN rejected. The loader refuses symlinks (`O_NOFOLLOW`), checks that the file is regular, and verifies the file's identity before, during and after the read (TOCTOU). The identity check covers inode, size, mtime and ctime; ctime cannot be restored by a writer, so a same-size rewrite in place is detected.
-- **Every attempt is audited.** Unknown tools and invalid arguments are recorded with a reason code only: the operation becomes `<unknown>` for an unknown tool, and raw arguments are never stored. The log is bounded by `max_audit`.
+- **Every attempt is audited.** Each attempt leaves at least one record, and each record carries an explicit `event`:
+  - `rejected`: an unknown tool or structurally invalid arguments. The record holds a reason code only: the operation becomes `<unknown>` for an unknown tool, and raw arguments are never stored;
+  - `authorization`: a policy decision, allow or deny, with its reason (`no_grant`, `expired`, `revoked`, …);
+  - `failed`: an internal error, or a result over `max_result_bytes`;
+  - `completed`: the result passed every final check and is about to be returned (`executed: true`).
+
+  The log is bounded by `max_audit`, and its hash chain stays valid across failures.
 - **Audit failure fails closed.** If the audit sink raises, the request returns `internal_error` and no unaudited result is served.
 
 ## 7. Data contracts (`v0`)
@@ -258,7 +264,7 @@ The method runs per declared numeric, assessable signal, over the last `window =
    - if the latest `observed` or `late` observation is older than `stale_after_s`, the overall state is `stale`; a fresh `unknown` record never counts as fresh;
    - each signal is also `stale` on its own when its latest trustworthy value is older than `stale_after_s`.
 3. With fewer than `min_points = 24` values, the signal is `insufficient`.
-4. Otherwise compare the median of the last `recent = 6` values with the median and MAD of the earlier values. The scale is `max(1.4826·MAD, 0.001·declared range)`. If any intermediate value is non-finite, the signal is `unknown` (`numerically_unsafe`), never `nominal`. This is a second barrier behind the ±1e15 range bound.
+4. Otherwise compare the median of the last `recent = 6` values with the median and MAD of the earlier values. The scale is `max(1.4826·MAD, 0.001·declared range)`. If any intermediate value is non-finite, or the scale underflows to zero (for example, a range so small that its 0.001 floor rounds to 0.0), the signal is `unknown` (`numerically_unsafe`), never `nominal`. This is a second barrier behind the ±1e15 range bound. If any signal is `numerically_unsafe`, the overall state is never `nominal` (it becomes `unknown`) and confidence is `low`.
 5. If `|z| > 4`, the signal is `deviation`; otherwise `nominal`.
    The overall state is the first match in the order `deviation`, `stale`, `nominal`, `insufficient`.
    With `signal=` the overall state and confidence are computed from that signal only.

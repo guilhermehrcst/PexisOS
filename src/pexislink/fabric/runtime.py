@@ -191,11 +191,20 @@ class Session:
         """Single entry point for transports (MCP, CLI). Never raises anything
         but ``FabricError``; never returns more than ``max_result_bytes``.
 
-        Audit semantics: every attempt leaves a record. ``executed: true`` is
-        written only after the result has been computed AND has passed the
-        result-size bound, i.e. it will be returned to the caller. Rejected
-        attempts (unknown tool, invalid arguments) are recorded with a code
-        only: never the raw tool name or arguments."""
+        Audit semantics. Every attempt leaves at least one record, with an explicit
+        ``event``:
+
+        * ``rejected``: unknown tool or structurally invalid arguments (code only;
+          never the raw tool name or arguments);
+        * ``authorization``: a policy decision (allow or deny, with its reason);
+        * ``failed``: internal error, or a result over ``max_result_bytes``;
+        * ``completed``: the result was computed and passed every final check, and
+          ``call`` is about to return it (``executed: true``). Delivery by a
+          transport such as MCP is a separate boundary and is not asserted here.
+
+        If the audit log cannot record an event (e.g. its sink fails), the call
+        fails closed with ``internal_error``.
+        """
         known = isinstance(tool, str) and tool in self._specs
         operation = tool if known else "<unknown>"
         try:
@@ -205,26 +214,28 @@ class Session:
             with no_effects():
                 result, audit = getattr(self, f"_{tool}")(**args)
             if len(canonical_json(result)) > self._fabric.limits.max_result_bytes:
-                self._audit(operation, audit["entity"], audit["capability"], "error", "result_too_large")
+                self._audit("failed", operation, audit["entity"], audit["capability"], "error", "result_too_large")
                 raise FabricError("internal_error")
-            self._fabric.audit.append(at=self._fabric.clock(), principal=self.principal_id, operation=operation,
-                                      decision="allow", reason="granted", executed=True, **audit)
+            self._fabric.audit.append(at=self._fabric.clock(), event="completed", principal=self.principal_id,
+                                      operation=operation, decision="allow", reason="granted", executed=True,
+                                      **audit)
             return result
         except FabricError as error:
             if error.code in ("unknown_tool", "invalid_arguments"):
-                self._audit(operation, None, None, "reject", error.code)  # raises internal_error if audit fails
+                self._audit("rejected", operation, None, None, "reject", error.code)  # internal_error if audit fails
             raise
         except Exception:  # ContractError, EffectBlocked, an audit sink failure or a bug: fail closed, disclose nothing
             try:
-                self._audit(operation, None, None, "error", "internal_error")
+                self._audit("failed", operation, None, None, "error", "internal_error")
             except FabricError:
                 pass  # the audit path itself failed; the request still fails closed
             raise FabricError("internal_error") from None
 
-    def _audit(self, operation: str, entity: str | None, capability: str | None, decision: str,
+    def _audit(self, event: str, operation: str, entity: str | None, capability: str | None, decision: str,
                reason: str) -> None:
         try:
-            self._fabric.audit.append(at=self._fabric.clock(), principal=self.principal_id, operation=operation,
+            self._fabric.audit.append(at=self._fabric.clock(), event=event, principal=self.principal_id,
+                                      operation=operation,
                                       entity=entity, capability=capability, decision=decision, reason=reason,
                                       executed=False)
         except Exception:
@@ -238,9 +249,13 @@ class Session:
             raise FabricError("invalid_arguments")
         if set(args) - set(schema["properties"]) or set(schema["required"]) - set(args):
             raise FabricError("invalid_arguments")
-        for key, value in args.items():
+        args = dict(args)  # normalized copy: the caller's object is never modified
+        for key, value in list(args.items()):
             prop = schema["properties"][key]
             if prop["type"] == "integer":
+                # JSON Schema's "integer" accepts any number with a zero fractional part (1.0 is valid)
+                if isinstance(value, float) and value.is_integer():
+                    value = args[key] = int(value)
                 if not isinstance(value, int) or isinstance(value, bool) \
                         or not prop["minimum"] <= value <= prop["maximum"]:
                     raise FabricError("invalid_arguments")
@@ -257,7 +272,8 @@ class Session:
     def _decide(self, operation: str, entity_id: str, capability: str, *, quiet: bool = False):
         decision = self._fabric.policy.decide(self._principal, entity_id, capability, self._fabric.declared)
         if not quiet:
-            self._fabric.audit.append(at=decision.decided_at, principal=self.principal_id, operation=operation,
+            self._fabric.audit.append(at=decision.decided_at, event="authorization", principal=self.principal_id,
+                                      operation=operation,
                                       entity=entity_id, capability=capability,
                                       decision="allow" if decision.allowed else "deny", reason=decision.reason,
                                       grant=decision.grant_id, executed=False)
@@ -366,7 +382,7 @@ class Session:
     def _explain_assessment(self, entity_id: str, signal: str | None = None) -> tuple[dict, dict]:
         spec = self._require("explain_assessment", entity_id, Capability.ASSESS.value)
         if signal is not None and spec.signal(signal) is None:
-            raise FabricError("invalid_arguments")
+            raise FabricError("invalid_arguments", "unknown_signal")  # semantic: depends on the entity
         window = self._fabric.store.window(entity_id, self._fabric.assessment.window)
         result = assess(spec, window, self._fabric.clock(), self._fabric.assessment, only=signal)
         return result, self._done(entity_id, Capability.ASSESS.value)
