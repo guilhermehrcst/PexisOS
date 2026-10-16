@@ -420,17 +420,20 @@ class OutputSafetyTests(LabCase):
             events.append(("commit", pending.target))
             return real_commit(pending)
 
-        def sync(path, *, required=False):
-            events.append(("sync_required" if required else "sync", path))
-            return real_sync(path, required=required)
+        def sync(directory):  # every directory fsync is required since the 7242970 review
+            events.append(("sync", Path(directory)))
+            return real_sync(directory)
 
         with mock.patch.object(lab_cli._Pending, "commit", commit), \
              mock.patch.object(lab_cli, "_fsync_directory", sync):
             code, stderr = self.run_lab(summary=summary)
         self.assertEqual(code, 0, stderr)
         self.assertTrue(summary.is_file())
-        self.assertEqual(events.count(("sync_required", summary)), 1, events)
-        self.assertLess(events.index(("sync_required", summary)), events.index(("commit", self.out)))
+        summary_dir = other.resolve()
+        # the stale-summary unlink is synced once before the records commit, then again after the
+        # new summary's rename
+        self.assertEqual(events.count(("sync", summary_dir)), 2, events)
+        self.assertLess(events.index(("sync", summary_dir)), events.index(("commit", self.out.resolve())))
 
     def test_old_summary_fsync_failure_prevents_records_commit(self):
         write_inputs(self.inputs)
@@ -440,10 +443,8 @@ class OutputSafetyTests(LabCase):
         summary.write_text("old summary")
         self.out.write_text("old records")
 
-        def cannot_sync(path, *, required=False):
-            if required:
-                raise OSError(5, "synthetic fsync failure")
-            return None
+        def cannot_sync(directory):
+            raise OSError(5, "synthetic fsync failure")
 
         with mock.patch.object(lab_cli, "_fsync_directory", cannot_sync):
             code, stderr = self.run_lab(summary=summary)
@@ -947,6 +948,210 @@ class CodexReviewTests(LabCase):
             code, stderr = self.run_lab(flag, str(10 ** 16))
             self.assertEqual(code, 2, (flag, stderr))
             self.assertNotIn("Traceback", stderr)
+
+
+@unittest.skipUnless(os.path.isdir("/proc/self/fd"), "not_run: the descriptor and kernel-path checks need Linux /proc")
+class CodexReview7242970Tests(LabCase):
+    """Codex review of PR #10 at 7242970 (5 P1, 3 P2). Each test failed on 7242970."""
+
+    # P1: raw-thread wrapper restored before deactivation -------------------------------------
+    def test_native_thread_entry_points_are_never_restored_while_the_guard_is_active(self):
+        import _thread
+        import threading
+        native_raw, native_start = _thread.start_new_thread, threading.Thread.start
+        observed = []
+
+        class Spy(dict):
+            def __setitem__(self, key, value):
+                if key == "active" and value is False:  # the deactivation instant
+                    observed.append((_thread.start_new_thread is native_raw,
+                                     threading.Thread.start is native_start))
+                super().__setitem__(key, value)
+
+        with mock.patch.object(canreplay, "_guard", Spy(active=False, violations=0)):
+            with canreplay.no_device_access():
+                pass
+        self.assertEqual(observed, [(False, False)], "a native entry point was reachable while active")
+        self.assertIs(_thread.start_new_thread, native_raw)  # still restored afterwards
+        self.assertIs(threading.Thread.start, native_start)
+
+    # P1: a refused audit hook must fail closed ----------------------------------------------
+    def test_refused_audit_hook_fails_closed(self):
+        import subprocess
+        write_inputs(self.inputs, CLEAN_ROWS[:1])
+        tests_dir = Path(__file__).resolve().parent
+        code = (
+            "import sys\n"
+            "def veto(event, args):\n"
+            "    if event == 'sys.addaudithook':\n"
+            "        raise RuntimeError('embedding policy refuses further hooks')\n"
+            "sys.addaudithook(veto)\n"
+            f"sys.path[:0] = [{str(tests_dir)!r}, {str(Path(canreplay.__file__).resolve().parents[1])!r}]\n"
+            "from canreplay_fixtures import stub_factory\n"
+            "from pexislink import lab_cli\n"
+            f"sys.exit(lab_cli.main(['can-replay', '--dbc', {str(self.inputs / 'synthetic.dbc')!r}, '--frames', "
+            f"{str(self.inputs / 'synthetic_frames.csv')!r}, '--out', {str(self.out)!r}, '--summary', "
+            f"{str(self.summary)!r}], decoder_factory=stub_factory))\n"
+        )
+        result = subprocess.run([sys.executable, "-I", "-c", code], capture_output=True, text=True, timeout=120)
+        self.assertEqual(result.returncode, 11, result.stderr)
+        self.assertIn("audit hook was refused", result.stderr)
+        self.assert_no_output()
+
+    # P1: kernel control files are regular files ------------------------------------------------
+    def test_kernel_control_and_information_files_are_refused(self):
+        for path in ("/proc/sysrq-trigger", "/proc/self/status", "/sys/class/net/eth0/mtu",
+                     "/sys/kernel/does-not-exist", "/proc"):
+            self.assertTrue(canreplay._is_device(path), path)
+        regular = self.root / "regular.txt"
+        regular.write_text("x")
+        self.assertFalse(canreplay._is_device(str(regular)))
+        # end to end, including a relative spelling after chdir
+        SafetyGuardTests.attempt(self, lambda: open("/proc/self/status", "rb").close())
+        cwd = os.getcwd()
+        try:
+            SafetyGuardTests.attempt(self, lambda: (os.chdir("/proc"), open("self/status", "rb").close()))
+        finally:
+            os.chdir(cwd)
+
+    # P1: total generated bytes are capped before each write ------------------------------------
+    def test_output_budget_is_enforced_before_each_write(self):
+        target = self.outdir / "budget.jsonl"
+        pending = lab_cli._Pending(target, 64)
+        try:
+            pending.write_record({"k": "v"})  # 10 bytes: fits
+            with self.assertRaises(ReplayError) as caught:
+                pending.write_record({"k": "x" * 100})
+            self.assertEqual(caught.exception.code, "output_too_large")
+            pending.handle.flush()
+            self.assertEqual(pending.temporary.stat().st_size, pending.bytes)  # nothing past the budget
+            self.assertLessEqual(pending.bytes, 64)
+            with self.assertRaises(ReplayError):
+                pending.write_text("y" * 60)  # the summary path uses the same budget
+        finally:
+            pending.discard()
+
+    def test_output_budget_exit_code_and_no_commit(self):
+        row = "2026-01-01T00:00:00Z,0x123,0,1027FE340F000000"
+        write_inputs(self.inputs, [row] * 8000)  # ~2.5 MB of records
+        code, stderr = self.run_lab("--max-output-mb", "1")
+        self.assertEqual(code, 12, stderr)
+        self.assertIn("output_too_large", stderr)
+        self.assert_no_output()
+        self.assertEqual(self.run_lab("--max-output-mb", "64")[0], 0)
+
+    # P1: names that one case-insensitive or normalizing filesystem maps to one entry -----------
+    def test_case_or_normalization_aliases_are_rejected(self):
+        write_inputs(self.inputs)
+        nfc, nfd = "r\u00e9sum\u00e9.json", "re\u0301sume\u0301.json"
+        for out, summary in ((self.outdir / "records.jsonl", self.outdir / "RECORDS.jsonl"),
+                             (self.outdir / nfc, self.outdir / nfd)):
+            code, stderr = self.run_lab(out=out, summary=summary)
+            self.assertEqual(code, 2, stderr)
+            self.assertEqual(list(self.outdir.iterdir()), [])
+        code, stderr = self.run_lab(out=self.inputs / "SYNTHETIC_FRAMES.csv")
+        self.assertEqual(code, 2, stderr)
+        self.assertEqual(self.run_lab(out=self.outdir / "Records.jsonl", summary=self.outdir / "summary.json")[0], 0)
+
+    # P2: directory fsync failures on the commit fail the run --------------------------------------
+    @staticmethod
+    def failing_directory_fsync(condition=lambda: True):
+        """os.fsync that fails for directory descriptors when ``condition()`` holds (files sync normally)."""
+        import stat as stat_module
+        real_fsync = os.fsync
+
+        def fsync(fd):
+            if stat_module.S_ISDIR(os.fstat(fd).st_mode) and condition():
+                raise OSError(5, "synthetic directory fsync failure")
+            return real_fsync(fd)
+        return fsync
+
+    def test_failed_fsync_after_the_summary_rename_withdraws_the_marker(self):
+        write_inputs(self.inputs)
+        fsync = self.failing_directory_fsync(lambda: self.summary.exists())  # only once the marker is in place
+        with mock.patch.object(lab_cli.os, "fsync", fsync):
+            code, stderr = self.run_lab()
+        self.assertEqual(code, 1, stderr)
+        self.assertIn("output_write_error", stderr)
+        self.assertFalse(self.summary.exists(), "a failed commit left a success marker")
+
+    def test_failed_fsync_after_the_records_rename_prevents_the_summary(self):
+        write_inputs(self.inputs)
+        with mock.patch.object(lab_cli.os, "fsync", self.failing_directory_fsync()):
+            code, stderr = self.run_lab()
+        self.assertEqual(code, 1, stderr)
+        self.assertFalse(self.summary.exists())
+
+    # P2: symlink followed by .. ---------------------------------------------------------------------
+    def test_destination_parent_is_resolved_like_the_kernel(self):
+        write_inputs(self.inputs)
+        real = self.root / "real"
+        (real / "sub").mkdir(parents=True)
+        (self.outdir / "link").symlink_to(real / "sub")
+        out = self.outdir / "link" / ".." / "records.jsonl"  # kernel: real/records.jsonl
+        temp_dirs, synced = [], []
+        real_mkstemp, real_sync = lab_cli.tempfile.mkstemp, lab_cli._fsync_directory
+
+        def mkstemp(*args, **kwargs):
+            temp_dirs.append(Path(kwargs["dir"]))
+            return real_mkstemp(*args, **kwargs)
+
+        def sync(directory):
+            synced.append(Path(directory))
+            return real_sync(directory)
+
+        with mock.patch.object(lab_cli.tempfile, "mkstemp", mkstemp), \
+             mock.patch.object(lab_cli, "_fsync_directory", sync):
+            code, stderr = self.run_lab(out=out)
+        self.assertEqual(code, 0, stderr)
+        self.assertTrue((real / "records.jsonl").is_file())
+        self.assertFalse((self.outdir / "records.jsonl").exists())
+        self.assertEqual(temp_dirs[0], real.resolve())
+        self.assertIn(real.resolve(), synced)
+        self.assertNotIn(self.outdir.resolve(), synced[:1])
+
+    def test_output_names_must_name_a_file(self):
+        write_inputs(self.inputs)
+        for name in (".", ".."):
+            self.assertEqual(self.run_lab(out=Path(str(self.outdir) + os.sep + name))[0], 2)
+
+    # P2: inherited device and socket descriptors ------------------------------------------------------
+    def test_inherited_unsafe_descriptors_refuse_the_replay(self):
+        write_inputs(self.inputs)
+        openers = {
+            "character device": lambda: os.open("/dev/zero", os.O_RDONLY),
+            "non-local socket": lambda: socket.socket(socket.AF_INET, socket.SOCK_DGRAM),  # never connected
+            "kernel control file": lambda: os.open("/proc/self/status", os.O_RDONLY),
+        }
+        for reason, opener in openers.items():
+            handle = opener()
+            try:
+                code, stderr = self.run_lab()
+            finally:
+                handle.close() if hasattr(handle, "close") else os.close(handle)
+            self.assertEqual(code, 11, (reason, stderr))
+            self.assertIn(reason, stderr)
+            self.assert_no_output()
+
+    def test_local_pipes_and_unix_sockets_are_allowed(self):
+        write_inputs(self.inputs)
+        left, right = socket.socketpair(socket.AF_UNIX)
+        read_end, write_end = os.pipe()
+        try:
+            code, stderr = self.run_lab()
+        finally:
+            left.close(), right.close(), os.close(read_end), os.close(write_end)
+        self.assertEqual(code, 0, stderr)
+
+    def test_opening_an_unsafe_descriptor_during_the_replay_is_refused(self):
+        fd = os.open("/proc/self/status", os.O_RDONLY)
+        duplicate = os.dup(fd)
+        try:
+            with mock.patch.object(canreplay, "_inherited_descriptor_problems", lambda: []):
+                SafetyGuardTests.attempt(self, lambda: os.fdopen(duplicate, "rb", closefd=False).close())
+        finally:
+            os.close(duplicate)
+            os.close(fd)
 
 
 class WorkflowSafetyTests(unittest.TestCase):

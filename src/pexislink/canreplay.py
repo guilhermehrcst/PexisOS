@@ -102,6 +102,7 @@ class ReplayLimits:
     max_messages: int = 10_000
     max_signals_per_message: int = 512  # cantools' strict parse is quadratic in signals per message
     max_signals: int = 50_000
+    max_output_bytes: int = 4 * 1024 ** 3  # records and summary each: DBC strings repeat once per decoded row
 
     def __post_init__(self) -> None:
         for name, value in asdict(self).items():
@@ -470,6 +471,12 @@ _BLOCKED_EVENTS = ("socket.__new__", "socket.connect", "socket.bind", "socket.se
 _guard = {"active": False, "violations": 0}
 _guard_lock = threading.RLock()  # audit callbacks and guard finalization must share this synchronization
 _hook_installed = False
+_HOOK_PROBE = "pexislink.canreplay.hook_probe"  # sentinel event proving the hook really receives events
+_hook_probe = {"seen": False}
+# Kernel control and information trees: refused by resolved path even when an entry reports S_ISREG
+# (/proc/sysrq-trigger, /sys/class/net/<iface>/... are "regular" files that reconfigure the host).
+_KERNEL_TREES = ("/proc", "/sys")
+_socket_snapshot: dict[str, frozenset[str] | None] = {"unix": frozenset()}
 
 
 class SafetyViolation(RuntimeError):
@@ -477,6 +484,9 @@ class SafetyViolation(RuntimeError):
 
 
 def _audit(event: str, args: tuple[Any, ...]) -> None:
+    if event == _HOOK_PROBE:
+        _hook_probe["seen"] = True
+        return
     # Ignore irrelevant audit events before acquiring the shared guard lock.
     if event != "open" and not event.startswith(_BLOCKED_EVENTS):
         return
@@ -487,8 +497,12 @@ def _audit(event: str, args: tuple[Any, ...]) -> None:
         if not _guard["active"]:
             return
         blocked = event.startswith(_BLOCKED_EVENTS)
-        if event == "open" and args and isinstance(args[0], (str, bytes, os.PathLike)):
-            blocked = _is_device(os.fsdecode(args[0]))
+        if event == "open" and args:
+            if isinstance(args[0], (str, bytes, os.PathLike)):
+                blocked = _is_device(os.fsdecode(args[0]))
+            elif isinstance(args[0], int):  # os.fdopen/open(fd): judge what the descriptor refers to
+                # The AF_UNIX snapshot taken at activation is used: opening /proc here would recurse.
+                blocked = _unsafe_descriptor(args[0], _socket_snapshot["unix"]) is not None
         if blocked:
             _guard["violations"] += 1
             raise SafetyViolation(event)
@@ -502,12 +516,90 @@ def _is_device(path: str) -> bool:
     seen by an audit hook (documented gap)."""
     try:
         resolved = os.path.realpath(path)
+    except (OSError, ValueError):
+        return False
+    if _in_kernel_tree(resolved):
+        return True  # checked before stat: refused even if absent or S_ISREG (kernel control files)
+    try:
         mode = os.stat(resolved).st_mode
     except (OSError, ValueError):
         return False  # does not exist (yet): nothing to reach; creating files is not a device access
     if stat.S_ISREG(mode) or stat.S_ISDIR(mode):
         return False
     return True
+
+
+def _in_kernel_tree(resolved: str) -> bool:
+    return any(resolved == tree or resolved.startswith(tree + os.sep) for tree in _KERNEL_TREES)
+
+
+def _local_socket_inodes() -> frozenset[str] | None:
+    """Inodes of this process' AF_UNIX sockets (Linux), or None when that cannot be determined."""
+    try:
+        with open("/proc/self/net/unix", "rb") as table:
+            rows = table.read(64 << 20).splitlines()[1:]
+    except OSError:
+        return None
+    return frozenset(row.split()[6].decode("ascii", "replace") for row in rows if len(row.split()) >= 7)
+
+
+def _unsafe_descriptor(fd: int, unix_inodes: frozenset[str] | None = None) -> str | None:
+    """Why an open descriptor could reach hardware or the network, or None when it cannot.
+
+    Allowed: regular files and directories outside the kernel trees, pipes/FIFOs, anonymous
+    kernel objects (epoll, eventfd), terminals, the null device and AF_UNIX sockets. Anything
+    else (character or block devices, CAN/packet/netlink/IP sockets, kernel control files, or a
+    type that cannot be identified) is unsafe. The identification needs /proc (Linux)."""
+    try:
+        info = os.fstat(fd)
+    except OSError:
+        return None  # not open
+    mode = info.st_mode
+    if stat.S_ISFIFO(mode):
+        return None
+    target = None
+    try:
+        target = os.readlink(f"/proc/self/fd/{fd}")
+    except OSError:
+        pass
+    if stat.S_ISREG(mode) or stat.S_ISDIR(mode):
+        if target is not None and target.startswith("/") and _in_kernel_tree(target):
+            return "kernel control file"
+        return None
+    if stat.S_ISCHR(mode):
+        try:
+            if info.st_rdev == os.stat(os.devnull).st_rdev or os.isatty(fd):
+                return None
+        except OSError:
+            pass
+        return "character device"
+    if stat.S_ISBLK(mode):
+        return "block device"
+    if stat.S_ISSOCK(mode):
+        if target is not None and target.startswith("socket:["):
+            if unix_inodes is not None and target[len("socket:["):-1] in unix_inodes:
+                return None
+        return "non-local socket"
+    if target is not None and (target.startswith("anon_inode:") or target.startswith("pipe:")):
+        return None
+    return "unidentified descriptor"
+
+
+def _inherited_descriptor_problems() -> list[str] | None:
+    """Unsafe descriptors open in this process, or None when they cannot be enumerated."""
+    try:
+        names = os.listdir("/proc/self/fd")
+    except OSError:
+        return None
+    inodes = _local_socket_inodes()
+    _socket_snapshot["unix"] = inodes if inodes is not None else frozenset()
+    problems = []
+    for name in names:
+        if name.isdigit():
+            reason = _unsafe_descriptor(int(name), inodes)
+            if reason is not None:
+                problems.append(reason)
+    return problems
 
 
 @contextmanager
@@ -528,8 +620,19 @@ def no_device_access() -> Iterator[None]:
             _guard["violations"] += 1
             raise ReplayError("safety_guard", "another replay guard is already active")
         if not _hook_installed:
-            sys.addaudithook(_audit)
-            _hook_installed = True
+            sys.addaudithook(_audit)  # CPython silently refuses this if another hook vetoes it
+        # Prove, on every entry, that the hook is installed and receives events. Fail closed otherwise.
+        _hook_probe["seen"] = False
+        sys.audit(_HOOK_PROBE)
+        if not _hook_probe["seen"]:
+            raise ReplayError("safety_guard", "the runtime audit hook was refused or receives no events")
+        _hook_installed = True
+        # Descriptors inherited or opened before the replay are invisible to open() auditing; refuse
+        # to run if any of them could reach a device, a kernel control file or a non-local socket.
+        problems = _inherited_descriptor_problems()
+        if problems:
+            raise ReplayError("safety_guard", "an open descriptor refers to a device, kernel control file or "
+                              "non-local socket: " + ", ".join(sorted(set(problems))))
         threads_before = {id(thread) for thread in threading.enumerate()}
         # CPython 3.11 may not emit audit events for raw _thread starts.
         # Intercept the public low-level entry point and threading's cached
@@ -554,9 +657,9 @@ def no_device_access() -> Iterator[None]:
             return saved_thread_start(thread, *args, **kwargs)
 
         _thread.start_new_thread = reject_raw_start
-        threading.Thread.start = reject_thread_start
+        setattr(threading.Thread, "start", reject_thread_start)  # setattr: deliberate method patch
         if saved_thread_alias is not None:
-            threading._start_new_thread = reject_raw_start
+            setattr(threading, "_start_new_thread", reject_raw_start)
         _guard.update(active=True, violations=0)
 
     pending: BaseException | None = None
@@ -573,14 +676,15 @@ def no_device_access() -> Iterator[None]:
                     _guard["violations"] += 1
                 violations = _guard["violations"]
             finally:
-                # Restore patched entry points under the same lock before
-                # disabling the guard. Audited effects still remain blocked
-                # until classification and the final violation check end.
-                _thread.start_new_thread = saved_raw_start
-                threading.Thread.start = saved_thread_start
-                if saved_thread_alias is not None:
-                    threading._start_new_thread = saved_thread_alias
+                # Deactivate FIRST, then restore the patched entry points, both under the lock the
+                # wrappers take. The native callables therefore never become reachable while the
+                # guard is active: a start attempted during finalization blocks on the lock and
+                # runs only after the replay has ended (outside the replay, as documented).
                 _guard["active"] = False
+                _thread.start_new_thread = saved_raw_start
+                setattr(threading.Thread, "start", saved_thread_start)
+                if saved_thread_alias is not None:
+                    setattr(threading, "_start_new_thread", saved_thread_alias)
         if violations:
             raise ReplayError(
                 "safety_guard",
