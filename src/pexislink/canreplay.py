@@ -492,44 +492,46 @@ def _is_device(path: str) -> bool:
 
 @contextmanager
 def no_device_access() -> Iterator[None]:
-    """Refuse sockets, processes, native libraries and devices during one replay.
+    """Refuse audited network, device and process effects during one replay.
 
-    The audit hook and its state are process-global, so a second nested or
-    concurrent replay is rejected rather than disabling the first replay's guard.
-    A rejected entry also invalidates the active replay even if swallowed.
-    This is defense in depth, not an OS sandbox.
+    The hook and counters are process-global. Protect BOTH guard activation and
+    rejection of concurrent entry with the same lock, so a rejected contender
+    cannot run between lock ownership and activation or lose its violation in
+    an initialization reset. This is defense in depth, never a sandbox.
     """
     global _hook_installed
-    if not _guard_lock.acquire(blocking=False):
-        _guard["violations"] += 1
-        raise ReplayError("safety_guard", "another replay guard is already active")
-    try:
+    with _guard_lock:
+        if _guard["active"]:
+            _guard["violations"] += 1
+            raise ReplayError("safety_guard", "another replay guard is already active")
         if not _hook_installed:
             sys.addaudithook(_audit)
             _hook_installed = True
         threads_before = {id(thread) for thread in threading.enumerate()}
         _guard.update(active=True, violations=0)
-        pending: BaseException | None = None
-        try:
-            yield
-        except BaseException as error:
-            pending = error  # validate the guard before propagating the original exception
-        finally:
+
+    pending: BaseException | None = None
+    try:
+        yield
+    except BaseException as error:
+        pending = error  # finish all checks before propagating any pending exception
+    finally:
+        with _guard_lock:
             try:
+                # A late or swallowed concurrent entry fails the owner too.
                 if any(id(thread) not in threads_before and thread.is_alive()
                        for thread in threading.enumerate()):
                     _guard["violations"] += 1
-                if _guard["violations"]:
-                    raise ReplayError(
-                        "safety_guard",
-                        "replay code attempted device, network, process, thread or nested replay activity",
-                    ) from pending
-                if pending is not None:
-                    raise pending
+                violations = _guard["violations"]
             finally:
                 _guard["active"] = False
-    finally:
-        _guard_lock.release()
+        if violations:
+            raise ReplayError(
+                "safety_guard",
+                "replay code attempted device, network, process, thread or nested replay activity",
+            ) from pending
+        if pending is not None:
+            raise pending
 
 # --------------------------------------------------------------- replay
 
