@@ -154,6 +154,7 @@
       },
       "executed": true,
       "failures": [],
+      "integrity_errors": [],
       "interface": "claude mcp add/get/list (configuration and health check only), no model calls",
       "limitations": [
         "proprietary: never installed by this repository or CI; local runs only",
@@ -230,6 +231,7 @@
           "tests": 1
         }
       },
+      "required_errors": [],
       "summary": {
         "FAIL": 0,
         "NOT_RUN": 2,
@@ -321,6 +323,7 @@
       },
       "executed": true,
       "failures": [],
+      "integrity_errors": [],
       "interface": "codex app-server JSON-RPC (mcpServerStatus/list, mcpServer/tool/call) and codex mcp; no turn, no model calls",
       "limitations": [
         "app-server is marked experimental by Codex",
@@ -436,6 +439,7 @@
           "tests": 1
         }
       },
+      "required_errors": [],
       "summary": {
         "FAIL": 0,
         "NOT_RUN": 0,
@@ -527,6 +531,7 @@
       },
       "executed": true,
       "failures": [],
+      "integrity_errors": [],
       "interface": "agents.mcp.MCPServerStdio (Python SDK), no model calls",
       "limitations": [
         "I1 strict schema conversion unsatisfiable for read_observations mode=latest",
@@ -658,6 +663,7 @@
           "tests": 2
         }
       },
+      "required_errors": [],
       "summary": {
         "FAIL": 0,
         "NOT_RUN": 0,
@@ -670,7 +676,7 @@
   "command": "PYTHONPATH=src python tests/compat/run_clients.py",
   "environment": {
     "credentials": "none",
-    "git_commit": "a0664bb57f2e23c8a9f068a9cf4b26076c6509bc",
+    "git_commit": "cb25e7d68212a70756e5d5285d81cc9ac6089440",
     "implementation": "CPython",
     "model_calls": 0,
     "platform": "Linux-x86_64",
