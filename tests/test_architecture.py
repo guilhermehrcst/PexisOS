@@ -45,6 +45,8 @@ class LayeringTests(unittest.TestCase):
             "synth": {"ingest"},
             "baselines": {"core", "ingest"},
             "componentx": {""},  # package root only (__version__): no detector, no evaluation harness
+            "canreplay": set(),  # v0.4 Lab A core: standard library only
+            "lab_cli": {"", "canreplay"},
         }
         for module, permitted in allowed.items():
             self.assertTrue(imported_modules(module) <= permitted,
@@ -56,6 +58,29 @@ class LayeringTests(unittest.TestCase):
         for path in PACKAGE.glob("*.py"):
             if path.stem not in ("componentx", "cli"):
                 self.assertNotIn("componentx", imported_modules(path.stem), path.name)
+
+    def test_can_replay_lab_is_isolated(self):
+        """v0.4 Lab A: no detector, preflight or evaluation module reaches the lab (only the CLI wires
+        it in); python-can is never imported by the package; cantools only inside canreplay."""
+        for path in PACKAGE.glob("*.py"):
+            if path.stem not in ("canreplay", "lab_cli", "cli"):
+                self.assertFalse(imported_modules(path.stem) & {"canreplay", "lab_cli"}, path.name)
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                names = ([alias.name for alias in node.names] if isinstance(node, ast.Import)
+                         else [node.module or ""] if isinstance(node, ast.ImportFrom) and node.level == 0 else [])
+                for name in names:
+                    top = name.split(".")[0]
+                    self.assertNotEqual(top, "can", f"{path.name} imports python-can")
+                    if top == "cantools":
+                        self.assertEqual(path.stem, "canreplay", f"{path.name} imports cantools")
+        import subprocess
+        import sys
+        probe = ("import sys, pexislink.cli, pexislink.canreplay, pexislink.lab_cli; "
+                 "print(sorted(m for m in ('can', 'cantools') if m in sys.modules))")
+        result = subprocess.run([sys.executable, "-c", probe], env={"PYTHONPATH": str(PACKAGE.parent)},
+                                capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.stdout.strip(), "[]", result.stderr)  # importing the lab loads no decoder
 
     def test_no_process_is_spawned_at_runtime(self):
         """Code review L10: platform.platform() used to spawn `uname -p` during a
@@ -76,11 +101,19 @@ class LayeringTests(unittest.TestCase):
                                    "--observations", str(examples / "observations.csv")]), 0)
             import tempfile
 
+            from canreplay_fixtures import stub_factory
+            from canreplay_fixtures import write_inputs as write_can_inputs
             from componentx_fixtures import write_dataset  # synthetic files: every reading path runs
+
+            from pexislink import lab_cli
             with tempfile.TemporaryDirectory() as tmp:
                 data = write_dataset(Path(tmp) / "data")
                 self.assertEqual(main(["dataset", "preflight", "--source", "component-x-v3", "--input-dir",
                                        str(data), "--out", str(Path(tmp) / "m.json")]), 0)
+                dbc, frames = write_can_inputs(Path(tmp) / "can")
+                self.assertEqual(lab_cli.main(["can-replay", "--dbc", str(dbc), "--frames", str(frames), "--out",
+                                               str(Path(tmp) / "r.jsonl"), "--summary", str(Path(tmp) / "s.json")],
+                                              decoder_factory=stub_factory), 0)
             self.assertEqual(main(["fabric", "demo"]), 0)
 
     def test_no_network_or_subprocess_in_the_package(self):
@@ -162,12 +195,12 @@ class AgentFabricIsolationTests(unittest.TestCase):
             if path.name != "mcp_server.py":
                 self.assertEqual(top_level & OPTIONAL_TRANSPORT, set(), f"{path.name} imports the SDK at load time")
 
-    def test_importing_the_fabric_does_not_load_the_mcp_sdk(self):
+    def test_importing_the_fabric_does_not_load_the_mcp_sdk_or_cantools(self):
         import subprocess
         import sys
 
         code = ("import sys; import pexislink.fabric, pexislink.fabric.cli, pexislink.fabric.demo; "
-                "bad = [m for m in ('mcp', 'mcp_types', 'anyio', 'pydantic') if m in sys.modules]; "
+                "bad = [m for m in ('mcp', 'mcp_types', 'anyio', 'pydantic', 'cantools', 'can') if m in sys.modules]; "
                 "print(','.join(bad), end=''); raise SystemExit(1 if bad else 0)")
         result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=60,
                                 env={"PYTHONPATH": str(PACKAGE.parent), "PATH": ""})

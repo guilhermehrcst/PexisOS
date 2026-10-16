@@ -29,6 +29,7 @@ synth ──► rows ─────────────────► any 
 | `config` | Single validated source of every parameter (closed JSON schema) | accept unknown keys |
 | `synth`, `evaluate`, `baselines`, `benchmark` | Offline research harness | be imported by detection code (enforced by `tests/test_architecture.py`) |
 | `core` | Frozen v0.1 rule and API (comparator, backward compatibility) | change its decision rule |
+| `canreplay`, `lab_cli` | v0.4 Lab A: offline file-to-file CAN/DBC replay; optional cantools imported inside the adapter; runtime guard against device, network and process access ([CAN-REPLAY-LAB-A.md](CAN-REPLAY-LAB-A.md)) | import or be imported by detection, preflight or evaluation code; import python-can; create a bus; transmit |
 | `componentx` | v0.3 Stage A: read-only, streaming preflight and provenance manifest for locally supplied Scania Component X v3 files ([COMPONENT-X-PREFLIGHT.md](COMPONENT-X-PREFLIGHT.md)) | import or be imported by detection or evaluation code; decode outcome values; interpret anonymous columns |
 
 ## Invariants (each enforced by tests)

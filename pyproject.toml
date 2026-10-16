@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "pexislink"
 dynamic = ["version"]
-description = "Read-only vehicle telemetry and anomaly detection research"
+description = "PexisOS experimental read-only agent fabric and offline telemetry research"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
@@ -17,6 +17,9 @@ dependencies = []
 # Optional MCP transport for the experimental Agent Fabric. For a reproducible,
 # hash-checked install use requirements/fabric-mcp.txt instead.
 mcp = ["mcp==2.2.0"]
+# v0.4 Lab A offline CAN replay only. For a reproducible, hash-checked install of the whole tested
+# tree (cantools pulls python-can, LGPL-3.0), use requirements/lab-can.txt; see docs/CAN-REPLAY-LAB-A.md.
+can = ["cantools==44.1.0"]
 
 [project.scripts]
 pexislink = "pexislink.cli:main"
