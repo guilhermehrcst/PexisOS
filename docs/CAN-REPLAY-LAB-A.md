@@ -17,8 +17,12 @@ Tests: `tests/test_canreplay.py` (stub decoder), `tests/test_canreplay_cantools.
 pip install --require-hashes -r requirements/lab-can.txt   # optional decoder, hash-locked
 pexislink lab can-replay --dbc synthetic.dbc --frames frames.csv --out records.jsonl --summary summary.json \
     [--max-frames-mb 256] [--max-line-bytes 256] [--max-rows 5000000] [--max-dbc-kb 4096] [--max-messages 10000] \
-    [--max-signals-per-message 512] [--max-signals 50000]
+    [--max-signals-per-message 512] [--max-signals 50000] [--max-output-mb 4096]
 ```
+
+`--max-output-mb` caps the records file and the summary separately. It is checked **before
+every write**, because each decoded row repeats DBC-controlled names and units, so a
+frame file within its own limits can still generate far more output than it contains.
 
 `pip install 'pexislink[can]'` also works but pins only cantools; the requirements file pins
 and hash-checks the whole tested tree. Without cantools the default installation is unchanged
@@ -84,11 +88,16 @@ distinct unknown ids (counted up to 100,000; `distinct_unknown_ids_capped` says 
 no run time. Outputs are byte-identical across runs; across Python 3.11-3.13 only
 `tool.python` differs (checked on 1,000,000 frames).
 
-**Commit protocol.** Both files are written to temporary files next to their destinations
-and fsync'ed. An existing summary is removed and **its directory fsync'ed before the records
-are committed**, even if the files live in different directories. If the summary-directory
-fsync fails, no new records are committed. Records are then renamed into place, their directory
-fsync'ed, and the summary renamed last. Two-file atomicity is not claimed: **the
+**Commit protocol.** Each destination's directory is resolved once, the way the kernel
+resolves it (a symlink before `..`), and that one directory is used for the temporary file,
+the rename and the fsync. Both files are written to temporary files there and fsync'ed. An
+existing summary is removed and **its directory fsync'ed before the records are committed**,
+even if the files live in different directories. Records are then renamed into place and
+their directory fsync'ed; the summary is renamed last and its directory fsync'ed. **Every
+directory fsync is required** (POSIX): if one fails, the run fails with exit 1, and a summary
+that the failing run had already renamed into place is removed again, so a failure never
+leaves a success marker. Windows is not a supported platform for the lab: there the directory
+fsync is skipped and durability is not claimed. Two-file atomicity is not claimed: **the
 summary is the commit marker**. A records file without a summary whose `records.sha256`
 matches is an interrupted run. A run that fails before the commit leaves previous outputs
 untouched. A failure or Ctrl-C during the commit can leave the new records without a summary
@@ -101,7 +110,7 @@ No temporary file is left in either case.
 |---|---|---|
 | 0 | | success |
 | 1 | `output_write_error` | destination directory missing or unwritable, disk full |
-| 2 | usage | bad arguments or limits; `--out` equal to `--summary`; an output equal to an input (also via `.`, a hard link or a symlink); an existing output that is a link, directory or device |
+| 2 | usage | bad arguments or limits; `--out` equal to `--summary`; an output equal to an input (also via `.`, a hard link or a symlink); two names that differ only by case or Unicode normalization in the same resolved directory (rejected on every filesystem, because a case-insensitive or normalizing filesystem would map them to one entry); an output name of `.` or `..`; an existing output that is a link, directory or device |
 | 3 | `decoder_unavailable` | cantools not installed |
 | 4 | `invalid_dbc` | not UTF-8, over the message or signal limits, not parseable in strict mode, or a rejected construct (section 2) |
 | 5 | frame contract | `invalid_header`, `csv_quoting`, `field_count`, `invalid_utf8`, `invalid_line` (stray CR/NUL), `invalid_timestamp`, `invalid_arbitration_id`, `invalid_extended_flag`, `arbitration_id_out_of_range`, `invalid_data_hex` |
@@ -110,48 +119,88 @@ No temporary file is left in either case.
 | 8 | `input_symlink` | an input is a symbolic link (never followed) |
 | 9 | `input_too_large`, `line_too_long` | file bytes, line length, row count, DBC size |
 | 10 | `input_changed` | an input grew past its cap, was rewritten (size, mtime or ctime differ) or replaced while read |
-| 11 | `safety_guard` | replay code attempted socket, name-resolution, process, native-library or device access, whether or not the refusal was caught, or left a thread running |
+| 11 | `safety_guard` | replay code attempted socket, name-resolution, process, thread, native-library, device or kernel-file (`/proc`, `/sys`) access, whether or not the refusal was caught, or left a thread running; the audit hook was refused or receives no events; an open descriptor refers to a device, a kernel control file or a non-local socket |
+| 12 | `output_too_large` | the records file or the summary would exceed `--max-output-mb` (checked before the write; nothing is committed) |
 
 stderr carries `error: <code>: <message>` with an optional line number, never a path or
 payload. A gate failure commits nothing.
 
 ## 5. Safety barriers
 
-1. **No device code path.** The package never imports python-can (`can`) and never creates a
-   bus; cantools is imported only inside `load_cantools_decoder` (AST tests). Importing the
-   lab loads neither (checked in a fresh interpreter).
-2. **Runtime guard** (a second barrier, not a sandbox). `no_device_access()` installs a
-   process audit hook that, during a replay, refuses socket creation, `connect`, `bind`,
-   `sendto`, `sendmsg`, name resolution (`getaddrinfo`, `gethostbyname`, `gethostbyaddr`,
-   `getnameinfo`), the audited process entry points (`subprocess.Popen`, `os.system`,
-   `os.exec*`, `os.posix_spawn`, `os.spawn*`, `os.fork`, `os.forkpty`), `ctypes.dlopen` and
-   opening anything that is not a regular file or directory (character and block devices,
-   FIFOs, sockets). Paths are resolved against the current directory before the check, so
-   `//dev/null`, `/./dev/null` or a `chdir("/dev")` do not bypass it. A refusal fails the run
-   with exit 11 whether library code catches it or not, and so does a thread that was started
-   during the replay and is still alive afterwards. The audited low-level thread-start
-   events (_thread.start_new_thread and Python 3.13+ _thread.start_joinable_thread) are also
-   refused when emitted. Because Python 3.11 may NOT emit these events, the replay guard also
-   temporarily wraps _thread.start_new_thread, threading.Thread.start and threading's raw
-   start alias, restoring them on exit. Audit callbacks, activation, and finalization share
-   a lock, so a device classification in flight completes before guard deactivation.
-   Tests try these paths from synthetic decoders. In a fresh process the cantools import
-   itself runs under the guard without a refusal.
+The lab is offline by construction. The runtime guard is a **second barrier for a Python
+library running in this process, not a sandbox**. `sys.addaudithook` sees only events that
+CPython emits, so code that avoids them (native code, saved references) is outside it. The
+guarantees are therefore split into three groups.
 
-   Not covered (documented gaps): a direct call to the private `_posixsubprocess.fork_exec`
-   (no audit event); a path opened relative to a `dir_fd` (the hook does not see the
-   directory); system calls made by native code; pre-saved raw-thread start references
-   or native thread APIs (not covered by the Python patch); and other activity after the
-   replay (not controlled after deactivation). While active, the guard
-   also refuses these events in unrelated threads of the same process. In the pinned tree, `_posixsubprocess` and
-   `multiprocessing` appear nowhere; threads and name resolution appear only in python-can
-   bus and interface modules (`can/bus.py`, `can/notifier.py`, `can/interfaces/...`), which run
-   only when a bus is created, which the lab never does.
-3. **Inputs.** `lstat` and a same-file check before reading, `O_NOFOLLOW` where available,
-   byte caps enforced **before** each read or readline allocation, at most the remaining
-   file budget plus a one-byte growth lookahead, even when the line limit is much larger
-   than the frame-file byte limit. Size/mtime/ctime/path identity is compared after reading.
-   A writer that restores size, mtime and ctime while a file is read is not detected.
+### 5.1 Effective guarantees (enforced by construction and tested)
+
+1. **No device code path.** The package never imports python-can (`can`) or `socket`, never
+   creates a bus and never transmits. cantools is imported only inside `load_cantools_decoder`
+   (AST tests). Importing the lab loads neither (checked in a fresh interpreter).
+2. **Inputs.** Local regular files only: `lstat` and a same-file check before reading,
+   `O_NOFOLLOW` where available. Byte caps are enforced **before** each read or readline
+   allocation, at most the remaining file budget plus a one-byte growth lookahead, even when the
+   line limit is much larger than the frame-file byte limit. Size, mtime, ctime and path
+   identity are compared after reading. A writer that restores size, mtime and ctime while a
+   file is read is not detected.
+3. **Outputs.** Bounded by `--max-output-mb` before every write (exit 12). Destinations that
+   alias each other or an input are rejected, including names equal under case folding or
+   Unicode normalization (exit 2). The commit protocol is crash-consistent as described in
+   section 3, with every directory fsync required.
+
+### 5.2 Additional protection: the runtime guard (defense in depth)
+
+During a replay, `no_device_access()`:
+
+- **Proves its hook is live.** On every entry it emits a sentinel audit event. If the hook did
+  not receive it (for example an embedding application's hook vetoed `sys.addaudithook`, which
+  CPython then refuses silently), the replay fails closed with exit 11.
+- **Refuses audited effects.** It refuses socket creation, `connect`, `bind`, `sendto`,
+  `sendmsg` and name resolution (`getaddrinfo`, `gethostbyname`, `gethostbyaddr`,
+  `getnameinfo`). It also refuses the audited process entry points (`subprocess.Popen`,
+  `os.system`, `os.exec*`, `os.posix_spawn`, `os.spawn*`, `os.fork`, `os.forkpty`),
+  `ctypes.dlopen` and `ctypes.dlsym`, and the thread-start events where CPython emits them
+  (`_thread.start_new_thread` from 3.12, `_thread.start_joinable_thread` from 3.13).
+- **Refuses device and kernel paths.** It refuses opening anything that is not a regular file or
+  directory (character and block devices, FIFOs, sockets) and **anything under `/proc` or `/sys`**,
+  even regular files (`/proc/sysrq-trigger`, `/sys/class/net/<iface>/...`). Paths are resolved
+  first, so `//dev/null`, `/./dev/null`, a symlink or a `chdir("/proc")` do not bypass it.
+  Opening an integer descriptor is judged by what the descriptor refers to.
+- **Covers thread starts on 3.11/3.12.** CPython 3.11 emits no thread-start audit event at all,
+  so during the replay the guard also wraps `_thread.start_new_thread`, `threading.Thread.start`
+  and threading's raw start alias. Activation, audit callbacks and finalization share one lock.
+  At exit the guard is deactivated *before* the native entry points are restored, both under
+  that lock, so a native entry point is never reachable while the guard is active.
+- **Checks open descriptors (Linux).** Before activation, it fails closed if any open descriptor
+  refers to a character device (other than the null device or a terminal), a block device, a file
+  under `/proc` or `/sys`, a socket that is not AF_UNIX (CAN, packet, netlink, IP), or an
+  unidentifiable object. Pipes, anonymous kernel objects (epoll, eventfd), AF_UNIX sockets and
+  regular files are allowed. Descriptors opened during the replay go through the audited `open`
+  checks above.
+- **Fails the run on any violation.** A refusal fails the run with exit 11 whether or not library
+  code catches it, and so does a thread started during the replay that is still alive afterwards.
+
+Tests try each path from synthetic decoders. In a fresh process the cantools import itself runs
+under the guard without a refusal.
+
+### 5.3 Outside the guarantee (residual risks)
+
+- **Native code.** System calls made by native code, including `os.write` on a descriptor that
+  native code obtained, and native thread APIs.
+- **Unaudited Python paths.** A direct call to the private `_posixsubprocess.fork_exec` (no audit
+  event); a path opened relative to a `dir_fd` (the hook does not see the directory); references to
+  raw thread-start functions saved before the replay.
+- **Descriptor checks off Linux.** The descriptor check needs `/proc/self/fd` and
+  `/proc/self/net/unix`, so it is not performed elsewhere. Socket families other than AF_UNIX are
+  refused by default, and an inherited AF_UNIX socket is trusted as local IPC.
+- **Activity outside the replay.** The guard does not control anything after deactivation or
+  outside the replay window. While active, it also refuses these events in unrelated threads of
+  the same process.
+- **No hardware isolation is claimed.** Isolation from real CAN hardware rests on 5.1 (no bus
+  code, no socket import) plus the operator not running the lab next to live interfaces. In the
+  pinned tree, `_posixsubprocess` and `multiprocessing` appear nowhere. Threads and name resolution
+  appear only in python-can bus and interface modules (`can/bus.py`, `can/notifier.py`,
+  `can/interfaces/...`), which run only when a bus is created, and the lab never creates one.
 
 ## 6. Dependencies and licences
 
@@ -243,3 +292,26 @@ The latest Codex review of Lab A identified four risks, addressed in this branch
 | P2 | Old summary surviving a crash after new records are committed: fsync the summary directory after unlink, fail closed if unsupported, then commit records |
 
 The Fabric MCP job now explicitly sets a Bash shell with pipefail so unittest failures cannot be hidden by tee. These are defense-in-depth measures for an offline lab, not an OS sandbox. Independent re-review and CI on the final HEAD are still required before merge.
+
+## 12. Codex review of `7242970` (5 P1, 3 P2)
+
+Every fix has a regression in `CodexReview7242970Tests` (`tests/test_canreplay.py`) that fails
+on `7242970`, apart from the two control tests named below.
+
+| Severity | Finding | Fix | Regression test |
+|---|---|---|---|
+| P1 | The raw-thread wrapper was restored before the guard deactivated, so a native thread start was reachable while the guard was active | deactivate first, then restore, both under the shared lock | `test_native_thread_entry_points_are_never_restored_while_the_guard_is_active` |
+| P1 | A vetoed `sys.addaudithook` was silently ignored, and the replay ran unguarded | sentinel audit event on every entry; fail closed (exit 11) | `test_refused_audit_hook_fails_closed` (fresh process with a vetoing hook) |
+| P1 | Kernel control files under `/proc` and `/sys` are `S_ISREG` and were allowed | refused by resolved path before `stat`, even if absent | `test_kernel_control_and_information_files_are_refused` |
+| P1 | No cap on generated bytes | `--max-output-mb` checked before every write; exit 12 | `test_output_budget_is_enforced_before_each_write`, `test_output_budget_exit_code_and_no_commit` |
+| P1 | Destinations equal on a case-insensitive filesystem were treated as distinct | names equal under casefold and NFC in the same resolved directory are rejected | `test_case_or_normalization_aliases_are_rejected` |
+| P2 | Directory fsync failures on the commit were ignored | every directory fsync is required; a marker renamed by a failing run is withdrawn | `test_failed_fsync_after_the_summary_rename_withdraws_the_marker`, `test_failed_fsync_after_the_records_rename_prevents_the_summary` |
+| P2 | `link/../file` was collapsed lexically, so the temporary file and the fsync used the wrong directory | the destination directory is resolved once (`realpath`) and used for temp file, rename and fsync | `test_destination_parent_is_resolved_like_the_kernel` |
+| P2 | Inherited device or CAN socket descriptors were not checked | fail-closed descriptor check before activation (Linux); integer-descriptor opens judged during the replay; residual limits in 5.3 | `test_inherited_unsafe_descriptors_refuse_the_replay`, `test_opening_an_unsafe_descriptor_during_the_replay_is_refused` |
+
+Controls, not regressions: `test_local_pipes_and_unix_sockets_are_allowed` proves the descriptor
+check does not refuse local IPC. `test_output_names_must_name_a_file` is hardening, because `7242970`
+already refused `.` and `..` as existing directories.
+
+The summary's `limits` object gains `max_output_bytes`. The addition is additive, and the schema
+name `pexislink.can-replay.v1` is unchanged.
