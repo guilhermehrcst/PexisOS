@@ -1,8 +1,10 @@
-# PexisLink
+# PexisOS
 
-**Open-source research in vehicle telemetry, anomaly detection, and predictive health.**
+**Open-source, provider-neutral infrastructure for evidence-qualified observations of physical and digital systems.**
 
-PexisLink compares a vehicle's later coolant-temperature readings with that same
+PexisOS is the new project name for **PexisLink**. The software currently includes offline vehicle-telemetry research and an experimental, read-only Agent Fabric. It is **not yet an operating system, a Linux distribution, or a certified control system**. To preserve interoperability and avoid disrupting active work, its current Python distribution, CLI, imports, and schema IDs retain the `pexislink` names during the transition. See the [PexisOS naming plan](docs/PEXISOS-NAMING.md).
+
+The vehicle telemetry research component compares a vehicle's later coolant-temperature readings with that same
 vehicle's earlier readings under similar operating conditions, and states how
 much evidence the data supports: `normal`, `suspected_anomaly`,
 `confirmed_anomaly`, or `insufficient_evidence`. It is read-only, offline,
@@ -39,6 +41,14 @@ checks locally supplied Scania Component X v3 files (read-only, offline, streami
 and writes a SHA-256 provenance manifest. It trains nothing and reads no outcome
 values. No real file has been inspected by this project yet; see
 [docs/COMPONENT-X-PREFLIGHT.md](docs/COMPONENT-X-PREFLIGHT.md).
+
+## Offline CAN replay lab (v0.4 Lab A)
+
+`pexislink lab can-replay --dbc FILE --frames FILE --out records.jsonl --summary summary.json`
+decodes recorded classic-CAN frames through a local DBC, file to file. It never opens a CAN
+interface or transmits. The decoder (cantools) is optional:
+`pip install --require-hashes -r requirements/lab-can.txt`. See
+[docs/CAN-REPLAY-LAB-A.md](docs/CAN-REPLAY-LAB-A.md).
 
 ## Agent Fabric v0.1 (experimental, read-only)
 
