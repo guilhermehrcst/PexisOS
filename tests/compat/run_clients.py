@@ -9,9 +9,10 @@ needs PEXISLINK_CODEX_BIN), ``claude-code`` (K01..K08, needs PEXISLINK_CLAUDE_BI
 Per matrix id: PASS when every test that ran passed and none was skipped as not run; FAIL when any
 test failed or errored; NOT_RUN when the tests were skipped because the client, a credential or a
 model would be needed; NOT_SUPPORTED when the client's public interface cannot express the check.
-Skip reasons must start with ``not_run:`` or ``not_supported:``; any other skip counts as FAIL, so a
-silently skipped test can never be reported as passing. ``--require`` exits 1 unless every id of the
-named clients is PASS (ids that are NOT_SUPPORTED by design are listed in ``EXPECTED_NOT_SUPPORTED``).
+Skip reasons must start with ``not_run:`` or ``not_supported:``; any other skip counts as FAIL and
+makes the CLI exit nonzero even for a non-required client. Both fixed logical IDs and the full set of
+individual evidence methods must exist. ``--require`` exits 1 unless all methods are present and
+every required evidence method is PASS (except an explicitly documented NOT_SUPPORTED method).
 """
 
 from __future__ import annotations
@@ -78,6 +79,73 @@ EXPECTED_TEST_IDS = {
     "codex-cli": frozenset(f"C{i:02d}" for i in range(1, 14)),
     "claude-code": frozenset(f"K{i:02d}" for i in range(1, 9)),
 }
+# Fixed per-method evidence contract, independent of the unittest discovery result.
+# The logical IDs alone are insufficient: C07, for example, requires both
+# expiration AND revocation tests. Removing either must fail the gate.
+EXPECTED_TEST_METHODS = {
+    "openai-agents": frozenset((
+        "test_T01_initialize_handshake_and_version",
+        "test_T02_discover_exactly_five_read_only_tools",
+        "test_T02_tool_names_collide_across_servers_unless_prefixed",
+        "test_T03_authorized_synthetic_entity_is_readable",
+        "test_T04_unauthorized_entity_is_hidden_and_indistinguishable",
+        "test_T05_principal_in_tool_arguments_is_rejected",
+        "test_T06_expired_permission_is_denied",
+        "test_T06_revocation_takes_effect_within_a_live_sdk_session",
+        "test_T07_published_schemas_equal_the_core_contract",
+        "test_T07_history_cursor_round_trip_and_invalid_cursors",
+        "test_T07_sdk_strict_schema_conversion_is_a_known_incompatibility",
+        "test_T07_null_for_optional_arguments_is_rejected",
+        "test_T08_stale_and_unknown_data_never_become_current",
+        "test_T09_results_are_bounded_and_over_budget_fails_closed",
+        "test_T09_assessment_evidence_is_always_finite_json",
+        "test_T10_errors_never_disclose_paths_arguments_or_credentials",
+        "test_T10_child_environment_is_exactly_the_documented_set",
+        "test_T11_concurrent_sessions_are_isolated",
+        "test_T12_replay_is_byte_identical_across_server_processes",
+        "test_T13_no_network_process_or_device_access_in_server_or_client",
+        "test_T13_audit_classifier_sees_what_the_review_named",
+        "test_T13_no_write_or_actuation_tool_exists",
+        "test_T14_connect_disconnect_reconnect_without_leaks",
+        "test_T15_core_imports_and_runs_without_the_agents_sdk_or_codex",
+        "test_T15_no_source_file_imports_a_provider_sdk",
+    )),
+    "codex-cli": frozenset((
+        "test_C01_initialize_and_server_identity",
+        "test_C01_negotiated_mcp_protocol_version_is_observable",
+        "test_C02_configured_is_not_connected_is_not_executed",
+        "test_C03_discover_exactly_five_read_only_tools_with_core_schemas",
+        "test_C04_authorized_query_executes",
+        "test_C05_denied_access_is_hidden_and_indistinguishable",
+        "test_C06_forged_identity_in_arguments_is_rejected",
+        "test_C07_expired_permission_is_denied",
+        "test_C07_revocation_takes_effect_within_a_live_codex_session",
+        "test_C08_two_principals_in_one_codex_thread_stay_isolated",
+        "test_C09_pagination_cursors_and_invalid_arguments",
+        "test_C10_errors_are_sanitized_and_no_host_variable_reaches_the_server",
+        "test_C11_results_are_byte_identical_across_codex_and_server_processes",
+        "test_C12_no_write_tools_and_no_effects_in_server_or_client",
+        "test_C13_closing_codex_stops_every_server_process",
+    )),
+    "claude-code": frozenset((
+        "test_K01_configuration_round_trip_stays_in_the_isolated_config",
+        "test_K02_health_check_launches_and_connects_to_the_server",
+        "test_K03_a_broken_server_is_reported_as_failed_not_connected",
+        "test_K04_unapproved_project_server_is_not_started",
+        "test_K05_client_environment_reaches_the_server_finding_I7",
+        "test_K06_health_check_leaves_no_server_process",
+        "test_K07_tool_discovery_through_claude_code",
+        "test_K08_tool_calls_through_claude_code",
+    )),
+}
+# An explicitly unsupported method is NOT interchangeable with a passed one.
+# Only this observed Codex sub-check may remain NOT_SUPPORTED without failing
+# --require; every other required evidence method must actually PASS.
+EXPECTED_METHOD_NOT_SUPPORTED = {
+    "openai-agents": frozenset(),
+    "codex-cli": frozenset({"test_C01_negotiated_mcp_protocol_version_is_observable"}),
+    "claude-code": frozenset(),
+}
 EXPECTED_NOT_SUPPORTED = {"codex-cli": set(), "openai-agents": set(), "claude-code": set()}
 LIMITATIONS = {
     "openai-agents": ["I1 strict schema conversion unsatisfiable for read_observations mode=latest",
@@ -133,21 +201,23 @@ def run_module(module: str, prefix: str) -> dict:
     skipped = {t.id(): reason for t, reason in result.skipped}
     per_id: dict[str, list[str]] = defaultdict(list)
     reasons: dict[str, set[str]] = defaultdict(set)
+    method_statuses: dict[str, str] = {}
     for test_id in ids:
         match = re.search(rf"\.test_({prefix}\d\d)_", test_id)
         if not match:
             continue
         key = match.group(1)
         if test_id in failed:
-            per_id[key].append("fail")
+            kind = "fail"
         elif test_id in skipped:
             reason = skipped[test_id]
             kind = "not_run" if reason.startswith("not_run:") else \
                 "not_supported" if reason.startswith("not_supported:") else "fail"
-            per_id[key].append(kind)
             reasons[key].add(reason)
         else:
-            per_id[key].append("pass")
+            kind = "pass"
+        per_id[key].append(kind)
+        method_statuses[test_id.rsplit(".", 1)[-1]] = kind.upper()
     matrix = {}
     for key in sorted(per_id):
         states = per_id[key]
@@ -162,24 +232,33 @@ def run_module(module: str, prefix: str) -> dict:
         matrix[key] = {"status": status, "tests": len(states), "passed": states.count("pass"),
                        "not_run": states.count("not_run"), "not_supported": states.count("not_supported"),
                        "reasons": sorted(reasons[key])}
-    return {"matrix": matrix, "failures": sorted(failed)}
+    methods = [test_id.rsplit(".", 1)[-1] for test_id in ids
+               if re.search(rf"\.test_{prefix}\d\d_", test_id)]
+    return {"matrix": matrix, "failures": sorted(failed), "methods": methods,
+            "method_statuses": method_statuses}
 
 
-def matrix_integrity_errors(name: str, spec: dict, matrix: dict) -> list[str]:
-    """Enforce a fixed test-ID contract, independently from test discovery.
+def matrix_integrity_errors(name: str, spec: dict, matrix: dict, methods: list[str]) -> list[str]:
+    """Require both logical case IDs and exact underlying test methods.
 
-    A green subset is not a green suite: a missing or renamed test is a failed
-    evidence gate, including for clients not present in the current environment.
+    An unexecuted optional client can be NOT_RUN, but none of its evidence
+    methods may silently disappear from the published compatibility matrix.
     """
     expected = EXPECTED_TEST_IDS[name]
     discovered = set(matrix)
     mapped = {test_id for ids in spec["cases"].values() for test_id in ids}
+    expected_methods = EXPECTED_TEST_METHODS[name]
+    observed_methods = set(methods)
     problems = []
     for label, ids in (("missing_test_ids", expected - discovered),
                        ("unexpected_test_ids", discovered - expected),
-                       ("unrecognized_case_mappings", mapped - expected)):
+                       ("unrecognized_case_mappings", mapped - expected),
+                       ("missing_test_methods", expected_methods - observed_methods),
+                       ("unexpected_test_methods", observed_methods - expected_methods)):
         if ids:
             problems.append(f"{name}: {label}: {', '.join(sorted(ids))}")
+    if len(methods) != len(observed_methods):
+        problems.append(f"{name}: duplicate_test_methods")
     if set(spec["cases"]) != set(CASES):
         problems.append(f"{name}: case_categories_do_not_match_the_declared_matrix")
     if any(not ids for ids in spec["cases"].values()):
@@ -187,14 +266,21 @@ def matrix_integrity_errors(name: str, spec: dict, matrix: dict) -> list[str]:
     return problems
 
 
-def required_client_errors(name: str, spec: dict, matrix: dict) -> list[str]:
-    """Fail if even one required ID is missing or did not fully pass."""
-    failures = matrix_integrity_errors(name, spec, matrix)
+def required_client_errors(name: str, spec: dict, matrix: dict, methods: list[str],
+                           method_statuses: dict[str, str]) -> list[str]:
+    """Require each evidence method, not merely one passing subtest per ID."""
+    failures = matrix_integrity_errors(name, spec, matrix, methods)
     for test_id in sorted(EXPECTED_TEST_IDS[name]):
         status = matrix.get(test_id, {}).get("status", "MISSING")
         if status != "PASS" and not (status == "NOT_SUPPORTED" and
                                      test_id in EXPECTED_NOT_SUPPORTED[name]):
             failures.append(f"{name}: {test_id} must PASS (got {status})")
+    for method in sorted(EXPECTED_TEST_METHODS[name]):
+        status = method_statuses.get(method, "MISSING")
+        if status == "PASS" or (status == "NOT_SUPPORTED" and
+                                method in EXPECTED_METHOD_NOT_SUPPORTED[name]):
+            continue
+        failures.append(f"{name}: {method} must PASS (got {status})")
     return failures
 
 
@@ -227,14 +313,17 @@ def main() -> int:
                            "PASS" if all(s == "PASS" for s in states) else
                            "NOT_RUN" if "NOT_RUN" in states else "NOT_SUPPORTED"}
         summary = {s: sum(1 for m in run["matrix"].values() if m["status"] == s) for s in STATUSES}
-        integrity_errors = matrix_integrity_errors(name, spec, run["matrix"])
-        required_errors = required_client_errors(name, spec, run["matrix"]) if name in args.require else []
+        integrity_errors = matrix_integrity_errors(name, spec, run["matrix"], run["methods"])
+        required_errors = (required_client_errors(name, spec, run["matrix"], run["methods"],
+                                                  run["method_statuses"]) if name in args.require else [])
         clients[name] = {"interface": spec["interface"], "version": client_versions[name],
                          "executed": summary["PASS"] + summary["FAIL"] > 0, "summary": summary,
                          "matrix": run["matrix"], "cases": cases, "failures": run["failures"],
                          "integrity_errors": integrity_errors, "required_errors": required_errors,
                          "limitations": LIMITATIONS.get(name, [])}
-        if run["failures"] or integrity_errors or required_errors:
+        # A malformed/unrecognized skip is synthesized as FAIL by run_module,
+        # not as a unittest error. It must still fail even for optional clients.
+        if run["failures"] or summary["FAIL"] or integrity_errors or required_errors:
             exit_code = 1
     for name, spec in STATIC.items():
         clients[name] = {"interface": spec["interface"], "version": client_versions[name], "executed": False,
