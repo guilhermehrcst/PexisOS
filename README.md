@@ -58,6 +58,9 @@ pexislink fabric mcp-stdio --principal demo:principal:guest
 Read [docs/AGENT-FABRIC.md](docs/AGENT-FABRIC.md),
 [the threat model](docs/AGENT-FABRIC-THREAT-MODEL.md) and
 [decisions and blocked items](docs/AGENT-FABRIC-DECISIONS.md).
+Interoperability with an independent client (the published OpenAI Agents SDK over
+MCP stdio, no model or API key) is tested by an optional suite:
+[docs/COMPAT-OPENAI-AGENTS.md](docs/COMPAT-OPENAI-AGENTS.md).
 MCP compatibility is not an endorsement by, or an official integration with,
 any model provider.
 

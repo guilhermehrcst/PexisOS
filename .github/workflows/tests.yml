@@ -91,6 +91,31 @@ jobs:
           python -c "import json,sys; d=json.load(open(sys.argv[1])); assert d['audit']['chain_valid']" "$RUNNER_TEMP/demo.json"
           python examples/fabric/mcp_client.py demo:principal:guest
 
+  compat-openai-agents:
+    name: compat-openai-agents (OpenAI Agents SDK over MCP stdio, Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install the pinned, hash-locked test-only SDK (no API key, no model calls)
+        run: python -m pip install --require-hashes -r requirements/compat-openai-agents.txt
+      - name: Run the 15-case interoperability matrix (every case must PASS; NOT_RUN fails the job)
+        env:
+          PYTHONPATH: src
+          OPENAI_AGENTS_DISABLE_TRACING: "1"
+        run: python tests/compat/run_matrix.py --require-all-pass --json "$RUNNER_TEMP/compat-report.json"
+
   benchmark-reproducibility:
     runs-on: ubuntu-latest
     timeout-minutes: 10
