@@ -1,5 +1,7 @@
 # Interoperability: OpenAI Agents SDK as an MCP client of the Agent Fabric
 
+Other clients (Codex CLI, Claude Code, Claude Agent SDK): see [COMPAT-MULTI-PROVIDER.md](COMPAT-MULTI-PROVIDER.md).
+
 > [!IMPORTANT]
 > This is an **optional, test-only** compatibility suite. It shows that an independent, published SDK can consume the PexisLink MCP tool contract over local stdio:
 > - **without** a model, an API key, Codex, a cloud service or a device;

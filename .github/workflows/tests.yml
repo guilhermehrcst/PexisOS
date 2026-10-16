@@ -116,6 +116,33 @@ jobs:
           OPENAI_AGENTS_DISABLE_TRACING: "1"
         run: python tests/compat/run_matrix.py --require-all-pass --json "$RUNNER_TEMP/compat-report.json"
 
+  compat-codex-cli:
+    name: compat-codex-cli (Codex CLI app-server over MCP stdio, Python 3.12)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install the pinned, hash-locked MCP SDK for the server
+        run: python -m pip install --require-hashes -r requirements/fabric-mcp.txt
+      - name: Install the pinned, integrity-locked test-only Codex CLI (Apache-2.0; no login, no API key)
+        run: npm ci --ignore-scripts --no-audit --no-fund --prefix requirements/compat-codex
+      - name: Run the multi-client matrix (every Codex case must PASS; no model calls, egress blocked)
+        env:
+          PYTHONPATH: src
+          PEXISLINK_CODEX_BIN: ${{ github.workspace }}/requirements/compat-codex/node_modules/.bin/codex
+        run: python tests/compat/run_clients.py --require codex-cli --json "$RUNNER_TEMP/multi-client-report.json"
+
   benchmark-reproducibility:
     runs-on: ubuntu-latest
     timeout-minutes: 10
