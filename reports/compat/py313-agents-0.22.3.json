@@ -1,0 +1,132 @@
+{
+  "client": "openai-agents (agents.mcp.MCPServerStdio), no model calls",
+  "command": "PYTHONPATH=src python tests/compat/run_matrix.py",
+  "environment": {
+    "git_commit": "d72424c5cb05419f22a452eb5eeee8519d63eae5",
+    "implementation": "CPython",
+    "packages": {
+      "jsonschema": "4.26.0",
+      "mcp": "2.2.0",
+      "mcp-types": "2.2.0",
+      "openai": "3.24.0",
+      "openai-agents": "0.22.3"
+    },
+    "platform": "Linux-x86_64",
+    "python": "3.13.16"
+  },
+  "failures": [],
+  "matrix": {
+    "T01": {
+      "name": "initialize",
+      "passed": 1,
+      "skipped": 0,
+      "status": "PASS",
+      "tests": 1
+    },
+    "T02": {
+      "name": "discover",
+      "passed": 2,
+      "skipped": 0,
+      "status": "PASS",
+      "tests": 2
+    },
+    "T03": {
+      "name": "observe_authorized",
+      "passed": 1,
+      "skipped": 0,
+      "status": "PASS",
+      "tests": 1
+    },
+    "T04": {
+      "name": "hide_unauthorized",
+      "passed": 1,
+      "skipped": 0,
+      "status": "PASS",
+      "tests": 1
+    },
+    "T05": {
+      "name": "reject_spoofed_principal",
+      "passed": 1,
+      "skipped": 0,
+      "status": "PASS",
+      "tests": 1
+    },
+    "T06": {
+      "name": "expired_revoked",
+      "passed": 2,
+      "skipped": 0,
+      "status": "PASS",
+      "tests": 2
+    },
+    "T07": {
+      "name": "schemas_and_cursor",
+      "passed": 4,
+      "skipped": 0,
+      "status": "PASS",
+      "tests": 4
+    },
+    "T08": {
+      "name": "freshness_and_quality",
+      "passed": 1,
+      "skipped": 0,
+      "status": "PASS",
+      "tests": 1
+    },
+    "T09": {
+      "name": "large_and_nonfinite",
+      "passed": 2,
+      "skipped": 0,
+      "status": "PASS",
+      "tests": 2
+    },
+    "T10": {
+      "name": "error_sanitization",
+      "passed": 2,
+      "skipped": 0,
+      "status": "PASS",
+      "tests": 2
+    },
+    "T11": {
+      "name": "isolation",
+      "passed": 1,
+      "skipped": 0,
+      "status": "PASS",
+      "tests": 1
+    },
+    "T12": {
+      "name": "replay_determinism",
+      "passed": 1,
+      "skipped": 0,
+      "status": "PASS",
+      "tests": 1
+    },
+    "T13": {
+      "name": "negative_hardware",
+      "passed": 3,
+      "skipped": 0,
+      "status": "PASS",
+      "tests": 3
+    },
+    "T14": {
+      "name": "lifecycle",
+      "passed": 1,
+      "skipped": 0,
+      "status": "PASS",
+      "tests": 1
+    },
+    "T15": {
+      "name": "no_runtime_dependency",
+      "passed": 2,
+      "skipped": 0,
+      "status": "PASS",
+      "tests": 2
+    }
+  },
+  "schema": "pexislink.compatibility.report.v0",
+  "server": "pexislink fabric mcp-stdio (+ tests/compat/_fixture_server.py)",
+  "summary": {
+    "FAIL": 0,
+    "NOT_RUN": 0,
+    "PASS": 15
+  }
+}
