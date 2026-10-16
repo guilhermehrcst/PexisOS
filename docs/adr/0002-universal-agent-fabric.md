@@ -44,7 +44,7 @@ The vision in §1–§8 is unchanged. Where the implemented contract differs fro
 - On-device agents, local gateways representing several devices, and authorized remote connectors (§2 *Execution placements*). Only a single local process exists today.
 - A `recommend` capability. `replay` exists as a determinism property of the store and the demo, not as a separate capability.
 - Wrapping the v0.4 CAN replay lab (PR #10) output as a Fabric adapter. The Fabric's vehicle adapter is currently independent and synthetic.
-- Compatibility gates for Claude Code, Codex CLI and the Claude Agent SDK as MCP clients.
+- Extended compatibility gates for Claude Code, Codex CLI and the Claude Agent SDK as MCP clients: proposed in draft PR #13, not yet merged or a runtime dependency.
 - **Contracts v0.2:** a possible split of `read_observations` into `read_latest` / `read_history` to resolve interoperability finding I1. This is a migration proposal; the existing tool is neither removed nor renamed.
 - Promotion of the `v0` schemas to a stable public API.
 
@@ -127,15 +127,15 @@ The **Model Context Protocol (MCP)** already standardizes how AI applications ac
     (synthetic sensors / recorded CAN / local service)
 ```
 
-**First minimal read-only MCP tool candidates** (names are provisional; freeze only after conformance review):
+**IMPLEMENTED read-only MCP tools** (five, all in the experimental v0 contract; no `pexislink.` prefix):
 
-> **Reconciliation note (IMPLEMENTED).** All five tools exist, **without** the `pexislink.` prefix, as `list_entities`, `describe_entity`, `read_observations`, `explain_assessment` and `list_capabilities`. When an MCP client connects more than one PexisLink server, name collisions are handled on the client side, for example with the OpenAI Agents SDK's `include_server_in_tool_names` (finding I4). `read_observations` takes `mode=latest` (capability `observe`) or `mode=history` (capability `read_history`, paginated by an opaque numeric cursor).
+- `list_entities`: list only entities visible to the session, paginated; never discover devices or networks.
+- `describe_entity`: return declared entity signals/capabilities and bounded memory statistics; never invent real-time status.
+- `read_observations`: `mode=latest` uses `observe`; `mode=history` uses `read_history` and bounded pagination. Both require a server-side grant and return evidence quality.
+- `explain_assessment`: return an explainable, evidence-qualified inference or abstention, never a verified fault diagnosis.
+- `list_capabilities`: distinguish declared support, data availability and authorization; no write/actuator capability exists.
 
-- \`pexislink.list_entities\`: list enrolled pseudonymous entities visible to the caller, with pagination and no network discovery.
-- \`pexislink.describe_entity\`: return declared sensor/capability schemas and last-observed timestamps, never manufacture real-time status.
-- \`pexislink.read_observations\`: read a bounded window of authenticated or synthetic observations for one authorized entity; surface provenance, freshness and quality.
-- \`pexislink.explain_assessment\`: retrieve a bounded, existing evidence-backed interpretation or abstention; do not add an unvalidated diagnosis.
-- \`pexislink.list_capabilities\`: report supported/authorized read-only capabilities; support is not permission, and there are no write/actuator capabilities in the MVP.
+The transport exposes these exact names from `Session.tools()`; authorization and validation remain in `Session.call()`. Tool-name collisions between servers are a client-side configuration issue (compatibility finding I4). A future `read_latest`/`read_history` split is proposed, not part of this v0 contract.
 
 **Provider compatibility:** test the same MCP server with independent open-source MCP clients and the relevant OpenAI/Anthropic SDK adapters. These tests can validate protocol compatibility **without paid inference or claiming corporate adoption**. Test a real API integration only when the owner supplies authorization/credentials and expressly approves external data flow; do not publish any secret. Anthropic's hosted connector currently requires a reachable remote HTTP server for direct Messages API use, so start with local protocol/SDK conformance and do not expose a private device gateway to the public internet as a shortcut.
 
@@ -151,53 +151,46 @@ The **Model Context Protocol (MCP)** already standardizes how AI applications ac
 6. Only then engage AI labs, SDK maintainers and standards communities with data and an upstream-ready contribution. There is no guaranteed adoption or funding.
 
 
-## 3. Minimum event contract (proposed, not yet an implemented API)
+## 3. Observation contract (IMPLEMENTED experimental v0)
 
-> **Reconciliation note (IMPLEMENTED, superseding the example below).** The implemented `pexislink.observation.v0` contract differs from the example as follows:
-> - The version field is `schema_version`, not `schema`.
-> - The producing adapter is `source`, not `adapter`, and it must equal the adapter the entity is registered with.
-> - Timestamps accept only `Z` (UTC), not an arbitrary explicit offset.
-> - `quality.status` may be claimed by an adapter only as `observed` or `unknown`. `late` and the timing flags are derived by the core.
-> - Duplicate `event_id`s within the retention window are **rejected**, not accepted. Out-of-order and delayed events are stored but classified `late`. Arrival order is preserved.
-> - Provenance has `source`, `license`, `generator` and an optional `seed`.
-> - The assessment's abstention outcome is `insufficient` (with `stale` and `unknown`), rather than `insufficient_evidence`.
->
-> See AGENT-FABRIC.md §7.
-
-Prefer versioned JSON-compatible schemas for the first prototype; retain domain-specific typed payloads rather than forcing all observations into one generic float.
+The active, closed `pexislink.observation.v0` contract is implemented in `src/pexislink/fabric/contracts.py`; the JSON below illustrates a valid synthetic refrigerator observation matching the source adapter, signal names, quality vocabulary and provenance used by the demo.
 
 ```json
 {
-  "schema": "pexislink.observation.v0",
-  "event_id": "synthetic-event-0001",
+  "schema_version": "pexislink.observation.v0",
+  "event_id": "fridge-01-1-00000",
   "entity_id": "demo:appliance:fridge-01",
-  "observed_at": "2026-10-15T13:00:00Z",
-  "received_at": "2026-10-15T13:00:01Z",
-  "adapter": "synthetic:appliance-v0",
-  "kind": "temperature_observation",
-  "payload": {"temperature_c": 4.1},
+  "observed_at": "2026-01-01T00:00:00Z",
+  "received_at": "2026-01-01T00:00:01Z",
+  "source": "synthetic:appliance-v0",
+  "kind": "appliance.telemetry",
+  "payload": {"temperature_c": 4.1, "compressor_on": true, "cycle_count": 2},
   "quality": {"status": "observed", "flags": []},
-  "provenance": {"source": "synthetic_fixture", "license": "project_original"}
+  "provenance": {
+    "source": "synthetic_fixture",
+    "license": "project_original",
+    "generator": "pexislink.fabric.adapters.appliance",
+    "seed": 1
+  }
 }
 ```
 
-- Strict schema version; closed required fields; bounded UTF-8/JSON size and nesting; timestamps with explicit offset; no non-finite numbers.
-- Entity IDs are **not** VINs, serial numbers, account IDs or inferred real-world identities in the MVP. The namespace belongs to an explicit local user/project.
-- Accept duplicate, delayed or out-of-order events without silently reordering or rewriting history; classify them and preserve raw order in replay.
-- Unknown adapters or payload schemas do not get silently coerced into `normal`.
-- Event provenance describes a claim and its verification status; never label a synthetic or user-supplied event as independently verified.
-- Output assessments are separate, versioned records with `insufficient_evidence` as a first-class outcome. Do not call any health or safety property `normal` unless an appropriate validated reference exists.
-- No raw values, full file paths, tokens, home addresses, customer identifiers or private message bodies in generic audit messages.
+**Current invariants:**
+- `schema_version` is required; all properties and nested data have strict bounds. Timestamps use UTC `Z`, and non-finite numbers are rejected.
+- A registered entity's adapter must match `source`; signals must be declared in that entity's schema. Free text is not accepted as general observation data.
+- The adapter can claim `observed` or `unknown`; timing classifications such as `late` are derived by the core, not trusted from the adapter.
+- Duplicate `event_id` values **within the retention window are rejected**. Delayed or out-of-order records are classified without silently rewriting history.
+- Provenance currently identifies only original synthetic fixtures, not verified real-device evidence.
+- Assessments are independent inferences, with `nominal`, `deviation`, `stale`, `insufficient` and `unknown` outcomes; none represents a diagnosis.
+- Audit records do not include raw payloads, secrets or unrestricted user-supplied strings.
 
-This is an **illustrative proposed shape**. Implementing a final schema requires tests and a dedicated review.
+This remains an **experimental v0 API**, not a stable public schema. A different historical event shape was considered in the original ADR but is not a supported contract.
 
 ## 4. Security, trust and control
 
 **No autonomous enrollment or spread.** A user/admin must authorize each integration. A newly encountered IP, Bluetooth MAC, USB device, cloud service or application does not implicitly create an enrolled agent.
 
-MVP capabilities: `observe`, `replay`, `assess`, `recommend` on **synthetic local files only**. There are **no operational device commands**.
-
-> **Reconciliation note (IMPLEMENTED).** The implemented read-only set is `observe`, `describe`, `read_history` and `assess`. `replay` is a determinism property, and `recommend` is not implemented (PROPOSED). The synthetic data is generated in memory from fixed seeds rather than read from files. The only file input is the operator's policy file: a closed schema, symlinks refused, size bounded, identity checked against TOCTOU.
+**Implemented read-only capabilities:** `observe`, `describe`, `read_history` and `assess`. There are **no operational device commands**. Replay is currently a determinism property, not a permission; `recommend` remains only a possible future capability. The demo generates synthetic data in memory from fixed seeds. Its optional local policy file has a closed schema, bounded size and symlink/identity protections.
 
 Later designs must separately specify:
 
@@ -214,15 +207,15 @@ Later designs must separately specify:
 
 ## 5. MVP: falsify the "universal" architecture, not fake a platform
 
-Build a **local, offline, deterministic synthetic proof of concept** with **three heterogeneous examples sharing the same event envelope and assessment interface**:
+The first **local, offline, deterministic synthetic proof of concept is IMPLEMENTED**: three heterogeneous domains share the same event envelope, policy boundary and assessment interface.
 
-| Domain | Source | Example observation | What it proves |
-|---|---|---|---|
-| Virtual appliance | Synthetic fridge temperature / compressor state file | irregular cooling cycles | The agent need not run on an appliance |
-| Vehicle | Synthetic CAN replay file from the independently reviewed v0.4 lab | decoded DBC-backed signal | Existing vehicle research can be adapted without changing core behavior |
+| Domain | Implemented synthetic source | What it proves |
+|---|---|---|
+| Virtual appliance | In-memory refrigerator readings, including irregular cooling cycles | The agent need not run on an appliance |
+| Vehicle | In-memory synthetic CAN frames decoded with a test signal table | The contract works without a real vehicle or a CAN bus |
+| Digital service | In-memory service latency and error signals | The contract is not specific to physical sensors |
 
-> **Reconciliation note.** The implemented vehicle adapter decodes in-memory synthetic frames through its own test signal table. It shares no code with the v0.4 lab (PR #10) and does not depend on cantools. Wrapping the lab's output remains PROPOSED.
-| Digital service | Synthetic server uptime/latency/error-count file | latency degradation | The contract is not tied to physical sensors |
+The independent offline CAN/DBC lab remains in PR #10; adapting its reviewed output into Fabric observations is **PROPOSED**, not part of this existing demonstration.
 
 The PoC **does not** need three different machine-learning models. Start with one deterministic rule or descriptive summarizer per context. Model inference, cross-agent coordination, energy optimization and live hardware are separate research problems.
 
@@ -230,7 +223,7 @@ The shared read-only observations must also be exposed through **one optional lo
 
 ### Measurable gates
 
-1. **Offline / no effects:** all tests use local files; no sockets, CAN devices, subprocess, external commands or hardware writes.
+1. **Offline / no effects:** the Fabric does not access physical devices or networks; the optional stdio MCP client creates its local server subprocess. Transport effects must remain narrow, measured and tested, with no hardware writes.
 2. **Isolation:** entity A's observations do not change entity B's output. Explicitly prove denied cross-entity access and revoked capabilities.
 3. **Replay:** given the same inputs, fixed source version and configuration, outputs are byte-identical across runs (with optional reproducibility variation documented across Python versions).
 4. **Honest evidence:** unknown, missing, delayed or untrusted inputs produce explicit quality and abstention states, not invented health claims.
@@ -239,10 +232,10 @@ The shared read-only observations must also be exposed through **one optional lo
 7. **Compatibility:** historical v0.1 comparator and v0.2 benchmark bytes unchanged, v0.3 Scania preflight isolated, and v0.4 CAN experiment unaffected.
 8. **Independent review:** open PR, offline CI and adversarial tests. No merge before review; no deployment to real devices.
 
-### Expected artifacts (not code in this ADR PR)
+### Reference artifacts (implemented in earlier PRs; no code in this ADR PR)
 
-- `AgentManifest` / `Entity` / `Capability` / `Observation` / `Assessment` draft schemas;
-- local replay API; one small test fixture per domain; quality/evidence semantics and a compact privacy-safe manifest;
+- Entity, capability, observation and assessment contracts, plus the read-only MCP tool manifest (see `contracts.py` and `runtime.py`);
+- local deterministic synthetic demonstration for three domains, with quality/evidence semantics;
 - compatibility and security tests; measured resource profile;
 - a follow-up threat model before any real-world device API is added.
 
@@ -289,7 +282,7 @@ Only build a separate `pexislink_agents` module/package after the event and poli
   - an audit log with explicit events.
 
   A developer can verify these in minutes with `pexislink fabric demo` and the MCP examples (AGENT-FABRIC.md §1, §3).
-- **Q7.** One gate exists today: the published OpenAI Agents SDK over stdio, with 15/15 cases on Python 3.11–3.13. Claude Code, Codex CLI and the Claude Agent SDK are PROPOSED gates.
+- **Q7.** One gate exists today: the published OpenAI Agents SDK over stdio, with 15/15 cases on Python 3.11–3.13. A multi-provider test-only extension is currently under review in draft PR #13; it is not merged.
 - **Q1–Q5** remain open.
 
 **Decision gate:** Approve or revise this direction. The first read-only slice has been authorized and merged (PRs #11 and #12). Every item in §0 *PROPOSED* and *BLOCKED* still needs explicit owner approval before code. Issue #8 is the sole architecture tracker for PexisLink Everywhere.
