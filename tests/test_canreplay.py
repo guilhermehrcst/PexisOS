@@ -445,6 +445,57 @@ class SafetyGuardTests(LabCase):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM):
             pass  # other code in the same process is unaffected
 
+    def test_nested_guard_cannot_disable_outer_guard(self):
+        # Regression: a nested context used to clear the process-global active
+        # flag, allowing a subsequent socket attempt to bypass the audit hook.
+        with self.assertRaises(ReplayError) as outer:
+            with canreplay.no_device_access():
+                with self.assertRaises(ReplayError) as inner:
+                    with canreplay.no_device_access():
+                        pass
+                self.assertEqual(inner.exception.code, "safety_guard")
+                # This must still be blocked after nested entry was rejected.
+                with self.assertRaises(canreplay.SafetyViolation):
+                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM):
+                        pass
+        self.assertEqual(outer.exception.code, "safety_guard")
+        self.assertFalse(canreplay._guard["active"])
+
+    def test_concurrent_guard_entry_fails_closed_without_disabling_owner(self):
+        import threading
+
+        ready, begin, done = threading.Event(), threading.Event(), threading.Event()
+        observed = []
+
+        def competing_replay():
+            ready.set()
+            if begin.wait(timeout=5):
+                try:
+                    with canreplay.no_device_access():
+                        observed.append("entered")
+                except ReplayError as error:
+                    observed.append(error.code)
+            done.set()
+
+        worker = threading.Thread(target=competing_replay)
+        worker.start()
+        try:
+            self.assertTrue(ready.wait(timeout=5))
+            with self.assertRaises(ReplayError) as outer:
+                with canreplay.no_device_access():
+                    begin.set()
+                    self.assertTrue(done.wait(timeout=5))
+                    with self.assertRaises(canreplay.SafetyViolation):
+                        with socket.socket(socket.AF_INET, socket.SOCK_STREAM):
+                            pass
+            self.assertEqual(outer.exception.code, "safety_guard")
+            self.assertEqual(observed, ["safety_guard"])
+            self.assertFalse(canreplay._guard["active"])
+        finally:
+            begin.set()
+            worker.join(timeout=5)
+            self.assertFalse(worker.is_alive())
+
     def test_guard_failure_in_the_factory_also_fails_closed(self):
         def factory(text, limits):
             try:
