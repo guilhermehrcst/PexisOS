@@ -48,6 +48,30 @@ interface or transmits. The decoder (cantools) is optional:
 `pip install --require-hashes -r requirements/lab-can.txt`. See
 [docs/CAN-REPLAY-LAB-A.md](docs/CAN-REPLAY-LAB-A.md).
 
+## Agent Fabric v0.1 (experimental, read-only)
+
+A provider-neutral layer through which AI agents can read **authorized**,
+**evidence-qualified** observations of physical and digital entities. It ships
+with three synthetic domains (a refrigerator, a CAN vehicle, a software
+service), a deny-by-default policy engine with expiring and revocable grants,
+and an optional local MCP server (stdio) built on the official MCP Python SDK.
+It has no runtime dependencies, makes no network calls, and touches no device.
+
+~~~bash
+pexislink fabric demo                                    # deterministic walk-through
+pip install --require-hashes -r requirements/fabric-mcp.txt   # optional MCP transport
+pexislink fabric mcp-stdio --principal demo:principal:guest
+~~~
+
+Read [docs/AGENT-FABRIC.md](docs/AGENT-FABRIC.md),
+[the threat model](docs/AGENT-FABRIC-THREAT-MODEL.md) and
+[decisions and blocked items](docs/AGENT-FABRIC-DECISIONS.md).
+Interoperability with an independent client (the published OpenAI Agents SDK over
+MCP stdio, no model or API key) is tested by an optional suite:
+[docs/COMPAT-OPENAI-AGENTS.md](docs/COMPAT-OPENAI-AGENTS.md).
+MCP compatibility is not an endorsement by, or an official integration with,
+any model provider.
+
 ## What an assessment means
 
 | Status | Meaning |

@@ -4,6 +4,7 @@
     pexislink synth --scenario NAME --seed N --out DIR
     pexislink benchmark [--profile quick|dev|full] --out DIR
     pexislink dataset preflight --source component-x-v3 --input-dir DIR --out MANIFEST.json
+    pexislink fabric demo | mcp-stdio --principal ID [--policy FILE]   (experimental, read-only)
     pexislink lab can-replay --dbc FILE --frames FILE --out RECORDS.jsonl --summary SUMMARY.json
 
 The v0.1 invocation ``pexislink --baseline B --observations O`` still runs the
@@ -42,7 +43,7 @@ from .detect import STATUSES, assess_records
 from .ingest import DEFAULT_MAX_FILE_BYTES, DEFAULT_MAX_VEHICLES, InputError, Limits, Record, TelemetryFile
 from .reference import build_reference
 
-COMMANDS = ("detect", "synth", "benchmark", "dataset", "lab")
+COMMANDS = ("detect", "synth", "benchmark", "dataset", "fabric", "lab")
 NOTICE = ("Research output. An anomaly is a deviation from this vehicle's own reference; "
           "it is not a diagnosed fault, a failure prediction or a safety assessment.")
 MAX_FILE_MB = 4096
@@ -75,6 +76,9 @@ def _dispatch(args: list[str]) -> int:
         return _detect(args[1:])
     if args[0] == "dataset":
         return _dataset(args[1:])
+    if args[0] == "fabric":
+        from .fabric.cli import main as fabric_main
+        return fabric_main(args[1:])
     if args[0] == "lab":
         from .lab_cli import main as lab_main
         return lab_main(args[1:])
