@@ -299,7 +299,7 @@ class Session:
                         "freshness": None}
             seq, obs = found
             age_s = round((now - obs.observed_at) / 1e6, 3)
-            stale = age_s > spec.stale_after_s
+            stale = now - obs.observed_at > spec.stale_after_s * 1_000_000  # compare unrounded
             return {"entity_id": entity_id, "mode": "latest", "seq": seq, "observation": obs.to_dict(),
                     "freshness": {"evaluated_at": format_time(now), "age_s": age_s,
                                   "stale_after_s": spec.stale_after_s, "stale": stale,

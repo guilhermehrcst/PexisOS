@@ -13,6 +13,7 @@ from __future__ import annotations
 import threading
 from collections import Counter, deque
 from collections.abc import Callable
+from itertools import islice
 from dataclasses import dataclass
 
 from .contracts import ContractError, EntitySpec, EvidenceState, Observation, parse_observation
@@ -113,6 +114,8 @@ class ObservationStore:
                 return "undeclared_signal"
             if not signal.accepts_type(value):
                 return "signal_type_mismatch"
+            if signal.type == "enum" and value not in signal.values:
+                return "enum_value_not_declared"  # free text (e.g. injected instructions) is never stored
         return None
 
     @staticmethod
@@ -136,7 +139,10 @@ class ObservationStore:
     def page(self, entity_id: str, after_seq: int, limit: int) -> tuple[list[tuple[int, Observation]], bool]:
         with self._lock:
             buffer = self._buffers[entity_id]
-            items = [item for item in buffer.items if item[0] > after_seq]
+            if not buffer.items:
+                return [], False
+            start = max(0, after_seq - buffer.items[0][0] + 1)  # seqs are contiguous within the buffer
+            items = list(islice(buffer.items, start, start + limit + 1))
         return items[:limit], len(items) > limit
 
     def window(self, entity_id: str, size: int) -> list[Observation]:

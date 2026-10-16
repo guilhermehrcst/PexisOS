@@ -68,6 +68,21 @@ class IngestQualityTests(unittest.TestCase):
         self.assertEqual(stats["stored"], 1)
         self.assertEqual(set(stats["rejected"]), set(cases) - {"unknown_entity", "invalid_payload_value"})
 
+    def test_page_offsets_are_exact_after_eviction(self):
+        fabric = Fabric(clock=ManualClock(T0 + DAY), limits=FabricLimits(max_per_entity=10))
+        fabric.register(appliance.entity())
+        for i in range(25):
+            fabric.ingest(fridge_obs(i))
+        store = fabric.store
+        for after, expected in ((0, list(range(16, 26))), (3, list(range(16, 26))), (15, list(range(16, 26))),
+                                (16, list(range(17, 26))), (24, [25]), (25, []), (10 ** 9, [])):
+            items, more = store.page(FRIDGE, after, 100)
+            self.assertEqual([seq for seq, _ in items], expected, after)
+            self.assertFalse(more)
+        items, more = store.page(FRIDGE, 18, 3)
+        self.assertEqual(([seq for seq, _ in items], more), ([19, 20, 21], True))
+        self.assertEqual(store.page(FRIDGE, 22, 3)[1], False)  # exactly the last three
+
     def test_bounded_memory_evicts_oldest_and_reports_it(self):
         fabric = Fabric(clock=ManualClock(T0 + DAY), limits=FabricLimits(max_per_entity=10))
         fabric.register(appliance.entity())

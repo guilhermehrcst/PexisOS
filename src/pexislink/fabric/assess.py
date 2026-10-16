@@ -51,7 +51,7 @@ def assess(spec: EntitySpec, window: list[Observation], now: int, config: Assess
     counts = {s: sum(1 for o in ordered if o.status == s) for s in ("observed", "late", "unknown")}
     latest = ordered[-1] if ordered else None
     age_s = round((now - latest.observed_at) / 1e6, 3) if latest else None
-    stale = latest is None or age_s > spec.stale_after_s
+    stale = latest is None or now - latest.observed_at > spec.stale_after_s * 1_000_000  # compare unrounded
     interval_us = spec.expected_interval_s * 1e6
     gaps = sum(1 for a, b in zip(ordered, ordered[1:]) if b.observed_at - a.observed_at > config.gap_factor * interval_us)
     signals = [_signal(spec, signal.name, ordered, stale, config) for signal in spec.signals]
