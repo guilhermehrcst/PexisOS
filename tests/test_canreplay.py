@@ -448,16 +448,21 @@ class SafetyGuardTests(LabCase):
     def test_nested_guard_cannot_disable_outer_guard(self):
         # Regression: a nested context used to clear the process-global active
         # flag, allowing a subsequent socket attempt to bypass the audit hook.
+        still_blocked = []
         with self.assertRaises(ReplayError) as outer:
             with canreplay.no_device_access():
                 with self.assertRaises(ReplayError) as inner:
                     with canreplay.no_device_access():
                         pass
                 self.assertEqual(inner.exception.code, "safety_guard")
-                # This must still be blocked after nested entry was rejected.
-                with self.assertRaises(canreplay.SafetyViolation):
+                # Record proof outside the outer context: its own safety
+                # error must not mask a failed socket-blocking assertion.
+                try:
                     with socket.socket(socket.AF_INET, socket.SOCK_STREAM):
-                        pass
+                        still_blocked.append(False)
+                except canreplay.SafetyViolation:
+                    still_blocked.append(True)
+        self.assertEqual(still_blocked, [True])
         self.assertEqual(outer.exception.code, "safety_guard")
         self.assertFalse(canreplay._guard["active"])
 
@@ -465,7 +470,7 @@ class SafetyGuardTests(LabCase):
         import threading
 
         ready, begin, done = threading.Event(), threading.Event(), threading.Event()
-        observed = []
+        observed, still_blocked = [], []
 
         def competing_replay():
             ready.set()
@@ -485,9 +490,12 @@ class SafetyGuardTests(LabCase):
                 with canreplay.no_device_access():
                     begin.set()
                     self.assertTrue(done.wait(timeout=5))
-                    with self.assertRaises(canreplay.SafetyViolation):
+                    try:
                         with socket.socket(socket.AF_INET, socket.SOCK_STREAM):
-                            pass
+                            still_blocked.append(False)
+                    except canreplay.SafetyViolation:
+                        still_blocked.append(True)
+            self.assertEqual(still_blocked, [True])
             self.assertEqual(outer.exception.code, "safety_guard")
             self.assertEqual(observed, ["safety_guard"])
             self.assertFalse(canreplay._guard["active"])
