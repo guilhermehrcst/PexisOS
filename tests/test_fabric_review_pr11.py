@@ -235,7 +235,8 @@ class HistoryCursorSchemaTests(unittest.TestCase):
             except FabricError as error:
                 core_ok = error.code != "invalid_arguments"
             self.assertEqual(validator.is_valid(args), core_ok, repr(cursor))
-        self.assertEqual(specs["list_entities"]["input_schema"]["properties"]["cursor"]["maxLength"], 160)
+        from pexislink.fabric.contracts import MAX_ID_LENGTH
+        self.assertEqual(specs["list_entities"]["input_schema"]["properties"]["cursor"]["maxLength"], MAX_ID_LENGTH)
 
 
 class AuditFidelityTests(unittest.TestCase):

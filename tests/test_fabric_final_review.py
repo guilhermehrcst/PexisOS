@@ -288,3 +288,75 @@ class AuditSemanticsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# --- Codex review of 21e42cf ------------------------------------------------------------------------
+
+
+class CodexReview21e42cfTests(unittest.TestCase):
+    def test_assessment_window_parameters_must_be_integers(self):
+        for kwargs in ({"window": 120.0}, {"recent": 6.0}, {"min_points": 24.0}, {"window": True}):
+            with self.assertRaises(ValueError, msg=kwargs):
+                AssessmentConfig(**kwargs)
+
+    def test_append_returns_an_isolated_copy(self):
+        log = AuditLog()
+        returned = log.append(at=1, event="x")
+        returned["event"] = "forged"
+        returned["digest"] = "0" * 64
+        self.assertEqual(log.records()[0]["event"], "x")
+        self.assertTrue(AuditLog.verify(log.records()))
+
+    def test_a_record_rejected_by_the_sink_is_never_committed(self):
+        def sink(record):
+            if record.get("event") == "completed":
+                raise OSError("sink refused")
+
+        fabric = Fabric(clock=ManualClock(T0 + DAY), audit=AuditLog(sink=sink))
+        fabric.register(appliance.entity())
+        fabric.policy.add_grant(grant("g:1", ALICE, FRIDGE))
+        with self.assertRaises(FabricError) as ctx:
+            fabric.open_session(ALICE).call("describe_entity", {"entity_id": FRIDGE})
+        self.assertEqual(ctx.exception.code, "internal_error")
+        records = fabric.audit.records()
+        self.assertEqual([(r["event"], r["executed"]) for r in records],
+                         [("authorization", False), ("failed", False)])
+        self.assertTrue(AuditLog.verify(records))
+        self.assertEqual([r["seq"] for r in records], [1, 2])  # no gap: the refused record never took a seq
+
+    def test_unhashable_provenance_is_a_bounded_rejection(self):
+        fabric = Fabric(clock=ManualClock(T0 + DAY))
+        fabric.register(appliance.entity())
+        for field, value in (("source", []), ("license", {}), ("generator", []), ("source", {"a": 1})):
+            raw = fridge_obs(1)
+            raw["provenance"][field] = value
+            result = fabric.ingest(raw)
+            self.assertEqual((result.accepted, result.code), (False, "invalid_provenance"), (field, value))
+
+    def test_unexpected_exceptions_at_ingest_are_contained(self):
+        from unittest import mock
+        fabric = Fabric(clock=ManualClock(T0 + DAY))
+        fabric.register(appliance.entity())
+        with mock.patch("pexislink.fabric.store.parse_observation", side_effect=TypeError("boom")):
+            result = fabric.ingest(fridge_obs(1))
+        self.assertEqual((result.accepted, result.code), (False, "invalid_observation"))
+
+    def test_every_contract_valid_entity_id_is_reachable_through_the_tools(self):
+        longest = "a" + "b" * 31 + (":" + "c" * 64) * 3
+        self.assertEqual(len(longest), 227)
+        from pexislink.fabric.contracts import check_id
+        check_id(longest, "entity_id")
+        spec = appliance.entity(longest)
+        fabric = Fabric(clock=ManualClock(T0 + DAY))
+        fabric.register(spec)
+        fabric.policy.add_grant(grant("g:1", ALICE, longest))
+        session = fabric.open_session(ALICE)
+        listed = session.call("list_entities", {})["entities"]
+        self.assertEqual([e["entity_id"] for e in listed], [longest])
+        self.assertEqual(session.call("describe_entity", {"entity_id": longest})["entity"]["entity_id"], longest)
+        session.call("list_entities", {"cursor": longest})  # an entity id is a valid listing cursor
+        if jsonschema is not None:
+            for name, spec_ in session.tools().items():
+                props = spec_["input_schema"]["properties"]
+                if "entity_id" in props:
+                    self.assertTrue(jsonschema.Draft202012Validator(props["entity_id"]).is_valid(longest), name)

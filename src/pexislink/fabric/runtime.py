@@ -28,6 +28,7 @@ from typing import Any
 
 from .assess import AssessmentConfig, assess
 from .contracts import (
+    MAX_ID_LENGTH,
     Capability,
     ContractError,
     EntitySpec,
@@ -116,10 +117,9 @@ class Fabric:
         return spec.capabilities if spec else None
 
 
-_CURSOR = re.compile(r"[a-z0-9:._-]{1,160}")
-_ENTITY = {"type": "string", "minLength": 3, "maxLength": 160, "pattern": r"^[a-z][a-z0-9:._-]*$",
+_ENTITY = {"type": "string", "minLength": 3, "maxLength": MAX_ID_LENGTH, "pattern": r"^[a-z][a-z0-9:._-]*$",
            "description": "Entity identifier as returned by list_entities (namespace:kind:name)."}
-_CURSOR_SCHEMA = {"type": "string", "minLength": 1, "maxLength": 160, "pattern": r"^[a-z0-9:._-]+$",
+_CURSOR_SCHEMA = {"type": "string", "minLength": 1, "maxLength": MAX_ID_LENGTH, "pattern": r"^[a-z0-9:._-]+$",
                   "description": "Opaque cursor from a previous page (next_cursor)."}
 _HISTORY_CURSOR_SCHEMA = {"type": "string", "minLength": 1, "maxLength": 18, "pattern": r"^[0-9]{1,18}$",
                           "description": "next_cursor from a previous history page (a sequence number)."}

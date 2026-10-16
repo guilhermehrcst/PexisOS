@@ -122,15 +122,18 @@ class AuditLog:
         self._sink = sink
 
     def append(self, **fields: Any) -> dict:
+        """Append one record and return a copy of it. With a sink, the record is
+        committed only after the sink accepts it: if the sink raises, the chain
+        does not advance and the exception propagates (callers fail closed)."""
         with self._lock:
-            self._seq += 1
-            record = {"seq": self._seq, "prev": self._head, **fields}
+            record = {"seq": self._seq + 1, "prev": self._head, **fields}
             record["digest"] = hashlib.sha256(canonical_json(record).encode("ascii")).hexdigest()
+            if self._sink is not None:
+                self._sink(dict(record))  # under the lock: sink order equals chain order
+            self._seq += 1
             self._head = record["digest"]
             self._records.append(record)
-        if self._sink is not None:
-            self._sink(dict(record))
-        return record
+            return dict(record)
 
     def records(self) -> list[dict]:
         with self._lock:

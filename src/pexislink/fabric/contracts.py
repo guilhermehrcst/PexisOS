@@ -60,6 +60,7 @@ MAX_SIGNAL_MAGNITUDE = 1e15  # declared ranges must lie within +/- this, so medi
 # Grammars. Identifiers are lowercase, colon-separated, and cannot contain
 # '/', '\\', '..' at a segment start, whitespace or control characters.
 _ID = re.compile(r"[a-z][a-z0-9-]{0,31}(?::[a-z0-9][a-z0-9._-]{0,63}){1,3}")
+MAX_ID_LENGTH = 32 + 3 * (1 + 64)  # 227: the longest string _ID can match
 _NAME = re.compile(r"[a-z][a-z0-9_]{0,47}")
 _KIND = re.compile(r"[a-z][a-z0-9_]{0,31}(?:\.[a-z][a-z0-9_]{0,31}){0,3}")
 _EVENT_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
@@ -330,9 +331,9 @@ def parse_observation(raw: Any, max_depth: int = 4, max_string: int = 64, max_ke
             or not all(isinstance(f, str) and f in ADAPTER_FLAGS for f in flags):
         raise ContractError("invalid_quality_flags", "quality.flags")
     prov = closed(obs["provenance"], "provenance", _PROV_REQUIRED, _PROV_OPTIONAL)
-    if prov["source"] not in PROVENANCE_SOURCES:
+    if not isinstance(prov["source"], str) or prov["source"] not in PROVENANCE_SOURCES:
         raise ContractError("invalid_provenance", "provenance.source")
-    if prov["license"] not in PROVENANCE_LICENSES:
+    if not isinstance(prov["license"], str) or prov["license"] not in PROVENANCE_LICENSES:
         raise ContractError("invalid_provenance", "provenance.license")
     if not isinstance(prov["generator"], str) or not _KIND.fullmatch(prov["generator"]):
         raise ContractError("invalid_provenance", "provenance.generator")

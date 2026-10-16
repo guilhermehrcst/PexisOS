@@ -42,6 +42,9 @@ class AssessmentConfig:
     min_scale_fraction: float = 0.001  # floor for the scale, as a fraction of the declared range
 
     def __post_init__(self) -> None:
+        if not all(isinstance(v, int) and not isinstance(v, bool) for v in (self.window, self.recent,
+                                                                             self.min_points)):
+            raise ValueError("window, recent and min_points must be integers")
         if not (2 <= self.recent < self.min_points <= self.window <= 1000):
             raise ValueError("invalid assessment window")
         if not all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)

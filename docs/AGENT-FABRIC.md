@@ -206,7 +206,7 @@ Properties, each verified with the official SDK `Client` in `tests/test_fabric_m
   - `completed`: the result passed every final check and is about to be returned (`executed: true`).
 
   The log is bounded by `max_audit`, and its hash chain stays valid across failures.
-- **Audit failure fails closed.** If the audit sink raises, the request returns `internal_error` and no unaudited result is served.
+- **Audit failure fails closed.** If the audit sink raises, the request returns `internal_error` and no unaudited result is served. A record is committed to the chain only after the sink accepts it, so a refused record leaves no trace and no gap in `seq`. `append` returns a copy, so callers cannot alter committed records.
 
 ## 7. Data contracts (`v0`)
 

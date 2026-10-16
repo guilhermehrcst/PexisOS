@@ -69,6 +69,15 @@ class ObservationStore:
         return sorted(self._buffers)
 
     def ingest(self, raw: object) -> IngestResult:
+        """Never raises for any input: adapter output is untrusted."""
+        try:
+            return self._ingest(raw)
+        except Exception:  # defence in depth behind the contract checks
+            with self._lock:
+                self.unattributed_rejections["invalid_observation"] += 1
+            return IngestResult(False, "invalid_observation")
+
+    def _ingest(self, raw: object) -> IngestResult:
         try:
             obs = parse_observation(raw, **self._parse_limits)
         except ContractError as error:
