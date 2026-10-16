@@ -1187,6 +1187,203 @@ class CodexReview7242970Tests(LabCase):
             os.close(fd)
 
 
+@unittest.skipUnless(os.path.isdir("/proc/self/fd") and os.name == "posix",
+                     "not_run: these checks need Linux /proc and POSIX permissions")
+class CodexReview0470737Tests(LabCase):
+    """Codex review of PR #10 at 0470737 (1 P1, 5 P2). Each regression failed on 0470737."""
+
+    # P1: symlink swapped after the pre-open pathname check -----------------------------------------
+    def test_symlink_swapped_after_the_pre_open_check_is_caught_by_the_descriptor_scan(self):
+        plain = self.root / "plain.txt"
+        plain.write_text("synthetic")
+        link = self.root / "swappable"
+        link.symlink_to(plain)
+        resolved_plain = os.path.realpath(plain)
+        real_stat = os.stat
+        swapped, held = [], []
+
+        def swapping_stat(path, *args, **kwargs):
+            result = real_stat(path, *args, **kwargs)
+            if not swapped and isinstance(path, str) and path == resolved_plain:
+                swapped.append(True)  # the guard classified the regular file; now the link moves
+                link.unlink()
+                link.symlink_to("/dev/zero")
+            return result
+
+        def open_through_link():
+            with mock.patch.object(canreplay.os, "stat", swapping_stat):
+                held.append(os.open(str(link), os.O_RDONLY))  # the kernel follows the swapped link
+
+        try:
+            SafetyGuardTests.attempt(self, open_through_link)
+        finally:
+            for fd in held:
+                os.close(fd)
+        self.assertEqual(swapped, [True], "the swap was not exercised")
+        self.assertEqual(len(held), 1, "the pre-open check refused before the swap: the race was not reproduced")
+
+    def test_lab_inputs_are_anchored_to_the_opened_descriptor(self):
+        """Control (already true on 0470737): the lab's own inputs are verified on the descriptor."""
+        write_inputs(self.inputs)
+        frames = self.inputs / "synthetic_frames.csv"
+        real_open = os.open
+
+        def swap_then_open(path, flags, *args, **kwargs):
+            if os.fspath(path) == os.fspath(frames):
+                frames.unlink()
+                frames.symlink_to("/dev/zero")
+            return real_open(path, flags, *args, **kwargs)
+
+        with mock.patch.object(canreplay.os, "open", swap_then_open):
+            code, stderr = self.run_lab()
+        # fail closed whichever barrier fires first: the guard's path check (11), O_NOFOLLOW (7) or the
+        # descriptor identity check (10)
+        self.assertIn(code, (7, 10, 11), stderr)
+        self.assert_no_output()
+
+    # P2: per-descriptor inspection failure -----------------------------------------------------------
+    def test_live_descriptor_whose_target_cannot_be_read_fails_closed(self):
+        write_inputs(self.inputs)
+        held = os.open(self.inputs / "synthetic.dbc", os.O_RDONLY)
+        real_readlink = os.readlink
+
+        def denied(path, *args, **kwargs):
+            if os.fspath(path) == f"/proc/self/fd/{held}":
+                raise PermissionError(13, "synthetic partial procfs denial")
+            return real_readlink(path, *args, **kwargs)
+
+        try:
+            with mock.patch.object(canreplay.os, "readlink", denied):
+                code, stderr = self.run_lab()
+        finally:
+            os.close(held)
+        self.assertEqual(code, 11, stderr)
+        self.assertIn("uninspectable descriptor", stderr)
+        self.assert_no_output()
+
+    def test_a_descriptor_that_disappears_during_inspection_is_not_uncertain(self):
+        fd = os.open(self.inputs.parent, os.O_RDONLY)
+        os.close(fd)  # closed: readlink and fstat both fail
+
+        def gone(path, *args, **kwargs):
+            raise FileNotFoundError(2, "gone")
+
+        with mock.patch.object(canreplay.os, "readlink", gone):
+            self.assertIsNone(canreplay._unsafe_descriptor(fd))
+
+    # P2: the withdrawal of the marker cannot be made durable ---------------------------------------
+    def test_failed_withdrawal_fsync_is_reported_truthfully(self):
+        write_inputs(self.inputs)
+        import stat as stat_module
+        real_fsync, appeared = os.fsync, []
+
+        def fsync(fd):
+            if stat_module.S_ISDIR(os.fstat(fd).st_mode):
+                if self.summary.exists():
+                    appeared.append(True)
+                if appeared:  # from the summary rename on, every directory fsync fails (repeat failure)
+                    raise OSError(5, "synthetic directory fsync failure")
+            return real_fsync(fd)
+
+        with mock.patch.object(lab_cli.os, "fsync", fsync):
+            code, stderr = self.run_lab()
+        self.assertEqual(code, 1, stderr)
+        self.assertIn("could not be made durable", stderr)
+        self.assertIn("treat the run as failed", stderr)
+        self.assertFalse(self.summary.exists())
+
+    # P2: temporary file replaced by a symlink before chmod/replace ----------------------------------
+    def test_substituted_temporary_file_is_never_chmodded_or_installed(self):
+        write_inputs(self.inputs)
+        victim = self.root / "victim.txt"
+        victim.write_text("private")
+        os.chmod(victim, 0o600)
+        real_commit = lab_cli._Pending.commit
+
+        def attacker_swaps_first(pending):
+            if pending.target.name == self.out.name:
+                pending.temporary.unlink()
+                pending.temporary.symlink_to(victim)
+            return real_commit(pending)
+
+        with mock.patch.object(lab_cli._Pending, "commit", attacker_swaps_first):
+            code, stderr = self.run_lab()
+        self.assertEqual(code, 1, stderr)
+        self.assertIn("replaced in the destination directory", stderr)
+        self.assertEqual(os.stat(victim).st_mode & 0o777, 0o600, "the attacker's target was chmodded")
+        self.assertFalse(self.out.is_symlink(), "the attacker's symlink was installed as the output")
+        self.assertFalse(self.summary.exists())
+
+    def test_output_directory_writable_by_other_users_is_refused(self):
+        write_inputs(self.inputs)
+        try:
+            for mode, expected in ((0o777, 2), (0o775, 2), (0o1777, 0), (0o755, 0)):
+                os.chmod(self.outdir, mode)
+                for path in (self.out, self.summary):
+                    path.unlink(missing_ok=True)
+                code, stderr = self.run_lab()
+                self.assertEqual(code, expected, (oct(mode), stderr))
+        finally:
+            os.chmod(self.outdir, 0o700)
+
+    # P2: process-global umask is never changed ------------------------------------------------------
+    def test_commit_never_changes_the_process_umask(self):
+        write_inputs(self.inputs)
+        current = os.umask(0o022)
+        os.umask(current)
+
+        def forbidden(mask):
+            raise AssertionError("os.umask was called during the run")
+
+        with mock.patch.object(lab_cli.os, "umask", forbidden):
+            code, stderr = self.run_lab()
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(os.stat(self.out).st_mode & 0o777, 0o666 & ~current)
+
+    def test_concurrent_file_creation_keeps_the_process_umask(self):
+        import threading
+        write_inputs(self.inputs)
+        current = os.umask(0o022)
+        os.umask(current)
+        stop, modes = threading.Event(), []
+        scratch = self.root / "scratch"
+        scratch.mkdir()
+
+        def creator():
+            index = 0
+            while not stop.is_set():
+                path = scratch / f"f{index}"
+                path.write_text("x")
+                modes.append(path.stat().st_mode & 0o777)
+                path.unlink()
+                index += 1
+
+        worker = threading.Thread(target=creator, daemon=True)
+        worker.start()  # started before the replay: a pre-existing thread, not replay code
+        try:
+            code, stderr = self.run_lab()
+        finally:
+            stop.set()
+            worker.join()
+        self.assertEqual(code, 0, stderr)
+        self.assertTrue(modes)
+        self.assertEqual(set(modes), {0o666 & ~current})
+
+    # P2: no categorical negative claim ----------------------------------------------------------------
+    def test_summary_and_cli_make_no_categorical_no_device_claim(self):
+        write_inputs(self.inputs)
+        self.assertEqual(self.run_lab()[0], 0)
+        notice = json.loads(self.summary.read_text())["notice"]
+        for text in (notice, canreplay.NOTICE):
+            self.assertNotIn("No device was accessed", text)
+            self.assertIn("not proof that no device was accessed", text)
+        self.assertIn("lab's own code path", notice)
+        with redirect_stderr(io.StringIO()), mock.patch("sys.stdout", new=io.StringIO()) as out, \
+                self.assertRaises(SystemExit):
+            lab_cli.main(["--help"])
+        self.assertNotIn("no device access", out.getvalue())
+
+
 class WorkflowSafetyTests(unittest.TestCase):
     def test_mcp_ci_does_not_mask_unittest_failure_through_tee(self):
         workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/tests.yml").read_text()

@@ -32,6 +32,7 @@ an interrupted run and must not be used.
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import json
 import os
@@ -70,7 +71,7 @@ DecoderFactory = Callable[[str, ReplayLimits], Decoder]
 
 
 def main(argv: Sequence[str], decoder_factory: DecoderFactory = load_cantools_decoder) -> int:
-    parser = argparse.ArgumentParser(prog="pexislink lab", description="Offline research labs (no device access).")
+    parser = argparse.ArgumentParser(prog="pexislink lab", description="Offline research labs (no CAN bus, device or network code; local files only).")
     sub = parser.add_subparsers(dest="lab", required=True)
     can = sub.add_parser("can-replay", help="decode recorded classic-CAN frames through a local DBC")
     can.add_argument("--dbc", required=True, help="local DBC file (UTF-8)")
@@ -180,11 +181,14 @@ def _run(dbc: Path, frames: Path, out: Path, summary: Path, limits: ReplayLimits
         manifest_file.commit()
     except OSError as exc:  # records may already be in place without a summary: an interrupted run
         records.discard()
-        manifest_file.withdraw()  # a marker the failing run renamed must not claim success
-        return _fail("output_write_error", f"cannot commit output: {exc.strerror or 'error'}")
+        residue = manifest_file.withdraw()  # a marker the failing run renamed must not claim success
+        message = f"cannot commit output: {exc.strerror or 'error'}"
+        return _fail("output_write_error", message + (f"; {residue}" if residue else ""))
     except BaseException:
         records.discard()
-        manifest_file.withdraw()
+        residue = manifest_file.withdraw()
+        if residue:
+            print(f"error: output_write_error: {residue}", file=sys.stderr)
         raise
     print(f"can-replay: {sum(statuses.values())} frame(s): "
           + ", ".join(f"{s} {statuses[s]}" for s in STATUSES), file=sys.stderr)
@@ -213,6 +217,7 @@ def _check_destinations(out: Path, summary: Path, inputs: tuple[Path, ...]) -> N
     for destination in (out, summary):
         if os.path.basename(destination) in ("", ".", ".."):
             raise ValueError("an output path must name a file")
+        _check_output_directory(Path(os.path.realpath(os.path.dirname(destination) or ".")))
 
     if same(out, summary):
         raise ValueError("--out and --summary must be different files")
@@ -223,6 +228,45 @@ def _check_destinations(out: Path, summary: Path, inputs: tuple[Path, ...]) -> N
         if os.path.lexists(destination):
             if os.path.islink(destination) or not os.path.isfile(destination):
                 raise ValueError("an existing output must be a regular file (not a link, directory or device)")
+
+
+def _check_output_directory(directory: Path) -> None:
+    """Refuse a destination directory in which another user could replace our temporary file.
+
+    The commit renames a temporary file by name. In a directory writable by other users (without the
+    sticky bit, which stops them from removing our entries) or owned by another user, that entry
+    could be swapped for a symlink between creation and rename. The lab does not defend against such
+    a directory: it refuses it. A missing directory is left to the normal output error (exit 1)."""
+    try:
+        info = os.stat(directory)
+    except OSError:
+        return
+    if os.name == "nt":
+        return  # no POSIX ownership or mode bits (not a supported platform)
+    shared = info.st_mode & (stat.S_IWGRP | stat.S_IWOTH) and not info.st_mode & stat.S_ISVTX
+    if shared or info.st_uid not in (os.geteuid(), 0):
+        raise ValueError("an output directory must be owned by you (or root) and not writable by other users "
+                         "unless it has the sticky bit")
+
+
+def _creation_mode() -> int:
+    """The mode a new file would get from ``open()``: 0o666 minus the umask, read without changing it.
+
+    Linux exposes the umask in /proc/self/status. Elsewhere the private 0o600 is used. The process
+    umask is never modified (another thread could create files while it is cleared)."""
+    try:
+        with open("/proc/self/status", "rb") as status:
+            for line in status.read(1 << 16).splitlines():
+                if line.startswith(b"Umask:"):
+                    return 0o666 & ~int(line.split()[1], 8)
+    except (OSError, ValueError, IndexError):
+        pass
+    return 0o600
+
+
+class _OutputSubstituted(OSError):
+    def __init__(self) -> None:
+        super().__init__(errno.EEXIST, "a temporary output was replaced in the destination directory")
 
 
 class _Pending:
@@ -236,12 +280,14 @@ class _Pending:
         self.target = self.directory / os.path.basename(target)
         self.max_bytes = max_bytes
         try:  # keep an existing file's permissions (the summary is removed before its rename)
-            self.mode: int | None = stat.S_IMODE(os.stat(self.target).st_mode)
+            self.mode = stat.S_IMODE(os.stat(self.target).st_mode)
         except FileNotFoundError:
-            self.mode = None
+            self.mode = _creation_mode()
         descriptor, name = tempfile.mkstemp(dir=self.directory, prefix=".pexislink-",
                                             suffix=".tmp")  # short: long targets fit
         self.temporary = Path(name)
+        created = os.fstat(descriptor)
+        self.identity = (created.st_dev, created.st_ino)  # the inode this run wrote, checked at commit
         self.handle: IO[bytes] = os.fdopen(descriptor, "wb")
         self.sha = hashlib.sha256()
         self.count = 0
@@ -268,18 +314,38 @@ class _Pending:
 
     def close(self) -> None:
         self.handle.flush()
+        if hasattr(os, "fchmod"):
+            os.fchmod(self.handle.fileno(), self.mode)  # on the descriptor: never follows a swapped name
         os.fsync(self.handle.fileno())
         self.handle.close()
 
+    def _entry_is_ours(self, name: str, directory_fd: int | None) -> bool:
+        try:
+            info = (os.lstat(name, dir_fd=directory_fd) if directory_fd is not None
+                    else os.lstat(self.directory / name))
+        except OSError:
+            return False
+        return stat.S_ISREG(info.st_mode) and (info.st_dev, info.st_ino) == self.identity
+
     def commit(self) -> None:
-        mode = self.mode
-        if mode is None:
-            mask = os.umask(0)
-            os.umask(mask)
-            mode = 0o666 & ~mask  # mkstemp creates 0600
-        os.chmod(self.temporary, mode)
-        os.replace(self.temporary, self.target)
-        self.committed = True
+        """Rename by name, but only the inode this run wrote: checked before and after the rename."""
+        if not hasattr(os, "fchmod"):
+            os.chmod(self.temporary, self.mode)  # platforms without fchmod (not supported)
+        anchored = os.lstat in os.supports_dir_fd and os.replace in os.supports_dir_fd
+        directory_fd = os.open(self.directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)) if anchored else None
+        try:
+            if not self._entry_is_ours(self.temporary.name, directory_fd):
+                raise _OutputSubstituted()
+            if directory_fd is not None:
+                os.replace(self.temporary.name, self.target.name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+            else:
+                os.replace(self.temporary, self.target)
+            self.committed = True
+            if not self._entry_is_ours(self.target.name, directory_fd):
+                raise _OutputSubstituted()
+        finally:
+            if directory_fd is not None:
+                os.close(directory_fd)
         _fsync_directory(self.directory)
 
     def discard(self) -> None:
@@ -287,15 +353,29 @@ class _Pending:
             self.handle.close()
         self.temporary.unlink(missing_ok=True)
 
-    def withdraw(self) -> None:
-        """Discard, and remove the destination too if this run already renamed it into place."""
+    def withdraw(self) -> str | None:
+        """Discard, and remove the destination too if this run already renamed it into place.
+
+        Returns None when nothing of this run remains, otherwise the truthful residual state, which
+        the caller reports. Records are always durable before the summary is renamed, so a summary
+        that reappears after a crash still matches the records it describes."""
         self.discard()
-        if self.committed:
-            try:
-                os.unlink(self.target)
-                _fsync_directory(self.directory)
-            except OSError:
-                pass  # best effort: the run already reports failure
+        if not self.committed:
+            return None
+        try:
+            os.unlink(self.target)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            return (f"the summary written by this run could not be removed ({exc.strerror or 'error'}); "
+                    "treat the run as failed")
+        try:
+            _fsync_directory(self.directory)
+        except OSError as exc:
+            return (f"the summary written by this run was removed, but the removal could not be made durable "
+                    f"({exc.strerror or 'error'}): after a crash it may reappear (it then matches the "
+                    "committed records); treat the run as failed")
+        return None
 
 
 def _fsync_directory(directory: Path) -> None:

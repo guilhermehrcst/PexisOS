@@ -50,7 +50,10 @@ SCHEMA = "pexislink.can-replay.v1"
 HEADER = "timestamp,arbitration_id,is_extended_id,data_hex"
 STATUSES = ("decoded", "unknown_message", "decode_error")
 NOTICE = ("Offline replay of recorded frames through a user-supplied DBC. Decoding is not evidence that a "
-          "reading is real, that a vehicle is faulty, or that anything will fail. No device was accessed.")
+          "reading is real, that a vehicle is faulty, or that anything will fail. The lab's own code path opens "
+          "no CAN interface, bus or network connection, and its runtime guard detected no audited device, "
+          "network, process or thread access. That guard is defense in depth, not a sandbox: this is not proof "
+          "that no device was accessed.")
 CANTOOLS_VERSION = "44.1.0"  # the version the integration tests ran against (docs/CAN-REPLAY-LAB-A.md)
 
 _TIMESTAMP = re.compile(
@@ -477,6 +480,8 @@ _hook_probe = {"seen": False}
 # (/proc/sysrq-trigger, /sys/class/net/<iface>/... are "regular" files that reconfigure the host).
 _KERNEL_TREES = ("/proc", "/sys")
 _socket_snapshot: dict[str, frozenset[str] | None] = {"unix": frozenset()}
+# Identity (st_dev, st_ino) of every descriptor open at activation: the exit scan judges only the others.
+_fd_snapshot: dict[int, tuple[int, int]] = {}
 
 
 class SafetyViolation(RuntimeError):
@@ -563,9 +568,16 @@ def _unsafe_descriptor(fd: int, unix_inodes: frozenset[str] | None = None) -> st
     try:
         target = os.readlink(f"/proc/self/fd/{fd}")
     except OSError:
-        pass
+        try:
+            os.fstat(fd)
+        except OSError:
+            return None  # closed meanwhile: disappeared, not uncertain
     if stat.S_ISREG(mode) or stat.S_ISDIR(mode):
-        if target is not None and target.startswith("/") and _in_kernel_tree(target):
+        if target is None:
+            # A live descriptor whose target cannot be read could be a kernel control file. On Linux
+            # that uncertainty fails closed; elsewhere /proc does not exist (documented limitation).
+            return "uninspectable descriptor" if sys.platform.startswith("linux") else None
+        if target.startswith("/") and _in_kernel_tree(target):
             return "kernel control file"
         return None
     if stat.S_ISCHR(mode):
@@ -601,12 +613,49 @@ def _inherited_descriptor_problems() -> list[str] | None:
         return None
     inodes = _local_socket_inodes()
     _socket_snapshot["unix"] = inodes if inodes is not None else frozenset()
+    _fd_snapshot.clear()
     problems = []
     for name in names:
         if name.isdigit():
-            reason = _unsafe_descriptor(int(name), inodes)
+            fd = int(name)
+            reason = _unsafe_descriptor(fd, inodes)
             if reason is not None:
                 problems.append(reason)
+            try:
+                info = os.fstat(fd)
+                _fd_snapshot[fd] = (info.st_dev, info.st_ino)
+            except OSError:
+                pass
+    return problems
+
+
+def _descriptors_opened_during_replay_problems() -> list[str] | None:
+    """Unsafe descriptors that were not open at activation (Linux), checked before deactivation.
+
+    The audited ``open`` check is a pathname check made *before* the kernel resolves the path, so a
+    concurrent symlink swap can make the kernel open something else. This scan judges what was really
+    opened. It sees only descriptors still open at the end of the replay (documented limitation).
+    Uses only fstat/readlink/listdir, which raise no refused audit events."""
+    try:
+        names = os.listdir("/proc/self/fd")
+    except OSError:
+        if sys.platform.startswith("linux"):
+            return ["cannot inspect open file descriptors at the end of the replay"]
+        return None
+    problems = []
+    for name in names:
+        if not name.isdigit():
+            continue
+        fd = int(name)
+        try:
+            info = os.fstat(fd)
+        except OSError:
+            continue
+        if _fd_snapshot.get(fd) == (info.st_dev, info.st_ino):
+            continue
+        reason = _unsafe_descriptor(fd, _socket_snapshot["unix"])
+        if reason is not None:
+            problems.append(reason)
     return problems
 
 
@@ -681,6 +730,9 @@ def no_device_access() -> Iterator[None]:
                 # A late or swallowed concurrent entry fails the owner too.
                 if any(id(thread) not in threads_before and thread.is_alive()
                        for thread in threading.enumerate()):
+                    _guard["violations"] += 1
+                # Judge what was actually opened (a symlink swapped after the pre-open check).
+                if _descriptors_opened_during_replay_problems():
                     _guard["violations"] += 1
                 violations = _guard["violations"]
             finally:
