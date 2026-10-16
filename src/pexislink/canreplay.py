@@ -192,12 +192,18 @@ class InputFile:
         return min(requested, budget) if requested >= 0 else budget
 
     def read(self, size: int = -1) -> bytes:
-        data = self.handle.read(self._bounded_size(size))
+        try:
+            data = self.handle.read(self._bounded_size(size))
+        except OSError:  # e.g. EIO from damaged storage: an input failure, never an output one
+            raise ReplayError("input_unreadable", "an input file could not be read") from None
         self._account(data)
         return data
 
     def readline(self, limit: int = -1) -> bytes:
-        data = self.handle.readline(self._bounded_size(limit))
+        try:
+            data = self.handle.readline(self._bounded_size(limit))
+        except OSError:
+            raise ReplayError("input_unreadable", "an input file could not be read") from None
         self._account(data)
         return data
 
@@ -212,7 +218,10 @@ class InputFile:
         """Hash the rest, then check the file did not change while read; return the SHA-256."""
         while self.read(_CHUNK):
             pass
-        after = os.fstat(self.handle.fileno())
+        try:
+            after = os.fstat(self.handle.fileno())
+        except OSError:
+            raise ReplayError("input_unreadable", "an input file could not be read") from None
         same = self.bytes_read == self.info.st_size and all(
             getattr(after, key) == getattr(self.info, key) for key in ("st_size", "st_mtime_ns", "st_ctime_ns"))
         try:
@@ -397,7 +406,12 @@ def _quiet(name: str) -> Iterator[None]:
     saved = logger.propagate, logger.handlers[:]
     null = logging.NullHandler()
     logger.propagate, logger.handlers = False, [null]  # also bypasses handlers on child loggers' parents
-    handlers = [logging.lastResort, *logging.getLogger().handlers]
+    # Handlers attached directly to existing child loggers (possibly with propagate=False) are filtered
+    # too; a child logger created during the block has no handlers and propagates to the silenced parent.
+    children = [child for child_name, child in logging.Logger.manager.loggerDict.items()
+                if child_name.startswith(name + ".") and isinstance(child, logging.Logger)]
+    handlers = [logging.lastResort, *logging.getLogger().handlers,
+                *(handler for child in children for handler in child.handlers)]
     for handler in handlers:
         if handler is not None:
             handler.addFilter(drop)
@@ -470,7 +484,8 @@ _BLOCKED_EVENTS = ("socket.__new__", "socket.connect", "socket.bind", "socket.se
                    "subprocess.Popen", "os.system", "os.exec", "os.posix_spawn", "os.spawn", "os.fork",
                    "os.forkpty", "os.startfile", "ctypes.dlopen", "ctypes.dlsym",
                    "socket.getaddrinfo", "socket.gethostbyname", "socket.gethostbyaddr", "socket.getnameinfo",
-                   "_thread.start_new_thread", "_thread.start_joinable_thread")
+                   "_thread.start_new_thread", "_thread.start_joinable_thread",
+                   "os.kill", "os.killpg", "signal.pthread_kill")  # process-control signals
 _guard = {"active": False, "violations": 0}
 _guard_lock = threading.RLock()  # audit callbacks and guard finalization must share this synchronization
 _hook_installed = False
@@ -680,7 +695,10 @@ def no_device_access() -> Iterator[None]:
             sys.addaudithook(_audit)  # CPython silently refuses this if another hook vetoes it
         # Prove, on every entry, that the hook is installed and receives events. Fail closed otherwise.
         _hook_probe["seen"] = False
-        sys.audit(_HOOK_PROBE)
+        try:
+            sys.audit(_HOOK_PROBE)
+        except Exception:  # another audit hook rejected the probe: the guard cannot be proven live
+            raise ReplayError("safety_guard", "the runtime audit hook probe was rejected by another hook") from None
         if not _hook_probe["seen"]:
             raise ReplayError("safety_guard", "the runtime audit hook was refused or receives no events")
         _hook_installed = True

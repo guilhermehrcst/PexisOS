@@ -1384,6 +1384,128 @@ class CodexReview0470737Tests(LabCase):
         self.assertNotIn("no device access", out.getvalue())
 
 
+class CodexReview0470737SecondBatchTests(LabCase):
+    """Second batch of the Codex review of 0470737 (5 P2), triaged on 5b4d578. Each failed on 5b4d578."""
+
+    def test_rejected_audit_probe_becomes_safety_guard(self):
+        import subprocess
+        write_inputs(self.inputs, CLEAN_ROWS[:1])
+        tests_dir = Path(__file__).resolve().parent
+        code = (
+            "import sys\n"
+            "def veto(event, args):\n"
+            "    if event == 'pexislink.canreplay.hook_probe':\n"
+            "        raise RuntimeError('embedding policy rejects unknown events')\n"
+            "sys.addaudithook(veto)\n"
+            f"sys.path[:0] = [{str(tests_dir)!r}, {str(Path(canreplay.__file__).resolve().parents[1])!r}]\n"
+            "from canreplay_fixtures import stub_factory\n"
+            "from pexislink import lab_cli\n"
+            f"sys.exit(lab_cli.main(['can-replay', '--dbc', {str(self.inputs / 'synthetic.dbc')!r}, '--frames', "
+            f"{str(self.inputs / 'synthetic_frames.csv')!r}, '--out', {str(self.out)!r}, '--summary', "
+            f"{str(self.summary)!r}], decoder_factory=stub_factory))\n"
+        )
+        result = subprocess.run([sys.executable, "-I", "-c", code], capture_output=True, text=True, timeout=120)
+        self.assertEqual(result.returncode, 11, result.stderr)
+        self.assertIn("probe was rejected", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assert_no_output()
+
+    def test_temporary_file_is_removed_even_when_closing_a_failed_writer_raises(self):
+        write_inputs(self.inputs)
+        real_write = lab_cli._Pending.write_record
+
+        class FailingClose:
+            def __init__(self, inner):
+                self.inner = inner
+
+            @property
+            def closed(self):
+                return self.inner.closed
+
+            def close(self):
+                self.inner.close()
+                raise OSError(28, "No space left on device")  # the buffered data cannot be flushed
+
+        def disk_full(pending, record):
+            if pending.count >= 2:
+                pending.handle = FailingClose(pending.handle)
+                raise OSError(28, "No space left on device")
+            return real_write(pending, record)
+
+        with mock.patch.object(lab_cli._Pending, "write_record", disk_full):
+            code, stderr = self.run_lab()
+        self.assertEqual(code, 1, stderr)
+        self.assertIn("output_write_error", stderr)
+        self.assertNotIn("Traceback", stderr)
+        self.assert_no_output()  # no temporary file left behind
+
+    def test_process_control_signals_are_refused(self):
+        for action in (lambda: os.kill(os.getpid(), 0),  # signal 0: permission/existence check only
+                       lambda: os.killpg(os.getpgrp(), 0)):
+            with self.subTest(action=action):
+                SafetyGuardTests.attempt(self, action)
+
+    def test_input_read_failure_is_an_input_error(self):
+        write_inputs(self.inputs)
+        real_fdopen, opened = os.fdopen, []
+
+        class BrokenStorage:
+            def __init__(self, inner):
+                self.inner = inner
+
+            def __getattr__(self, name):
+                return getattr(self.inner, name)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                self.inner.close()
+
+            def read(self, *args):
+                raise OSError(5, "Input/output error")
+
+            readline = read
+
+        frames_identity = os.stat(self.inputs / "synthetic_frames.csv")
+
+        def fdopen(fd, *args, **kwargs):
+            handle = real_fdopen(fd, *args, **kwargs)
+            if os.path.samestat(os.fstat(fd), frames_identity):  # only the frame file's storage fails
+                opened.append(handle)
+                return BrokenStorage(handle)
+            return handle
+
+        with mock.patch.object(canreplay.os, "fdopen", fdopen):
+            code, stderr = self.run_lab()
+        self.assertEqual(len(opened), 1, "the failing storage was not exercised")
+        self.assertEqual(code, 7, stderr)
+        self.assertIn("input_unreadable", stderr)
+        self.assert_no_output()
+
+    def test_handlers_on_cantools_child_loggers_are_silenced(self):
+        import logging
+        captured = io.StringIO()
+        handlers = {}
+        for name in ("cantools.database", "cantools.database.can.formats.dbc"):
+            child = logging.getLogger(name)
+            handlers[name] = logging.StreamHandler(captured)
+            child.addHandler(handlers[name])
+            child.propagate = False
+        try:
+            with canreplay._quiet("cantools"):
+                logging.getLogger("cantools.database").warning("DBC-CONTROLLED-NAME-1")
+                logging.getLogger("cantools.database.can.formats.dbc").warning("DBC-CONTROLLED-NAME-2")
+            self.assertEqual(captured.getvalue(), "")
+            logging.getLogger("cantools.database").warning("outside the block")  # filters were removed
+            self.assertIn("outside the block", captured.getvalue())
+        finally:
+            for name, handler in handlers.items():
+                child = logging.getLogger(name)
+                child.removeHandler(handler)
+                child.propagate = True
+
+
 class WorkflowSafetyTests(unittest.TestCase):
     def test_mcp_ci_does_not_mask_unittest_failure_through_tee(self):
         workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/tests.yml").read_text()

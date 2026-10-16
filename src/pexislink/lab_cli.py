@@ -349,9 +349,18 @@ class _Pending:
         _fsync_directory(self.directory)
 
     def discard(self) -> None:
-        if not self.handle.closed:
-            self.handle.close()
-        self.temporary.unlink(missing_ok=True)
+        """Close and delete the temporary file. Never raises: the caller is already reporting the
+        original failure (closing a writer whose flush failed, e.g. ENOSPC, raises the same error)."""
+        try:
+            if not self.handle.closed:
+                self.handle.close()
+        except OSError:
+            pass
+        finally:
+            try:
+                self.temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     def withdraw(self) -> str | None:
         """Discard, and remove the destination too if this run already renamed it into place.
