@@ -2,7 +2,7 @@
   "client": "openai-agents (agents.mcp.MCPServerStdio), no model calls",
   "command": "PYTHONPATH=src python tests/compat/run_matrix.py",
   "environment": {
-    "git_commit": "a67f262c754abb1badc913331e408fdbc2adde9d",
+    "git_commit": "d72424c5cb05419f22a452eb5eeee8519d63eae5",
     "implementation": "CPython",
     "packages": {
       "jsonschema": null,
@@ -103,9 +103,9 @@
     "T13": {
       "name": "negative_hardware",
       "passed": 0,
-      "skipped": 2,
+      "skipped": 3,
       "status": "NOT_RUN",
-      "tests": 2
+      "tests": 3
     },
     "T14": {
       "name": "lifecycle",
