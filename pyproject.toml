@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "pexislink"
 dynamic = ["version"]
-description = "Read-only vehicle telemetry and anomaly detection research"
+description = "PexisOS experimental read-only agent fabric and offline telemetry research"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"

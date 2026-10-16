@@ -1,8 +1,10 @@
-# PexisLink
+# PexisOS
 
-**Open-source research in vehicle telemetry, anomaly detection, and predictive health.**
+**Open-source, provider-neutral infrastructure for evidence-qualified observations of physical and digital systems.**
 
-PexisLink compares a vehicle's later coolant-temperature readings with that same
+PexisOS is the new project name for **PexisLink**. The software currently includes offline vehicle-telemetry research and an experimental, read-only Agent Fabric. It is **not yet an operating system, a Linux distribution, or a certified control system**. To preserve interoperability and avoid disrupting active work, its current Python distribution, CLI, imports, and schema IDs retain the `pexislink` names during the transition. See the [PexisOS naming plan](docs/PEXISOS-NAMING.md).
+
+The vehicle telemetry research component compares a vehicle's later coolant-temperature readings with that same
 vehicle's earlier readings under similar operating conditions, and states how
 much evidence the data supports: `normal`, `suspected_anomaly`,
 `confirmed_anomaly`, or `insufficient_evidence`. It is read-only, offline,
