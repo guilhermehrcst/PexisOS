@@ -513,6 +513,31 @@ class SafetyGuardTests(LabCase):
         self.attempt(lambda: _thread.start_new_thread(lambda: None, ()))
         self.attempt(lambda: threading.Thread(target=lambda: None, daemon=True).start())
 
+    def test_raw_thread_wrappers_are_restored_after_normal_and_failed_guard(self):
+        import _thread
+        import threading
+
+        original_raw = _thread.start_new_thread
+        original_start = threading.Thread.start
+        original_alias = getattr(threading, "_start_new_thread", None)
+
+        with canreplay.no_device_access():
+            self.assertIsNot(_thread.start_new_thread, original_raw)
+            self.assertIsNot(threading.Thread.start, original_start)
+        self.assertIs(_thread.start_new_thread, original_raw)
+        self.assertIs(threading.Thread.start, original_start)
+        self.assertIs(getattr(threading, "_start_new_thread", None), original_alias)
+
+        with self.assertRaises(ReplayError):
+            with canreplay.no_device_access():
+                try:
+                    _thread.start_new_thread(lambda: None, ())
+                except canreplay.SafetyViolation:
+                    pass
+        self.assertIs(_thread.start_new_thread, original_raw)
+        self.assertIs(threading.Thread.start, original_start)
+        self.assertIs(getattr(threading, "_start_new_thread", None), original_alias)
+
     def test_guard_is_inactive_outside_a_replay(self):
         with canreplay.no_device_access():
             pass
