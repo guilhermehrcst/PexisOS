@@ -162,6 +162,11 @@ def _run(dbc: Path, frames: Path, out: Path, summary: Path, limits: ReplayLimits
     try:
         if summary.exists():
             summary.unlink()  # a stale summary must never pair with new records
+            # Persist the marker removal BEFORE replacing records, including
+            # when the two output files live on different filesystems/dirs.
+            # Otherwise a power loss may resurrect a stale valid-looking
+            # summary after records.commit() has become durable.
+            _fsync_directory(summary)
         records.commit()
         manifest_file.commit()
     except OSError as exc:  # records may already be in place without a summary: an interrupted run
