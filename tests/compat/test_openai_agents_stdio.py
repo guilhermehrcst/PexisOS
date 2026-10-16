@@ -32,6 +32,7 @@ TOOLS = {"describe_entity", "explain_assessment", "list_capabilities", "list_ent
 FRIDGE, CAR, API = "demo:appliance:fridge-01", "demo:vehicle:synthetic-01", "demo:service:checkout-api"
 GUEST, ANALYST = "demo:principal:guest", "demo:principal:analyst"
 CANARY = "PEXISLINK_COMPAT_CANARY_SECRET"
+_DEVNULL = open(os.devnull, "w")  # opened once at import: tests that audit the client see no device opens
 NOT_RUN = "not_run: openai-agents is not installed (pip install --require-hashes -r requirements/compat-openai-agents.txt)"
 
 if HAVE_AGENTS:
@@ -70,14 +71,13 @@ def server_params(principal: str = GUEST, *, fixture_args: list[str] | None = No
 async def connected(principal: str = GUEST, **kwargs):
     server = MCPServerStdio(params=server_params(principal, **kwargs), name=f"pexislink-{principal.split(':')[-1]}",
                             client_session_timeout_seconds=60)
-    with open(os.devnull, "w") as devnull:  # the server's one-line stderr banner
-        saved, sys.stderr = sys.stderr, devnull
-        try:
-            async with server:
-                sys.stderr = saved
-                yield server
-        finally:
+    saved, sys.stderr = sys.stderr, _DEVNULL  # the server's one-line stderr banner goes to the null device
+    try:
+        async with server:
             sys.stderr = saved
+            yield server
+    finally:
+        sys.stderr = saved
 
 
 def run(coro):
@@ -365,7 +365,13 @@ class OpenAIAgentsStdioInteropTests(unittest.TestCase):
             for leak in ("SECRET", "/home/", "id_rsa", "s3cr3t", "Traceback", str(SRC)):
                 self.assertNotIn(leak, text)
 
-    def test_T10_host_credentials_are_not_forwarded_to_the_server(self):
+    def test_T10_child_environment_is_exactly_the_documented_set(self):
+        """The server process receives exactly: what the client passes explicitly (PYTHONPATH,
+        PYTHONNOUSERSITE, PATH) + the MCP stdio transport's own inheritance allowlist, as present on
+        the host (mcp.client.stdio.DEFAULT_INHERITED_ENV_VARS, e.g. HOME, SHELL, TERM, USER) + LC_CTYPE
+        when the child interpreter performs PEP 538 C-locale coercion. Nothing else, no host canary."""
+        from mcp.client.stdio import get_default_environment
+
         with tempfile.TemporaryDirectory() as tmp:
             dump = Path(tmp) / "env.json"
             os.environ[CANARY] = "host-secret"
@@ -375,11 +381,18 @@ class OpenAIAgentsStdioInteropTests(unittest.TestCase):
                         await server.list_tools()
 
                 run(go())
+                transport = set(get_default_environment())
             finally:
                 os.environ.pop(CANARY, None)
-            names = json.loads(dump.read_text())
+            names = set(json.loads(dump.read_text()))
+        explicit = set(child_env())
+        expected = explicit | transport
         self.assertNotIn(CANARY, names)
-        self.assertFalse([n for n in names if "KEY" in n or "TOKEN" in n or "SECRET" in n], names)
+        self.assertIn(names, (expected, expected | {"LC_CTYPE"}), sorted(names ^ expected))
+        self.assertFalse(transport - {"HOME", "LOGNAME", "PATH", "SHELL", "TERM", "USER", "APPDATA", "HOMEDRIVE",
+                                      "HOMEPATH", "LOCALAPPDATA", "PATHEXT", "PROCESSOR_ARCHITECTURE",
+                                      "SYSTEMDRIVE", "SYSTEMROOT", "TEMP", "USERNAME", "USERPROFILE"},
+                         "the MCP transport's inheritance allowlist changed: re-review it")
 
     # T11 -------------------------------------------------------------------------------------------
     def test_T11_concurrent_sessions_are_isolated(self):
@@ -411,7 +424,30 @@ class OpenAIAgentsStdioInteropTests(unittest.TestCase):
         self.assertEqual(run(once()), run(once()))
 
     # T13 -------------------------------------------------------------------------------------------
-    def test_T13_server_makes_no_network_process_or_device_access(self):
+    def test_T13_no_network_process_or_device_access_in_server_or_client(self):
+        """Every security-relevant audit event (all socket.*, process creation/control, native loading,
+        device and kernel-interface opens, see _audit.py) is recorded in BOTH processes during a
+        session that calls every tool. Measured and explicitly allowed, nothing else:
+
+        * both: socket.__new__ with family AF_UNIX (asyncio's internal self-pipe socketpair);
+        * server: open /dev/null READ-ONLY (the MCP stdio transport diverts fd 0);
+        * client: one subprocess.Popen whose argv is exactly the configured local server.
+        """
+        sys.path.insert(0, str(Path(__file__).parent))
+        from _audit import describe
+
+        parent: list[str] = []
+        recording = [False]
+
+        def hook(event, args):
+            if recording[0]:
+                line = describe(event, args)
+                if line is not None:
+                    if event == "subprocess.Popen":
+                        line += " argv=" + json.dumps([str(a) for a in (args[1] or [])][:2])
+                    parent.append(line)
+
+        sys.addaudithook(hook)  # permanent, but records only while `recording` is set
         with tempfile.TemporaryDirectory() as tmp:
             log = Path(tmp) / "audit.log"
 
@@ -423,21 +459,50 @@ class OpenAIAgentsStdioInteropTests(unittest.TestCase):
                             args["mode"] = "history"
                         await server.call_tool(name, args)
 
-            run(go())
-            events = log.read_text().splitlines() if log.exists() else []
-        # The only watched event allowed: the official MCP stdio transport diverts fd 0 by opening
-        # /dev/null READ-ONLY (mcp.server.stdio._open_stdin_diversion). No network, process, native
-        # library or other device access is permitted.
-        unexpected = []
-        for line in events:
-            parts = line.split()
-            if parts[0] == "open" and parts[1] == "/dev/null":
-                flags = int(parts[2].split("=")[1])
-                if flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND):
-                    unexpected.append(line)
-            else:
-                unexpected.append(line)
-        self.assertEqual(unexpected, [])
+            recording[0] = True
+            try:
+                run(go())
+            finally:
+                recording[0] = False
+            child = log.read_text().splitlines() if log.exists() else []
+
+        write_flags = os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND
+        unix = f"socket.__new__ family={int(__import__('socket').AF_UNIX)}"
+
+        def unexpected(lines, side):
+            out = []
+            for line in lines:
+                if line == unix:
+                    continue
+                if side == "server" and line.startswith("open /dev/null "):
+                    flags = int(line.split("flags=")[1].split()[0])
+                    if not flags & write_flags:
+                        continue
+                if side == "client" and line.startswith("subprocess.Popen argv="):
+                    if json.loads(line.split("argv=", 1)[1]) == [sys.executable, str(FIXTURE)]:
+                        continue
+                out.append(line)
+            return out
+
+        self.assertTrue(child, "the server-side audit log is empty: the hook did not run")
+        self.assertEqual(unexpected(child, "server"), [])
+        self.assertEqual(unexpected(parent, "client"), [])
+        self.assertEqual(sum(line.startswith("subprocess.Popen") for line in parent), 1)
+
+    def test_T13_audit_classifier_sees_what_the_review_named(self):
+        """Regression for the review of 1bb9468: resolver calls, process control and disguised
+        device paths are all classified (not silently ignored)."""
+        sys.path.insert(0, str(Path(__file__).parent))
+        from _audit import describe
+
+        for event, args in (("socket.gethostbyname", ("example.invalid",)), ("socket.getnameinfo", (("x", 1), 0)),
+                            ("socket.connect", (None, ("127.0.0.1", 9))), ("os.kill", (1, 9)),
+                            ("os.killpg", (1, 15)), ("subprocess.Popen", ("x", ["x"], None, None)),
+                            ("ctypes.dlopen", ("libc.so.6",)), ("open", (b"/dev/random", "rb", 0)),
+                            ("open", ("/tmp/../dev/random", "rb", 0)), ("open", ("/proc/self/environ", "r", 0))):
+            self.assertIsNotNone(describe(event, args), (event, args))
+        for event, args in (("open", ("/tmp/data.json", "r", 0)), ("import", ("json",)), ("compile", (None, "x"))):
+            self.assertIsNone(describe(event, args), (event, args))
 
     def test_T13_no_write_or_actuation_tool_exists(self):
         async def go():
@@ -470,12 +535,11 @@ class OpenAIAgentsStdioInteropTests(unittest.TestCase):
             return [await cycle(server) for _ in range(3)]
 
         before = snapshot()
-        with open(os.devnull, "w") as devnull:
-            saved, sys.stderr = sys.stderr, devnull
-            try:
-                results = run(go())
-            finally:
-                sys.stderr = saved
+        saved, sys.stderr = sys.stderr, _DEVNULL
+        try:
+            results = run(go())
+        finally:
+            sys.stderr = saved
         after = snapshot()
         self.assertEqual(len({json.dumps(r, sort_keys=True) for r in results}), 1)
         self.assertEqual(after[1], before[1], "server child processes left behind")

@@ -6,8 +6,9 @@ that a test needs and the production CLI deliberately does not expose:
 
   --revoke-after N GRANT   revoke GRANT (operator action) after N tool calls
   --max-result-bytes N     run with a smaller FabricLimits.max_result_bytes
-  --audit-log FILE         record security-relevant CPython audit events
-                           (network, process, native loading, device opens)
+  --audit-log FILE         record every security-relevant CPython audit event
+                           (all socket.*, process creation/control, native loading,
+                           device and kernel-interface opens; see _audit.py)
   --env-dump FILE          write the sorted environment variable NAMES (never values)
 
 Authorization still flows only through Session.call; nothing here grants access.
@@ -19,10 +20,6 @@ import argparse
 import json
 import os
 import sys
-
-WATCHED = ("socket.connect", "socket.bind", "socket.sendto", "socket.sendmsg", "socket.getaddrinfo",
-           "subprocess.Popen", "os.system", "os.exec", "os.posix_spawn", "os.spawn", "os.fork", "ctypes.dlopen")
-
 
 def main() -> None:
     parser = argparse.ArgumentParser()
@@ -37,15 +34,15 @@ def main() -> None:
         with open(args.env_dump, "w", encoding="utf-8") as handle:
             json.dump(sorted(os.environ), handle)
     if args.audit_log:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from _audit import describe
+
         log = open(args.audit_log, "a", encoding="utf-8", buffering=1)  # opened before the hook
 
         def hook(event: str, hook_args: tuple) -> None:
-            if event.startswith(WATCHED) or (event == "open" and isinstance(hook_args[0], str)
-                                              and hook_args[0].startswith(("/dev/", "/sys/class/net"))):
-                if event == "open":
-                    log.write(f"open {hook_args[0]} flags={hook_args[2]} mode={hook_args[1]}\n")
-                else:
-                    log.write(event + "\n")
+            line = describe(event, hook_args)
+            if line is not None:
+                log.write(line + "\n")
 
         sys.addaudithook(hook)
 

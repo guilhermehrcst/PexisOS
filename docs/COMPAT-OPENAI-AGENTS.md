@@ -81,16 +81,23 @@ Local runs on Linux x86_64 with CPython. Command: `PYTHONPATH=src python tests/c
 | T07 | schemas_and_cursor | The published schemas equal `tool_specs()` exactly. A real `next_cursor` round trip works. Invalid cursors and `mode=latest` with `limit` are rejected. Interoperability issues I1 and I2 are pinned by tests. |
 | T08 | freshness_and_quality | The stale service shows `stale=true, current=false`, and its assessment is `stale` with `kind: inference`. Across the full vehicle history (paged), 17 `unknown` records have an empty payload or an `out_of_range` flag. |
 | T09 | large_and_nonfinite | A 50-item page is ≤ 256 KiB. An over-budget result (fixture `--max-result-bytes 200`) returns `internal_error` with no structured content. All assessment JSON parses with NaN and Infinity rejected. The non-finite abstention path is verified in the core layer (`tests/test_fabric_final_review.py`), because the contract prevents it over the demo. |
-| T10 | error_sanitization | Errors for hostile arguments, an unknown tool and an unknown signal never contain the markers, paths, `Traceback`, the source path or the canary value. The server process environment has no host canary and no `*KEY*`, `*TOKEN*` or `*SECRET*` names: the stdio transport forwards only its allowlist plus the explicit `env`. |
+| T10 | error_sanitization | Errors for hostile arguments, an unknown tool and an unknown signal never contain the markers, paths, `Traceback`, the source path or the canary value. The server process environment is asserted **exactly**: the client's explicit `PYTHONPATH`, `PYTHONNOUSERSITE` and `PATH`, plus the MCP stdio transport's own inheritance allowlist as present on the host (`mcp.client.stdio.DEFAULT_INHERITED_ENV_VARS`: here `HOME`, `SHELL`, `TERM`), plus `LC_CTYPE` when the child interpreter performs PEP 538 locale coercion. Nothing else, and no host canary. |
 | T11 | isolation | Two concurrent SDK sessions (guest and analyst, separate processes): the guest's view is unchanged by the analyst's parallel reads, and every item belongs to the requested entity. |
 | T12 | replay_determinism | Two fresh server processes give byte-identical results for 5 calls. |
-| T13 | negative_hardware | A CPython audit hook in the server process records no `socket.connect`, `bind`, `sendto` or `getaddrinfo`, no `subprocess`, `exec`, `fork` or `spawn`, and no `ctypes` during every tool. The only watched event is the MCP stdio transport opening `/dev/null` **read-only** to divert fd 0 (see I6). Write, transmit, execute, scan and OBD tools do not exist (`unknown_tool`). |
+| T13 | negative_hardware | CPython audit hooks in **both** the server and the client process record every event in these families: all `socket.*`; process creation and control (`subprocess`, `exec`, `spawn`, `fork`, `kill`, `killpg`); `ctypes`; and opens whose *normalized* path (bytes decoded, `..` resolved) is under `/dev`, `/sys` or `/proc`. The hooks run while a session calls every tool. Only these measured events are allowed: <ul><li>an AF_UNIX `socket.__new__` in both processes (asyncio's self-pipe);</li><li>`/dev/null` opened **read-only** in the server (I6);</li><li>exactly one `subprocess.Popen` in the client, whose argv is the configured server.</li></ul> Write, transmit, execute, scan and OBD tools do not exist (`unknown_tool`). |
 | T14 | lifecycle | Three connect, call, cleanup cycles on one `MCPServerStdio`: identical results, no leftover child processes, no file-descriptor growth in the client. |
 | T15 | no_runtime_dependency | The core imports, and runs the demo, in a clean interpreter without loading `agents`, `openai`, `codex`, `mcp` or `anthropic`. No file in `src/` imports a provider SDK (AST check). |
 
 Mutation checks, run during development and not committed:
 - **Transport bypass.** A transport that bypasses `Session.call` made 5 tests fail: T05, T06, T07, T09 and T13.
 - **Network access.** A server that opens a TCP connection during `tools/list` made T13 fail, with the log `socket.getaddrinfo`, `socket.connect`.
+- **Review of `1bb9468`.** After the fix, T13 fails on each of:
+  - `socket.gethostbyname` in the server;
+  - `os.kill` in the server;
+  - `open(b"/tmp/../dev/urandom")` in the server;
+  - a client-side `getaddrinfo`.
+
+  The previous watcher missed the first three, and it never audited the client.
 
 ## Interoperability findings
 
@@ -107,7 +114,7 @@ Mutation checks, run during development and not committed:
 
 - **Authorization is server-side only** (`Session.call`: deny by default, per principal, per entity, per capability, with expiry and revocation). SDK tool filters, `require_approval` and tool guardrails are client-side conveniences and are never treated as authorization.
 - **The principal comes from the launch configuration** (`--principal`), never from tool arguments or model output.
-- **The child environment is explicit.** The client passes only `PYTHONPATH`, `PYTHONNOUSERSITE` and `PATH`. Host credentials are not forwarded (verified by T10).
+- **The child environment is known exactly.** The client passes `PYTHONPATH`, `PYTHONNOUSERSITE` and `PATH`. The MCP stdio transport adds its own inheritance allowlist (`HOME`, `LOGNAME`, `SHELL`, `TERM` and `USER` on POSIX, when set on the host), and the child interpreter may add `LC_CTYPE` (PEP 538). T10 asserts this exact set, so any other host variable, including credentials, is never forwarded.
 - **Local stdio only.** No hosted MCP, no HTTP or SSE transport, no Responses-API hosted tools, and no outbound network in the tests.
 - **The fixture server is test-only.** It exposes operator-side knobs (revoke after N calls, a smaller result limit, an audit log, an environment-name dump) that the production CLI deliberately lacks.
 - **The Codex references were read for design practice only:** per-call authority and version-pinned conformance baselines. Nothing was adopted from them, specifically:
