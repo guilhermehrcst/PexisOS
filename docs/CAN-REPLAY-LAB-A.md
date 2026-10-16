@@ -90,13 +90,22 @@ no run time. Outputs are byte-identical across runs; across Python 3.11-3.13 onl
 
 **Commit protocol.** Each destination's directory is resolved once, the way the kernel
 resolves it (a symlink before `..`), and that one directory is used for the temporary file,
-the rename and the fsync. Both files are written to temporary files there and fsync'ed. An
+the rename and the fsync. The directory must be owned by the user (or root) and not writable
+by other users unless it has the sticky bit (exit 2 otherwise): the lab does not defend against
+another user replacing its temporary files, it refuses such a directory. Both files are written
+to temporary files there, given their final mode **on the descriptor** (`fchmod`: an existing
+output keeps its mode, a new one gets 0o666 minus the umask, read from `/proc/self/status`
+without changing the process umask, or 0o600 where that is unavailable) and fsync'ed. An
 existing summary is removed and **its directory fsync'ed before the records are committed**,
 even if the files live in different directories. Records are then renamed into place and
-their directory fsync'ed; the summary is renamed last and its directory fsync'ed. **Every
+their directory fsync'ed; the summary is renamed last and its directory fsync'ed. Each rename
+moves only the inode this run wrote: the entry is checked by inode before and after the rename
+(relative to a directory descriptor), and a substituted entry fails the run with exit 1. **Every
 directory fsync is required** (POSIX): if one fails, the run fails with exit 1, and a summary
-that the failing run had already renamed into place is removed again, so a failure never
-leaves a success marker. Windows is not a supported platform for the lab: there the directory
+that the failing run had already renamed into place is removed again. If that removal or its
+fsync also fails, the error message says so and the run is still a failure: after a crash the
+summary may then reappear. Records are always durable before the summary is renamed, so a
+summary that reappears still matches the records it describes. Windows is not a supported platform for the lab: there the directory
 fsync is skipped and durability is not claimed. Two-file atomicity is not claimed: **the
 summary is the commit marker**. A records file without a summary whose `records.sha256`
 matches is an interrupted run. A run that fails before the commit leaves previous outputs
@@ -110,7 +119,7 @@ No temporary file is left in either case.
 |---|---|---|
 | 0 | | success |
 | 1 | `output_write_error` | destination directory missing or unwritable, disk full |
-| 2 | usage | bad arguments or limits; `--out` equal to `--summary`; an output equal to an input (also via `.`, a hard link or a symlink); two names that differ only by case or Unicode normalization in the same resolved directory (rejected on every filesystem, because a case-insensitive or normalizing filesystem would map them to one entry); an output name of `.` or `..`; an existing output that is a link, directory or device |
+| 2 | usage | bad arguments or limits; `--out` equal to `--summary`; an output equal to an input (also via `.`, a hard link or a symlink); two names that differ only by case or Unicode normalization in the same resolved directory (rejected on every filesystem, because a case-insensitive or normalizing filesystem would map them to one entry); an output name of `.` or `..`; an existing output that is a link, directory or device; an output directory owned by another user, or writable by other users without the sticky bit |
 | 3 | `decoder_unavailable` | cantools not installed |
 | 4 | `invalid_dbc` | not UTF-8, over the message or signal limits, not parseable in strict mode, or a rejected construct (section 2) |
 | 5 | frame contract | `invalid_header`, `csv_quoting`, `field_count`, `invalid_utf8`, `invalid_line` (stray CR/NUL), `invalid_timestamp`, `invalid_arbitration_id`, `invalid_extended_flag`, `arbitration_id_out_of_range`, `invalid_data_hex` |
@@ -119,7 +128,7 @@ No temporary file is left in either case.
 | 8 | `input_symlink` | an input is a symbolic link (never followed) |
 | 9 | `input_too_large`, `line_too_long` | file bytes, line length, row count, DBC size |
 | 10 | `input_changed` | an input grew past its cap, was rewritten (size, mtime or ctime differ) or replaced while read |
-| 11 | `safety_guard` | replay code attempted socket, name-resolution, process, thread, native-library, device or kernel-file (`/proc`, `/sys`) access, whether or not the refusal was caught, or left a thread running; the audit hook was refused or receives no events; an open descriptor refers to a device, a kernel control file or a non-local socket |
+| 11 | `safety_guard` | replay code attempted socket, name-resolution, process, thread, native-library, device or kernel-file (`/proc`, `/sys`) access, whether or not the refusal was caught, or left a thread running; the audit hook was refused or receives no events; an open descriptor refers to a device, a kernel control file or a non-local socket, or its target cannot be inspected; a descriptor opened during the replay and still open at its end refers to any of these |
 | 12 | `output_too_large` | the records file or the summary would exceed `--max-output-mb` (checked before the write; nothing is committed) |
 
 stderr carries `error: <code>: <message>` with an optional line number, never a path or
@@ -165,7 +174,9 @@ During a replay, `no_device_access()`:
   directory (character and block devices, FIFOs, sockets) and **anything under `/proc` or `/sys`**,
   even regular files (`/proc/sysrq-trigger`, `/sys/class/net/<iface>/...`). Paths are resolved
   first, so `//dev/null`, `/./dev/null`, a symlink or a `chdir("/proc")` do not bypass it.
-  Opening an integer descriptor is judged by what the descriptor refers to.
+  Opening an integer descriptor is judged by what the descriptor refers to. This is a check of
+  the **pathname before the kernel opens it**: a symlink swapped concurrently after the check can
+  make the kernel open something else. That is why the descriptor scan below runs again at exit.
 - **Covers thread starts on 3.11/3.12.** CPython 3.11 emits no thread-start audit event at all,
   so during the replay the guard also wraps `_thread.start_new_thread`, `threading.Thread.start`
   and threading's raw start alias. Activation, audit callbacks and finalization share one lock.
@@ -175,9 +186,12 @@ During a replay, `no_device_access()`:
   refers to a character device (other than the null device or a terminal), a block device, a file
   under `/proc` or `/sys`, a socket that is not AF_UNIX (CAN, packet, netlink, IP), or an
   unidentifiable object. If `/proc/self/fd` cannot be enumerated on Linux, the replay fails
-  with `safety_guard` (exit 11), rather than proceeding without this check. Pipes, anonymous
-  kernel objects (epoll, eventfd), AF_UNIX sockets and regular files are allowed. Descriptors
-  opened during the replay go through the audited `open` checks above.
+  with `safety_guard` (exit 11), rather than proceeding without this check, and so does a live
+  descriptor whose target cannot be read (a regular file could be a kernel control file). A
+  descriptor that disappears during the scan is simply gone. Pipes, anonymous kernel objects
+  (epoll, eventfd), AF_UNIX sockets and regular files are allowed. Before deactivation the scan
+  runs again over every descriptor that was not open at activation, judging what the kernel
+  actually opened, whatever pathname check came before.
 - **Fails the run on any violation.** A refusal fails the run with exit 11 whether or not library
   code catches it, and so does a thread started during the replay that is still alive afterwards.
 
@@ -191,6 +205,14 @@ under the guard without a refusal.
 - **Unaudited Python paths.** A direct call to the private `_posixsubprocess.fork_exec` (no audit
   event); a path opened relative to a `dir_fd` (the hook does not see the directory); references to
   raw thread-start functions saved before the replay.
+- **Pathname races.** The audited `open` check cannot see the descriptor the kernel returns. If
+  another thread or process swaps a symlink after the check, a device or kernel file opened *and
+  closed* within the replay is not detected; one still open at the end is (exit scan). The lab's
+  own inputs are not affected: they are verified on the opened descriptor (`O_NOFOLLOW`, then
+  `fstat` with the same-file and regular-file checks). Library code opening paths under directories
+  that an untrusted local actor can modify is outside the guarantee.
+- **Output directory.** Shared writable directories without the sticky bit are refused rather
+  than defended. A process running as the same user can still interfere with the outputs.
 - **Descriptor checks off Linux.** The descriptor check needs `/proc/self/fd` and
   `/proc/self/net/unix`, so it is not performed elsewhere. Socket families other than AF_UNIX are
   refused by default, and an inherited AF_UNIX socket is trusted as local IPC.
@@ -316,3 +338,20 @@ already refused `.` and `..` as existing directories.
 
 The summary's `limits` object gains `max_output_bytes`. The addition is additive, and the schema
 name `pexislink.can-replay.v1` is unchanged.
+
+## 13. Codex review of `0470737` (1 P1, 5 P2)
+
+Regressions are in `CodexReview0470737Tests` (`tests/test_canreplay.py`). Each one marked
+"fails on 0470737" was run against the `0470737` sources.
+
+| Severity | Finding | Fix | Regression test | Fails on 0470737 |
+|---|---|---|---|---|
+| P1 | A symlink swapped after the pre-open pathname check makes the kernel open a device | Exit scan of descriptors opened during the replay, judging what was really opened. Lab inputs are already descriptor-anchored. The residual race (opened and closed within the replay) and the trust boundary are documented in 5.3 | `test_symlink_swapped_after_the_pre_open_check_is_caught_by_the_descriptor_scan`; control `test_lab_inputs_are_anchored_to_the_opened_descriptor` | yes; control: no (already true) |
+| P2 | A live descriptor with an unreadable `/proc/self/fd/N` link was accepted | uncertain live descriptors fail closed (`uninspectable descriptor`); a disappeared one is distinguished | `test_live_descriptor_whose_target_cannot_be_read_fails_closed`; unit `test_a_descriptor_that_disappears_during_inspection_is_not_uncertain` | yes; unit: no |
+| P2 | A failed fsync of the marker withdrawal was suppressed | the residual state is returned and reported; documented that a reappearing summary matches the committed records | `test_failed_withdrawal_fsync_is_reported_truthfully` | yes |
+| P2 | A temporary file swapped for a symlink was chmodded and installed | `fchmod` on the descriptor; inode check before and after a directory-fd-relative rename; shared writable output directories refused (exit 2) | `test_substituted_temporary_file_is_never_chmodded_or_installed`, `test_output_directory_writable_by_other_users_is_refused` | yes |
+| P2 | `os.umask(0)` probe raced with other threads | the umask is read from `/proc/self/status` and never changed (0o600 fallback) | `test_commit_never_changes_the_process_umask`; sanity `test_concurrent_file_creation_keeps_the_process_umask` | yes; sanity: not deterministic |
+| P2 | The summary claimed "No device was accessed" | evidence-bounded notice (the lab's own code path, plus no detected guarded access, plus "not proof"); CLI description qualified | `test_summary_and_cli_make_no_categorical_no_device_claim` | yes |
+
+The summary `notice` text changes, so summaries differ from earlier versions in that field only.
+The schema name `pexislink.can-replay.v1` is unchanged.
