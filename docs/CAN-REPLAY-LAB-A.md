@@ -131,15 +131,18 @@ payload. A gate failure commits nothing.
    with exit 11 whether library code catches it or not, and so does a thread that was started
    during the replay and is still alive afterwards. The audited low-level thread-start
    events (_thread.start_new_thread and Python 3.13+ _thread.start_joinable_thread) are also
-   refused before a worker can start. Audit callbacks, guard activation, and finalization
-   share a lock, so a device classification in flight cannot complete after the guard exits.
+   refused when emitted. Because Python 3.11 may NOT emit these events, the replay guard also
+   temporarily wraps _thread.start_new_thread, threading.Thread.start and threading's raw
+   start alias, restoring them on exit. Audit callbacks, activation, and finalization share
+   a lock, so a device classification in flight completes before guard deactivation.
    Tests try these paths from synthetic decoders. In a fresh process the cantools import
    itself runs under the guard without a refusal.
 
    Not covered (documented gaps): a direct call to the private `_posixsubprocess.fork_exec`
    (no audit event); a path opened relative to a `dir_fd` (the hook does not see the
-   directory); system calls made by native code; activity of other threads after the replay
-   (other activity after guard deactivation is not controlled). While active, the guard
+   directory); system calls made by native code; pre-saved raw-thread start references
+   or native thread APIs (not covered by the Python patch); and other activity after the
+   replay (not controlled after deactivation). While active, the guard
    also refuses these events in unrelated threads of the same process. In the pinned tree, `_posixsubprocess` and
    `multiprocessing` appear nowhere; threads and name resolution appear only in python-can
    bus and interface modules (`can/bus.py`, `can/notifier.py`, `can/interfaces/...`), which run
@@ -236,7 +239,7 @@ The latest Codex review of Lab A identified four risks, addressed in this branch
 |---|---|
 | P1 | Device-path audit in flight while the guard closes: synchronization around callback classification and finalization, with a deterministic held-callback regression |
 | P1 | A growing unterminated CSV row exceeding the file budget: read and readline allocations bounded by the remaining bytes plus one lookahead byte |
-| P1 | Low-level threads absent from threading.enumerate: block both CPython raw/joinable thread-start audit events, with regression tests |
+| P1 | Low-level threads absent from threading.enumerate: audit thread-start events where emitted, plus a temporarily installed Python-level wrapper for CPython 3.11/3.12, with regression tests and documented saved-reference/native bypasses |
 | P2 | Old summary surviving a crash after new records are committed: fsync the summary directory after unlink, fail closed if unsupported, then commit records |
 
 The Fabric MCP job now explicitly sets a Bash shell with pipefail so unittest failures cannot be hidden by tee. These are defense-in-depth measures for an offline lab, not an OS sandbox. Independent re-review and CI on the final HEAD are still required before merge.
