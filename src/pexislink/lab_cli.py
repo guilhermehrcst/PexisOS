@@ -166,7 +166,7 @@ def _run(dbc: Path, frames: Path, out: Path, summary: Path, limits: ReplayLimits
             # when the two output files live on different filesystems/dirs.
             # Otherwise a power loss may resurrect a stale valid-looking
             # summary after records.commit() has become durable.
-            _fsync_directory(summary)
+            _fsync_directory(summary, required=True)
         records.commit()
         manifest_file.commit()
     except OSError as exc:  # records may already be in place without a summary: an interrupted run
@@ -250,15 +250,24 @@ class _Pending:
         self.temporary.unlink(missing_ok=True)
 
 
-def _fsync_directory(path: Path) -> None:
+def _fsync_directory(path: Path, *, required: bool = False) -> None:
+    """Sync a directory; fail closed for the pre-commit stale-marker removal.
+
+    Some platforms do not support directory fsync. During a normal output
+    rename this is best-effort, but failure to persist removal of an old
+    summary must prevent the new records from being committed.
+    """
     try:
         descriptor = os.open(os.path.dirname(os.path.abspath(path)), os.O_RDONLY)
     except OSError:
-        return  # not supported (e.g. Windows): the rename itself is still atomic
+        if required:
+            raise
+        return
     try:
         os.fsync(descriptor)
     except OSError:
-        pass
+        if required:
+            raise
     finally:
         os.close(descriptor)
 
