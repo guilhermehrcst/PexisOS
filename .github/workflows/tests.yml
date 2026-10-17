@@ -167,3 +167,33 @@ jobs:
           PYTHONPATH: src
         run: python -m unittest discover -s tests -v
 
+  open-core-boundary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Check out public source (no retained token)
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Inventory public tracked files
+        run: python scripts/ip_inventory.py --check
+      - name: Audit private-import and path boundaries
+        run: python scripts/check_open_core_boundary.py --check
+      - name: Check synthetic-only proposal against real Core contracts
+        env:
+          PYTHONPATH: src
+        run: python -m unittest discover -s tests -p 'test_evidence_proposal.py' -v
+      - name: Build test wheel (not a release)
+        run: |
+          mkdir -p "$RUNNER_TEMP/wheel"
+          python -m pip wheel --no-deps -w "$RUNNER_TEMP/wheel" .
+      - name: Inspect the test wheel archive
+        run: |
+          set -eu
+          python scripts/check_public_artifacts.py --wheel "$RUNNER_TEMP/wheel"/*.whl
