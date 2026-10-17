@@ -1,0 +1,9 @@
+{
+  "name": "pexislink-compat-codex",
+  "private": true,
+  "description": "Test-only: pinned Codex CLI (Apache-2.0) for the multi-client compatibility lab. Not a PexisLink dependency.",
+  "license": "UNLICENSED",
+  "dependencies": {
+    "@openai/codex": "0.160.0"
+  }
+}

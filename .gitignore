@@ -224,3 +224,6 @@ __marimo__/
 /data/
 /datasets/
 /local-data/
+
+# Test-only Codex CLI install for the compatibility lab
+requirements/compat-codex/node_modules/

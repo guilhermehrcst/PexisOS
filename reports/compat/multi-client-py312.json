@@ -1,0 +1,698 @@
+{
+  "clients": {
+    "claude-agent-sdk": {
+      "cases": {
+        "authorized_query": {
+          "ids": [],
+          "status": "NOT_RUN"
+        },
+        "configured_vs_executed": {
+          "ids": [],
+          "status": "NOT_RUN"
+        },
+        "denied_access": {
+          "ids": [],
+          "status": "NOT_RUN"
+        },
+        "determinism": {
+          "ids": [],
+          "status": "NOT_RUN"
+        },
+        "discover_five_tools": {
+          "ids": [],
+          "status": "NOT_RUN"
+        },
+        "error_sanitization": {
+          "ids": [],
+          "status": "NOT_RUN"
+        },
+        "expired_and_revoked": {
+          "ids": [],
+          "status": "NOT_RUN"
+        },
+        "forged_identity": {
+          "ids": [],
+          "status": "NOT_RUN"
+        },
+        "initialize": {
+          "ids": [],
+          "status": "NOT_RUN"
+        },
+        "no_write_tools_no_effects": {
+          "ids": [],
+          "status": "NOT_RUN"
+        },
+        "process_shutdown": {
+          "ids": [],
+          "status": "NOT_RUN"
+        },
+        "schemas_and_pagination": {
+          "ids": [],
+          "status": "NOT_RUN"
+        },
+        "session_isolation": {
+          "ids": [],
+          "status": "NOT_RUN"
+        }
+      },
+      "executed": false,
+      "interface": "claude_agent_sdk (query / ClaudeSDKClient)",
+      "limitations": [],
+      "reason": "every documented entry point starts a model turn, which needs an Anthropic credential and billable model calls; no authorized, reproducible, credential-free test is possible",
+      "summary": {
+        "FAIL": 0,
+        "NOT_RUN": 13,
+        "NOT_SUPPORTED": 0,
+        "PASS": 0
+      },
+      "version": null
+    },
+    "claude-code": {
+      "cases": {
+        "authorized_query": {
+          "ids": [
+            "K08"
+          ],
+          "status": "NOT_RUN"
+        },
+        "configured_vs_executed": {
+          "ids": [
+            "K01",
+            "K02",
+            "K03",
+            "K04"
+          ],
+          "status": "PASS"
+        },
+        "denied_access": {
+          "ids": [
+            "K08"
+          ],
+          "status": "NOT_RUN"
+        },
+        "determinism": {
+          "ids": [
+            "K08"
+          ],
+          "status": "NOT_RUN"
+        },
+        "discover_five_tools": {
+          "ids": [
+            "K07"
+          ],
+          "status": "NOT_RUN"
+        },
+        "error_sanitization": {
+          "ids": [
+            "K08"
+          ],
+          "status": "NOT_RUN"
+        },
+        "expired_and_revoked": {
+          "ids": [
+            "K08"
+          ],
+          "status": "NOT_RUN"
+        },
+        "forged_identity": {
+          "ids": [
+            "K08"
+          ],
+          "status": "NOT_RUN"
+        },
+        "initialize": {
+          "ids": [
+            "K02"
+          ],
+          "status": "PASS"
+        },
+        "no_write_tools_no_effects": {
+          "ids": [
+            "K02",
+            "K08"
+          ],
+          "status": "NOT_RUN"
+        },
+        "process_shutdown": {
+          "ids": [
+            "K06"
+          ],
+          "status": "PASS"
+        },
+        "schemas_and_pagination": {
+          "ids": [
+            "K08"
+          ],
+          "status": "NOT_RUN"
+        },
+        "session_isolation": {
+          "ids": [
+            "K08"
+          ],
+          "status": "NOT_RUN"
+        }
+      },
+      "executed": true,
+      "failures": [],
+      "integrity_errors": [],
+      "interface": "claude mcp add/get/list (configuration and health check only), no model calls",
+      "limitations": [
+        "proprietary: never installed by this repository or CI; local runs only",
+        "health check only: tools are listed and called only inside a model turn (K07, K08 NOT_RUN)",
+        "I7 the client's environment is passed to stdio servers (K05)"
+      ],
+      "matrix": {
+        "K01": {
+          "not_run": 0,
+          "not_supported": 0,
+          "passed": 1,
+          "reasons": [],
+          "status": "PASS",
+          "tests": 1
+        },
+        "K02": {
+          "not_run": 0,
+          "not_supported": 0,
+          "passed": 1,
+          "reasons": [],
+          "status": "PASS",
+          "tests": 1
+        },
+        "K03": {
+          "not_run": 0,
+          "not_supported": 0,
+          "passed": 1,
+          "reasons": [],
+          "status": "PASS",
+          "tests": 1
+        },
+        "K04": {
+          "not_run": 0,
+          "not_supported": 0,
+          "passed": 1,
+          "reasons": [],
+          "status": "PASS",
+          "tests": 1
+        },
+        "K05": {
+          "not_run": 0,
+          "not_supported": 0,
+          "passed": 1,
+          "reasons": [],
+          "status": "PASS",
+          "tests": 1
+        },
+        "K06": {
+          "not_run": 0,
+          "not_supported": 0,
+          "passed": 1,
+          "reasons": [],
+          "status": "PASS",
+          "tests": 1
+        },
+        "K07": {
+          "not_run": 1,
+          "not_supported": 0,
+          "passed": 0,
+          "reasons": [
+            "not_run: Claude Code exposes MCP tool listing and tool calls only inside a model turn, which needs authentication and billable model calls; this case is covered for the same server by the Codex and OpenAI Agents SDK suites, not by Claude Code"
+          ],
+          "status": "NOT_RUN",
+          "tests": 1
+        },
+        "K08": {
+          "not_run": 1,
+          "not_supported": 0,
+          "passed": 0,
+          "reasons": [
+            "not_run: Claude Code exposes MCP tool listing and tool calls only inside a model turn, which needs authentication and billable model calls; this case is covered for the same server by the Codex and OpenAI Agents SDK suites, not by Claude Code"
+          ],
+          "status": "NOT_RUN",
+          "tests": 1
+        }
+      },
+      "required_errors": [],
+      "summary": {
+        "FAIL": 0,
+        "NOT_RUN": 2,
+        "NOT_SUPPORTED": 0,
+        "PASS": 6
+      },
+      "version": "2.1.301 (Claude Code)"
+    },
+    "codex-cli": {
+      "cases": {
+        "authorized_query": {
+          "ids": [
+            "C04"
+          ],
+          "status": "PASS"
+        },
+        "configured_vs_executed": {
+          "ids": [
+            "C02"
+          ],
+          "status": "PASS"
+        },
+        "denied_access": {
+          "ids": [
+            "C05"
+          ],
+          "status": "PASS"
+        },
+        "determinism": {
+          "ids": [
+            "C11"
+          ],
+          "status": "PASS"
+        },
+        "discover_five_tools": {
+          "ids": [
+            "C03"
+          ],
+          "status": "PASS"
+        },
+        "error_sanitization": {
+          "ids": [
+            "C10"
+          ],
+          "status": "PASS"
+        },
+        "expired_and_revoked": {
+          "ids": [
+            "C07"
+          ],
+          "status": "PASS"
+        },
+        "forged_identity": {
+          "ids": [
+            "C06"
+          ],
+          "status": "PASS"
+        },
+        "initialize": {
+          "ids": [
+            "C01"
+          ],
+          "status": "PASS"
+        },
+        "no_write_tools_no_effects": {
+          "ids": [
+            "C12"
+          ],
+          "status": "PASS"
+        },
+        "process_shutdown": {
+          "ids": [
+            "C13"
+          ],
+          "status": "PASS"
+        },
+        "schemas_and_pagination": {
+          "ids": [
+            "C09"
+          ],
+          "status": "PASS"
+        },
+        "session_isolation": {
+          "ids": [
+            "C08"
+          ],
+          "status": "PASS"
+        }
+      },
+      "executed": true,
+      "failures": [],
+      "integrity_errors": [],
+      "interface": "codex app-server JSON-RPC (mcpServerStatus/list, mcpServer/tool/call) and codex mcp; no turn, no model calls",
+      "limitations": [
+        "app-server is marked experimental by Codex",
+        "the negotiated MCP protocol version is not exposed (C01 sub-check NOT_SUPPORTED)",
+        "Codex is native code: client-side effects are checked through its log, not an audit hook",
+        "startup plugin/app sync features reach the network unless disabled; the suite disables them and blocks egress with an unroutable proxy"
+      ],
+      "matrix": {
+        "C01": {
+          "not_run": 0,
+          "not_supported": 1,
+          "passed": 1,
+          "reasons": [
+            "not_supported: Codex app-server reports serverInfo and capabilities, but no public request exposes the negotiated MCP protocol version"
+          ],
+          "status": "PASS",
+          "tests": 2
+        },
+        "C02": {
+          "not_run": 0,
+          "not_supported": 0,
+          "passed": 1,
+          "reasons": [],
+          "status": "PASS",
+          "tests": 1
+        },
+        "C03": {
+          "not_run": 0,
+          "not_supported": 0,
+          "passed": 1,
+          "reasons": [],
+          "status": "PASS",
+          "tests": 1
+        },
+        "C04": {
+          "not_run": 0,
+          "not_supported": 0,
+          "passed": 1,
+          "reasons": [],
+          "status": "PASS",
+          "tests": 1
+        },
+        "C05": {
+          "not_run": 0,
+          "not_supported": 0,
+          "passed": 1,
+          "reasons": [],
+          "status": "PASS",
+          "tests": 1
+        },
+        "C06": {
+          "not_run": 0,
+          "not_supported": 0,
+          "passed": 1,
+          "reasons": [],
+          "status": "PASS",
+          "tests": 1
+        },
+        "C07": {
+          "not_run": 0,
+          "not_supported": 0,
+          "passed": 2,
+          "reasons": [],
+          "status": "PASS",
+          "tests": 2
+        },
+        "C08": {
+          "not_run": 0,
+          "not_supported": 0,
+          "passed": 1,
+          "reasons": [],
+          "status": "PASS",
+          "tests": 1
+        },
+        "C09": {
+          "not_run": 0,
+          "not_supported": 0,
+          "passed": 1,
+          "reasons": [],
+          "status": "PASS",
+          "tests": 1
+        },
+        "C10": {
+          "not_run": 0,
+          "not_supported": 0,
+          "passed": 1,
+          "reasons": [],
+          "status": "PASS",
+          "tests": 1
+        },
+        "C11": {
+          "not_run": 0,
+          "not_supported": 0,
+          "passed": 1,
+          "reasons": [],
+          "status": "PASS",
+          "tests": 1
+        },
+        "C12": {
+          "not_run": 0,
+          "not_supported": 0,
+          "passed": 1,
+          "reasons": [],
+          "status": "PASS",
+          "tests": 1
+        },
+        "C13": {
+          "not_run": 0,
+          "not_supported": 0,
+          "passed": 1,
+          "reasons": [],
+          "status": "PASS",
+          "tests": 1
+        }
+      },
+      "required_errors": [],
+      "summary": {
+        "FAIL": 0,
+        "NOT_RUN": 0,
+        "NOT_SUPPORTED": 0,
+        "PASS": 13
+      },
+      "version": "codex-cli 0.160.0"
+    },
+    "openai-agents": {
+      "cases": {
+        "authorized_query": {
+          "ids": [
+            "T03"
+          ],
+          "status": "PASS"
+        },
+        "configured_vs_executed": {
+          "ids": [
+            "T03"
+          ],
+          "status": "PASS"
+        },
+        "denied_access": {
+          "ids": [
+            "T04"
+          ],
+          "status": "PASS"
+        },
+        "determinism": {
+          "ids": [
+            "T12"
+          ],
+          "status": "PASS"
+        },
+        "discover_five_tools": {
+          "ids": [
+            "T02"
+          ],
+          "status": "PASS"
+        },
+        "error_sanitization": {
+          "ids": [
+            "T10"
+          ],
+          "status": "PASS"
+        },
+        "expired_and_revoked": {
+          "ids": [
+            "T06"
+          ],
+          "status": "PASS"
+        },
+        "forged_identity": {
+          "ids": [
+            "T05"
+          ],
+          "status": "PASS"
+        },
+        "initialize": {
+          "ids": [
+            "T01"
+          ],
+          "status": "PASS"
+        },
+        "no_write_tools_no_effects": {
+          "ids": [
+            "T13"
+          ],
+          "status": "PASS"
+        },
+        "process_shutdown": {
+          "ids": [
+            "T14"
+          ],
+          "status": "PASS"
+        },
+        "schemas_and_pagination": {
+          "ids": [
+            "T07"
+          ],
+          "status": "PASS"
+        },
+        "session_isolation": {
+          "ids": [
+            "T11"
+          ],
+          "status": "PASS"
+        }
+      },
+      "executed": true,
+      "failures": [],
+      "integrity_errors": [],
+      "interface": "agents.mcp.MCPServerStdio (Python SDK), no model calls",
+      "limitations": [
+        "I1 strict schema conversion unsatisfiable for read_observations mode=latest",
+        "I2 null for optional arguments is rejected",
+        "I3 server_initialize_result is None",
+        "I4 duplicate tool names across servers need include_server_in_tool_names",
+        "I5 errors reach the model as text",
+        "I6 /dev/null opened read-only by the stdio transport"
+      ],
+      "matrix": {
+        "T01": {
+          "not_run": 0,
+          "not_supported": 0,
+          "passed": 1,
+          "reasons": [],
+          "status": "PASS",
+          "tests": 1
+        },
+        "T02": {
+          "not_run": 0,
+          "not_supported": 0,
+          "passed": 2,
+          "reasons": [],
+          "status": "PASS",
+          "tests": 2
+        },
+        "T03": {
+          "not_run": 0,
+          "not_supported": 0,
+          "passed": 1,
+          "reasons": [],
+          "status": "PASS",
+          "tests": 1
+        },
+        "T04": {
+          "not_run": 0,
+          "not_supported": 0,
+          "passed": 1,
+          "reasons": [],
+          "status": "PASS",
+          "tests": 1
+        },
+        "T05": {
+          "not_run": 0,
+          "not_supported": 0,
+          "passed": 1,
+          "reasons": [],
+          "status": "PASS",
+          "tests": 1
+        },
+        "T06": {
+          "not_run": 0,
+          "not_supported": 0,
+          "passed": 2,
+          "reasons": [],
+          "status": "PASS",
+          "tests": 2
+        },
+        "T07": {
+          "not_run": 0,
+          "not_supported": 0,
+          "passed": 4,
+          "reasons": [],
+          "status": "PASS",
+          "tests": 4
+        },
+        "T08": {
+          "not_run": 0,
+          "not_supported": 0,
+          "passed": 1,
+          "reasons": [],
+          "status": "PASS",
+          "tests": 1
+        },
+        "T09": {
+          "not_run": 0,
+          "not_supported": 0,
+          "passed": 2,
+          "reasons": [],
+          "status": "PASS",
+          "tests": 2
+        },
+        "T10": {
+          "not_run": 0,
+          "not_supported": 0,
+          "passed": 2,
+          "reasons": [],
+          "status": "PASS",
+          "tests": 2
+        },
+        "T11": {
+          "not_run": 0,
+          "not_supported": 0,
+          "passed": 1,
+          "reasons": [],
+          "status": "PASS",
+          "tests": 1
+        },
+        "T12": {
+          "not_run": 0,
+          "not_supported": 0,
+          "passed": 1,
+          "reasons": [],
+          "status": "PASS",
+          "tests": 1
+        },
+        "T13": {
+          "not_run": 0,
+          "not_supported": 0,
+          "passed": 3,
+          "reasons": [],
+          "status": "PASS",
+          "tests": 3
+        },
+        "T14": {
+          "not_run": 0,
+          "not_supported": 0,
+          "passed": 1,
+          "reasons": [],
+          "status": "PASS",
+          "tests": 1
+        },
+        "T15": {
+          "not_run": 0,
+          "not_supported": 0,
+          "passed": 2,
+          "reasons": [],
+          "status": "PASS",
+          "tests": 2
+        }
+      },
+      "required_errors": [],
+      "summary": {
+        "FAIL": 0,
+        "NOT_RUN": 0,
+        "NOT_SUPPORTED": 0,
+        "PASS": 15
+      },
+      "version": "0.22.3"
+    }
+  },
+  "command": "PYTHONPATH=src python tests/compat/run_clients.py",
+  "environment": {
+    "credentials": "none",
+    "git_commit": "043771a43148727e0ff21178a88c44ebc1bd73c2",
+    "implementation": "CPython",
+    "model_calls": 0,
+    "platform": "Linux-x86_64",
+    "python": "3.12.3",
+    "server_latest_mcp_protocol": "2026-07-28",
+    "server_packages": {
+      "mcp": "2.2.0",
+      "mcp-types": "2.2.0"
+    }
+  },
+  "schema": "pexislink.compatibility.multi_client.v0",
+  "server": "pexislink fabric mcp-stdio (+ tests/compat/_fixture_server.py)",
+  "statuses": {
+    "FAIL": "a test failed or errored",
+    "NOT_RUN": "needs a client, credential or model call that is not available",
+    "NOT_SUPPORTED": "the client's public interface cannot express the check",
+    "PASS": "every test that ran passed"
+  }
+}
