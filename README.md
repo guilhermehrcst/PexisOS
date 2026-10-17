@@ -150,3 +150,17 @@ Unknown or duplicate columns are rejected.
 Apache-2.0. No runtime dependencies; tests use only the standard library. No
 real telemetry or third-party data is included: all benchmark data is
 generated deterministically by `pexislink synth`.
+
+## Open Core source/IP safeguards (D1)
+
+The Apache-2.0 public Core keeps its existing offline functionality. See the
+[open-core boundary architecture](docs/superpowers/specs/2026-10-16-pexisos-open-core-proprietary-boundary-design.md),
+[public-source IP review register](docs/ip/OPEN-CORE-IP-REGISTER.md) and
+[synthetic-only, **not implemented** evidence proposal](docs/ip/OFFLINE-EVIDENCE-EXCHANGE-PROPOSAL.md).
+Repository checks are `python scripts/ip_inventory.py --check` and
+`python scripts/check_open_core_boundary.py --check`; a test wheel is inspected
+with `python scripts/check_public_artifacts.py --wheel PATH`. CI runs the
+`open-core-boundary` job without changing production runtime behavior.
+Passing CI is **not** evidence of confirmed IP ownership, legal compliance,
+absence of all secrets, release authenticity or a complete security audit.
+Human IP/legal signoff remains pending.
