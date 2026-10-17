@@ -1,0 +1,52 @@
+{
+  "content_sha256": "2777f345f6ad464f936b633b285d1550fcb7c1c2f90475dc33ad7b0b31b66b14",
+  "mode": "synthetic_only",
+  "observations": [
+    {
+      "entity_id": "demo:vehicle:synthetic-01",
+      "event_id": "vehicle-01-2-000000",
+      "kind": "vehicle.can_signals",
+      "observed_at": "2026-01-01T03:00:00Z",
+      "payload": {
+        "coolant_temp_c": 92.0,
+        "engine_speed_rpm": 1517.0
+      },
+      "provenance": {
+        "generator": "pexislink.fabric.adapters.vehicle",
+        "license": "project_original",
+        "seed": 2,
+        "source": "synthetic_fixture"
+      },
+      "quality": {
+        "flags": [],
+        "status": "observed"
+      },
+      "received_at": "2026-01-01T03:00:00.200000Z",
+      "schema_version": "pexislink.observation.v0",
+      "source": "synthetic:vehicle-can-v0"
+    }
+  ],
+  "operator_declaration": {
+    "basis": "unverified_operator_statement",
+    "intent": "manually validate an offline synthetic-only handoff",
+    "verification": "not_authenticated"
+  },
+  "producer": {
+    "component": "agent-fabric-synthetic-vehicle-adapter",
+    "name": "pexislink",
+    "version": "prototype-v0.1"
+  },
+  "provenance": {
+    "generator": "pexislink.fabric.adapters.vehicle",
+    "license": "project_original",
+    "seed": 2,
+    "source": "synthetic_fixture"
+  },
+  "purpose": "offline-contract-validation",
+  "schema_version": "pexisos.evidence-export.proposal.v0",
+  "scope": {
+    "entity_ids": [
+      "demo:vehicle:synthetic-01"
+    ]
+  }
+}
