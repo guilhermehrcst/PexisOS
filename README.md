@@ -50,6 +50,12 @@ interface or transmits. The decoder (cantools) is optional:
 `pip install --require-hashes -r requirements/lab-can.txt`. See
 [docs/CAN-REPLAY-LAB-A.md](docs/CAN-REPLAY-LAB-A.md).
 
+## Console V1 (offline demonstration UI)
+
+`apps/console` is the first PexisOS interface: Lab 001 · Smart Fan in Evidence Diagnostic mode.
+It runs entirely in the browser on **synthetic** data, makes no network requests and calls no AI
+model. It is independent of the Python package. See [apps/console/README.md](apps/console/README.md).
+
 ## Agent Fabric v0.1 (experimental, read-only)
 
 A provider-neutral layer through which AI agents can read **authorized**,

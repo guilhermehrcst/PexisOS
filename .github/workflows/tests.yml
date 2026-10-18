@@ -167,3 +167,32 @@ jobs:
           PYTHONPATH: src
         run: python -m unittest discover -s tests -v
 
+
+  console:
+    # PexisOS Console V1 (apps/console): offline, synthetic-data UI. Network is used only by npm to
+    # fetch the lockfile-pinned packages (integrity-checked, install scripts disabled). The build is
+    # then checked for external resources and browser network APIs.
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    defaults:
+      run:
+        working-directory: apps/console
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install the lockfile-pinned dependencies (no install scripts)
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Type-check (TypeScript strict)
+        run: npm run typecheck
+      - name: Unit and interface tests
+        run: npm test
+      - name: Production build
+        run: npm run build
+      - name: Offline guard (no external resources, no network APIs in the build)
+        run: npm run check:offline
