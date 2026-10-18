@@ -1,0 +1,108 @@
+.app {
+  min-height: 100%;
+  display: grid;
+  grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
+  grid-template-rows: var(--topbar-h) auto auto auto auto;
+  grid-template-areas:
+    "topbar topbar"
+    "sidebar main"
+    "metrics metrics"
+    "panels panels"
+    "footer footer";
+  max-width: 1600px;
+  margin: 0 auto;
+}
+.app__main { grid-area: main; min-width: 0; }
+.app__hero {
+  display: grid;
+  grid-template-columns: minmax(380px, 0.68fr) minmax(0, 1fr);
+  min-height: 446px;
+}
+.app__viz { position: relative; min-width: 0; min-height: 420px; padding: 18px 12px 8px 0; }
+
+.app__metrics {
+  grid-area: metrics;
+  display: grid;
+  grid-template-columns: 1.11fr 1.04fr 1.02fr 1fr 0.96fr;
+  gap: var(--gap);
+  padding: 2px var(--page-inset-right) 0 var(--page-inset-left);
+}
+.app__panels {
+  grid-area: panels;
+  display: grid;
+  grid-template-columns: 1.6fr 1fr 1.09fr;
+  gap: var(--gap);
+  min-height: 262px;
+  margin-top: var(--gap);
+  padding: 0 var(--page-inset-right) 0 var(--page-inset-left);
+}
+.app__panel-chart { display: flex; min-width: 0; }
+.app__panel-chart > * { flex: 1; }
+
+.app__footer {
+  grid-area: footer;
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 40px 20px var(--page-inset-left);
+  font-size: var(--fs-micro);
+  color: var(--text-3);
+}
+.app__footer-synthetic { color: var(--text-4); }
+
+/* ---- laptop: keep the composition, tighten the hero ---- */
+@media (max-width: 1279px) {
+  /* The labelled model needs ~680 px; below that it moves under the text instead of overlapping it. */
+  .app__hero { grid-template-columns: 1fr; }
+  .app__viz { height: 460px; padding-right: 18px; }
+  .topbar__device, .topbar__mode { padding: 0 16px; }
+  .topbar__device-name { padding-right: 8px; }
+  .topbar__search { width: 230px; }
+  .app__metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .app__panels { grid-template-columns: repeat(2, minmax(0, 1fr)); height: auto; }
+  .app__panels > :first-child { grid-column: 1 / -1; height: 262px; }
+  .app__panels > :not(:first-child) { min-height: 250px; }
+}
+
+/* ---- tablet: icon rail, stacked hero ---- */
+@media (max-width: 1023px) {
+  :root { --sidebar-w: 76px; --page-inset-left: 18px; }
+  .sidebar__item span:not(.sr-only) { display: none; }
+  .sidebar__item { justify-content: center; padding: 0; }
+  .topbar__brand { padding-left: 20px; }
+  .logo__word { display: none; }
+  .topbar__device-name { padding-right: 4px; }
+  .topbar__search { width: 200px; }
+  .topbar__notify { margin-left: 12px; }
+  .app__viz { height: 440px; }
+  .app__metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .app__panels { grid-template-columns: 1fr; }
+}
+
+/* ---- phone ---- */
+@media (max-width: 719px) {
+  :root { --fs-display: 36px; --page-inset-right: 12px; --page-inset-left: 12px; }
+  .app { grid-template-columns: 1fr; grid-template-areas: "topbar" "sidebar" "main" "metrics" "panels" "footer"; }
+  .sidebar { border-right: 0; padding: 8px 12px; overflow-x: auto; }
+  .sidebar ul { display: flex; gap: 6px; }
+  .sidebar__item { height: 40px; padding: 0 12px; }
+  .topbar { padding-right: 12px; }
+  .topbar__brand { width: auto; padding-left: 12px; }
+  .topbar__device, .topbar__mode { padding: 0 8px; }
+  .topbar__device-name, .topbar__mode-select .select__button span { display: none; }
+  .topbar__search { display: none; }
+  .topbar__avatar { width: 38px; height: 38px; margin-left: 8px; }
+  .hero { padding: 18px 12px 0; }
+  .app__viz { height: 380px; min-height: 0; padding-right: 0; overflow-x: clip; }
+  .viz__stage { inset: 0 0 52px 0; }
+  .viz__controls { top: auto; bottom: 0; right: 50%; transform: translateX(50%); grid-auto-flow: column; }
+  .hotspot--left, .hotspot--right { transform: translate(-50%, -50%); }
+  .hotspot__text { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; }
+  .hotspot__button { min-width: 0; padding: 3px; border-radius: 50%; }
+  .hotspot__detail { position: fixed; left: 12px; right: 12px; top: auto; bottom: 12px; width: auto; z-index: 60; }
+  .health__body { flex-wrap: wrap; justify-content: center; }
+  .health__list { min-width: 220px; }
+  .app__metrics { grid-template-columns: 1fr; }
+  .app__footer { justify-content: flex-start; padding: 14px 12px 20px; }
+}

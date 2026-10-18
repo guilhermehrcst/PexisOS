@@ -1,0 +1,61 @@
+.insight { display: flex; flex-direction: column; padding: 16px 18px 12px 20px; min-width: 0; }
+.insight__head { display: flex; align-items: center; gap: 12px; }
+.insight__spark { color: var(--primary); }
+.insight__chip {
+  padding: 4px 12px;
+  border-radius: 8px;
+  background: var(--primary-soft);
+  color: var(--primary);
+  font-size: var(--fs-label);
+  font-weight: 550;
+}
+.insight__menu { position: relative; margin-left: auto; }
+.insight__more { width: 32px; height: 32px; display: grid; place-items: center; border-radius: 8px; color: var(--text-2); }
+.insight__more:hover { background: var(--surface-3); color: var(--text); }
+.insight__popover {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 20;
+  display: grid;
+  min-width: 190px;
+  padding: 6px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: var(--shadow-float);
+}
+.insight__popover button { text-align: left; padding: 8px 10px; border-radius: 7px; font-size: var(--fs-body); }
+.insight__popover button:hover,
+.insight__popover button:focus-visible { background: var(--surface-3); }
+.insight__box {
+  flex: 1;
+  display: flex;
+  gap: 14px;
+  margin-top: 12px;
+  padding: 14px 16px 12px 18px;
+  border-radius: 12px;
+  background: linear-gradient(180deg, #f5f7fb 0%, #f2f5f9 100%);
+  box-shadow: inset 0 0 0 1px #edf1f6;
+  min-height: 0;
+}
+.insight__doc { color: var(--text-2); margin-top: 8px; flex: none; }
+.insight__text { font-size: var(--fs-label); line-height: 1.5; color: var(--text-2); min-width: 0; }
+.insight__text p { margin: 0; }
+.insight__text b { color: var(--text); font-weight: 600; }
+.insight__muted { color: var(--text-3); margin-top: 2px !important; }
+.insight__kinds { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 10px; }
+.insight__kind {
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  font-size: 10.5px;
+  font-weight: 550;
+  background: var(--surface-3);
+  color: var(--text-2);
+}
+.insight__kind--measured { background: var(--primary-soft); color: var(--primary); }
+.insight__kind--inferred { background: #f1effd; color: #6452d6; }
+.insight__kind--stale,
+.insight__kind--unavailable,
+.insight__kind--insufficient { background: #f1f5f9; color: var(--text-3); }
+.insight__origin { margin-left: auto; font-size: 10.5px; color: var(--text-4); }
