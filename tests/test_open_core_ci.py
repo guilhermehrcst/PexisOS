@@ -44,6 +44,36 @@ class WorkflowContractTests(unittest.TestCase):
                 self.assertIn(command, job)
         self.assertNotIn("contents: write", job)
         self.assertNotIn("secrets:", job)
+        self.assertEqual(self.bypasses(job), [])
+
+    @staticmethod
+    def bypasses(job):
+        """Ways a gate step could report success without enforcing (PR21-12)."""
+        found = []
+        if re.search(r"(?m)^\s*(?:-\s*)?continue-on-error:", job):
+            found.append("continue-on-error")
+        if re.search(r"(?m)^    if:", job):
+            found.append("job-level if")
+        if re.search(r"(?m)^\s*-?\s*if:", job):
+            found.append("step-level if")
+        if re.search(r"\|\|\s*(true|:|exit\s+0)\b", job):
+            found.append("|| true")
+        if re.search(r"(?m)^\s*set\s+\+e\b", job):
+            found.append("set +e")
+        return found
+
+    def test_bypass_detector_rejects_weakened_jobs(self):
+        base = "  open-core-boundary:\n    runs-on: ubuntu-latest\n    steps:\n      - run: python scripts/ip_inventory.py --check\n"
+        for weakened in (
+            base.replace("--check\n", "--check || true\n"),
+            base.replace("    steps:", "    if: ${{ false }}\n    steps:"),
+            base.replace("      - run:", "      - continue-on-error: true\n        run:"),
+            base.replace("      - run:", "      - if: false\n        run:"),
+            base.replace("      - run: python", "      - run: |\n          set +e\n          python"),
+        ):
+            with self.subTest(job=weakened):
+                self.assertTrue(self.bypasses(self.boundary_job(weakened)))
+        self.assertEqual(self.bypasses(self.boundary_job(base)), [])
 
     def test_job_parser_does_not_count_commands_from_other_jobs(self):
         fake = "jobs:\n  unit-tests:\n    run: python scripts/ip_inventory.py --check\n"

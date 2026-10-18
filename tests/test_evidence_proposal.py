@@ -4,6 +4,7 @@ from copy import deepcopy
 import hashlib
 import json
 from pathlib import Path
+import re
 import unittest
 
 from pexislink.fabric.contracts import canonical_json, parse_observation
@@ -15,6 +16,20 @@ PROPOSAL = ROOT / "docs/ip/OFFLINE-EVIDENCE-EXCHANGE-PROPOSAL.md"
 
 def bundle():
     return json.loads(EXAMPLE.read_text(encoding="utf-8"))
+
+
+_URL_SCHEME = re.compile(r"(?i)\b[a-z][a-z0-9+.-]*://")
+
+
+def remote_references(value):
+    """Every string (key or value) anywhere in the document that contains a URL scheme."""
+    if isinstance(value, str):
+        return [value] if _URL_SCHEME.search(value) else []
+    if isinstance(value, dict):
+        return [hit for key, item in value.items() for hit in remote_references(key) + remote_references(item)]
+    if isinstance(value, list):
+        return [hit for item in value for hit in remote_references(item)]
+    return []
 
 
 def digest(observations):
@@ -58,10 +73,18 @@ class ProposalTests(unittest.TestCase):
                 for v in obj:
                     walk(v)
         walk(data)
-        serialized = json.dumps(data).lower()
-        self.assertNotIn('"http://', serialized)
-        self.assertNotIn('"https://', serialized)
-        self.assertNotIn('"verified"', serialized)
+        self.assertEqual(remote_references(data), [])
+        self.assertNotIn('"verified"', json.dumps(data).lower())
+
+    def test_url_detector_finds_embedded_destinations(self):
+        """PR21-10: a URL in the middle of any string is a remote reference."""
+        for text in ("upload to https://exfil.example.invalid/drop", "see HTTP://x", "s3://bucket/key",
+                     "relay via ftp://host"):
+            with self.subTest(text=text):
+                tampered = deepcopy(bundle())
+                tampered["operator_declaration"]["intent"] = text
+                self.assertEqual(remote_references(tampered), [text])
+        self.assertEqual(remote_references({"note": "offline, no URL here: a/b"}), [])
 
     def test_proposal_is_explicitly_non_executable(self):
         body = PROPOSAL.read_text(encoding="utf-8").lower()
