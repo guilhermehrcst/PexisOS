@@ -12,8 +12,19 @@
   max-width: 1600px;
   margin: 0 auto;
 }
-.app__main { grid-area: main; min-width: 0; }
+/* main holds the hero, readings and analysis. It spans the rows beside and below the
+   sidebar and shares the page grid (subgrid), so every area keeps its place. */
+.app__main {
+  grid-column: 1 / -1;
+  grid-row: main-start / panels-end;
+  display: grid;
+  grid-template-columns: subgrid;
+  grid-template-rows: subgrid;
+  min-width: 0;
+}
 .app__hero {
+  grid-area: main;
+  min-width: 0;
   display: grid;
   grid-template-columns: minmax(380px, 0.68fr) minmax(0, 1fr);
   min-height: 446px;
@@ -80,6 +91,13 @@
   .app__panels { grid-template-columns: 1fr; }
 }
 
+/* ---- narrow tablet: the device name gives up its room first, as on phones (the
+   selector keeps its accessible name), so the top bar never overflows ---- */
+@media (max-width: 899px) {
+  .topbar__device-name { display: none; }
+  .topbar__search { width: 180px; }
+}
+
 /* ---- phone ---- */
 @media (max-width: 719px) {
   :root { --fs-display: 36px; --page-inset-right: 12px; --page-inset-left: 12px; }
@@ -105,4 +123,12 @@
   .health__list { min-width: 220px; }
   .app__metrics { grid-template-columns: 1fr; }
   .app__footer { justify-content: flex-start; padding: 14px 12px 20px; }
+}
+
+/* ---- smallest phones (WCAG reflow at 320 px): tighten the top bar spacing ---- */
+@media (max-width: 359px) {
+  .topbar { padding-right: 6px; }
+  .topbar__device, .topbar__mode { padding: 0 4px; }
+  .topbar__notify { margin-left: 4px; }
+  .topbar__avatar { margin-left: 4px; }
 }

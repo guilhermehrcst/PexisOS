@@ -80,3 +80,4 @@
 .hero__cta:active { transform: translateY(0); filter: brightness(0.97); }
 .hero__cta:focus-visible { box-shadow: var(--focus-ring), var(--shadow-button); }
 .hero__cta-chevron { margin-left: 22px; opacity: 0.95; }
+.hero__cta-note { margin: 10px 0 0; font-size: 11.5px; color: var(--text-4); }

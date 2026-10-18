@@ -1,7 +1,7 @@
 import { Activity, Gauge, Thermometer, TrendingDown, TrendingUp, Zap } from "lucide-react";
 import type { ReactNode } from "react";
 import type { MetricAssessment } from "../domain/evidence";
-import { STATE_LABEL, formatClock, formatDuration, formatNumber, formatPercent } from "../domain/evidence";
+import { STATE_LABEL, formatClock, formatDuration, formatNumber, formatPercent, isSignificantDeviation } from "../domain/evidence";
 import type { MetricId, MetricSeries } from "../domain/types";
 import { Sparkline } from "./Sparkline";
 import { StateDot } from "./StatusIndicator";
@@ -69,7 +69,7 @@ function footer(series: MetricSeries, a: MetricAssessment): ReactNode {
   }
   if (series.baseline !== undefined) {
     const dev = a.deviation ?? 0;
-    const significant = Math.abs(dev) >= 0.1;
+    const significant = isSignificantDeviation(dev);
     const Trend = dev < 0 ? TrendingDown : TrendingUp;
     return (
       <>

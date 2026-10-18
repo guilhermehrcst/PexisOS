@@ -52,24 +52,54 @@ export function latestOf(series: MetricSeries, asOf: number): Latest | null {
   return { value: last.v, t: last.t, ageMs: Math.max(0, asOf - last.t) };
 }
 
-/** Duration of the trailing run of samples for which `outside` holds (last - first, ms). */
-export function trailingRunMs(samples: readonly Sample[], outside: (v: number) => boolean): number {
+/**
+ * Duration of the trailing run of samples for which `outside` holds (last - first, ms).
+ * A gap longer than `maxGapMs` between consecutive samples ends the run: missing data is
+ * never assumed to have continued the deviation.
+ */
+export function trailingRunMs(samples: readonly Sample[], outside: (v: number) => boolean, maxGapMs = Infinity): number {
   let first: number | null = null;
   let last: number | null = null;
   for (let i = samples.length - 1; i >= 0; i--) {
     const s = samples[i];
     if (!s || s.v === null || !outside(s.v)) break;
+    if (first !== null && first - s.t > maxGapMs) break;
     first = s.t;
     if (last === null) last = s.t;
   }
   return first === null || last === null ? 0 : last - first;
 }
 
+/**
+ * Two consecutive samples further apart than 1.5 sample intervals have at least one missing
+ * reading between them. One rule for the engine, the chart and the sparklines.
+ */
+export const GAP_TOLERANCE_INTERVALS = 1.5;
+
+export function maxGapMs(sampleIntervalMs: number): number {
+  return sampleIntervalMs > 0 ? sampleIntervalMs * GAP_TOLERANCE_INTERVALS : Infinity;
+}
+
+/** A baseline is only usable when it is a positive, finite number. */
+function hasBaseline(series: MetricSeries): series is MetricSeries & { baseline: number } {
+  return series.baseline !== undefined && Number.isFinite(series.baseline) && series.baseline > 0;
+}
+
+/** Signed fraction vs baseline, or null when the metric has no usable baseline. */
+export function deviationOf(series: MetricSeries, v: number): number | null {
+  return hasBaseline(series) ? (v - series.baseline) / series.baseline : null;
+}
+
+/** True when a deviation exceeds the threshold (the one rule used everywhere). */
+export function isSignificantDeviation(deviation: number | null): boolean {
+  return deviation !== null && Math.abs(deviation) > DEVIATION_THRESHOLD;
+}
+
 function inRange(series: MetricSeries, v: number): boolean {
   return v >= series.normalRange.min && v <= series.normalRange.max;
 }
 
-export function assessMetric(series: MetricSeries, asOf: number): MetricAssessment {
+export function assessMetric(series: MetricSeries, asOf: number, sampleIntervalMs: number): MetricAssessment {
   const base = { id: series.id, deviation: null, sustainedMs: 0, inRange: null } as const;
   if (!series.sensorAvailable) {
     return { ...base, state: "unavailable", basis: "none", latest: null, summary: "Sensor unavailable: no readings reported" };
@@ -81,7 +111,7 @@ export function assessMetric(series: MetricSeries, asOf: number): MetricAssessme
     return { ...base, state: "insufficient", basis: "none", latest: null, summary: "No valid readings in the window" };
   }
   const range = inRange(series, latest.value);
-  const deviation = series.baseline === undefined ? null : (latest.value - series.baseline) / series.baseline;
+  const deviation = deviationOf(series, latest.value);
   if (latest.ageMs > STALE_AFTER_MS) {
     return {
       ...base, state: "stale", basis: "measured", latest, deviation, inRange: range,
@@ -92,13 +122,10 @@ export function assessMetric(series: MetricSeries, asOf: number): MetricAssessme
     return { ...base, state: "insufficient", basis: "measured", latest, deviation, inRange: range, summary: "Too little history to assess" };
   }
 
-  let sustainedMs: number;
-  if (series.baseline !== undefined) {
-    const baseline = series.baseline;
-    sustainedMs = trailingRunMs(valid, (v) => Math.abs(v - baseline) / baseline > DEVIATION_THRESHOLD);
-  } else {
-    sustainedMs = trailingRunMs(valid, (v) => !inRange(series, v));
-  }
+  const gap = maxGapMs(sampleIntervalMs);
+  const sustainedMs = hasBaseline(series)
+    ? trailingRunMs(valid, (v) => Math.abs(deviationOf(series, v) ?? 0) > DEVIATION_THRESHOLD, gap)
+    : trailingRunMs(valid, (v) => !inRange(series, v), gap);
   const sustained = sustainedMs >= SUSTAINED_MS;
   if (sustained) {
     const what = deviation === null ? "outside its expected range" : `${formatPercent(deviation)} vs baseline`;
@@ -150,13 +177,16 @@ export const STATE_LABEL: Readonly<Record<EvidenceState, string>> = {
 };
 
 export function assessSubsystems(m: Readonly<Record<MetricId, MetricAssessment>>): SubsystemAssessment[] {
-  const { rpm, voltage, current, vibration } = m;
+  const { rpm, voltage, current, temperature, vibration } = m;
 
   const powerState = worst(voltage.state, current.state);
   const power: SubsystemAssessment = {
     id: "powerInput", label: "Power Input", state: powerState, basis: "measured",
     confidence: powerState === "nominal" ? "high" : blocked(powerState) ? "none" : "medium",
-    status: voltage.latest && voltage.state !== "unavailable" ? `${formatNumber(voltage.latest.value, 1)} V` : STATE_LABEL[powerState],
+    // A value is shown only while it is fresh; stale or missing evidence shows its state instead.
+    status: voltage.latest && (voltage.state === "nominal" || voltage.state === "attention")
+      ? `${formatNumber(voltage.latest.value, 1)} V`
+      : STATE_LABEL[powerState],
     detail: powerState === "nominal" ? "Voltage and current within expected range" : `Voltage: ${voltage.summary}. Current: ${current.summary}.`,
     sources: ["voltage", "current"],
   };
@@ -164,21 +194,24 @@ export function assessSubsystems(m: Readonly<Record<MetricId, MetricAssessment>>
   const rpmSensor: SubsystemAssessment = {
     id: "rpmSensor", label: "RPM Sensor", state: rpm.state, basis: rpm.basis,
     confidence: rpm.state === "attention" ? "medium" : rpm.state === "nominal" ? "high" : "none",
-    status: rpm.state === "attention" ? "Below baseline" : rpm.state === "nominal" ? "Monitoring" : STATE_LABEL[rpm.state],
+    status: rpm.state === "attention" ? `${(rpm.deviation ?? 0) < 0 ? "Below" : "Above"} baseline` : rpm.state === "nominal" ? "Monitoring" : STATE_LABEL[rpm.state],
     detail: rpm.state === "attention" ? `Reading ${rpm.summary}. Cause not determined.` : rpm.summary,
     sources: ["rpm"],
   };
 
-  const electrical = worst(voltage.state, current.state);
-  const motorState: EvidenceState = blocked(electrical) ? "insufficient" : electrical;
+  // The motor has no sensor of its own: it is inferred from electrical draw and temperature.
+  const motorInputs = worst(voltage.state, current.state, temperature.state);
+  const motorState: EvidenceState = blocked(motorInputs) ? "insufficient" : motorInputs;
   const motor: SubsystemAssessment = {
     id: "motor", label: "Motor", state: motorState, basis: motorState === "insufficient" ? "none" : "inferred",
-    confidence: motorState === "nominal" ? "medium" : "none",
+    confidence: motorState === "nominal" ? "medium" : motorState === "attention" ? "low" : "none",
     status: motorState === "nominal" ? "OK" : STATE_LABEL[motorState],
     detail: motorState === "nominal"
-      ? "Inferred: electrical draw within range. No motor sensor; this does not explain the speed reading."
-      : "No direct motor sensor and electrical evidence is incomplete.",
-    sources: ["voltage", "current"],
+      ? "Inferred: electrical draw and temperature within range. No motor sensor; this does not explain the speed reading."
+      : motorState === "attention"
+        ? `Inferred: ${outOfRangeList(m, ["voltage", "current", "temperature"])} outside the expected range. No motor sensor; cause not determined.`
+        : "No direct motor sensor and electrical or temperature evidence is incomplete.",
+    sources: ["voltage", "current", "temperature"],
   };
 
   const bladesState: EvidenceState = blocked(vibration.state) ? "insufficient" : vibration.state;
@@ -267,11 +300,32 @@ export interface Insight {
   readonly lines: readonly InsightLine[];
 }
 
+const METRIC_NAME: Readonly<Record<MetricId, string>> = {
+  rpm: "fan_rpm", temperature: "temperature", voltage: "voltage", current: "current", vibration: "vibration",
+};
+
+function outOfRangeList(m: Readonly<Record<MetricId, MetricAssessment>>, ids: readonly MetricId[]): string {
+  const names = ids.filter((id) => m[id].state === "attention").map((id) => METRIC_NAME[id]);
+  return names.length ? names.join(" and ") : "an input";
+}
+
+/** What the electrical evidence actually says, so a sentence never claims more than was measured. */
+function electricalClause(m: Readonly<Record<MetricId, MetricAssessment>>): string {
+  const { voltage, current } = m;
+  if (voltage.state === "nominal" && current.state === "nominal") return "voltage and current in range";
+  if (voltage.state === "attention" || current.state === "attention") {
+    return `${outOfRangeList(m, ["voltage", "current"])} also outside the expected range`;
+  }
+  return "electrical evidence incomplete";
+}
+
 export function buildInsight(
   m: Readonly<Record<MetricId, MetricAssessment>>,
   subsystems: readonly SubsystemAssessment[],
+  rpmBaseline: number | undefined,
 ): Insight {
   const rpm = m.rpm;
+  const baselineText = rpmBaseline === undefined ? "the synthetic baseline" : `${formatNumber(rpmBaseline, 0)} RPM synthetic baseline`;
   const note = "This is not a diagnosis. It is an evidence-based observation derived from synthetic sensor data.";
   const lines: InsightLine[] = [];
 
@@ -284,12 +338,12 @@ export function buildInsight(
   }
 
   if (rpm.state === "attention" && rpm.deviation !== null) {
-    lines.unshift({ kind: "measured", text: `fan_rpm ${formatNumber(rpm.latest?.value ?? 0, 0)} RPM, ${formatPercent(rpm.deviation)} vs 1800 RPM synthetic baseline` });
+    lines.unshift({ kind: "measured", text: `fan_rpm ${formatNumber(rpm.latest?.value ?? 0, 0)} RPM, ${formatPercent(rpm.deviation)} vs ${baselineText}` });
     return {
       state: "attention",
       observation: `fan_rpm remains ${rpm.deviation < 0 ? "below" : "above"} the baseline for ${formatDuration(rpm.sustainedMs)}.`,
       status: "suspected anomaly.",
-      evidence: `sustained ${formatPercent(rpm.deviation)} deviation from the synthetic reference; voltage and current in range.`,
+      evidence: `sustained ${formatPercent(rpm.deviation)} deviation from the synthetic reference; ${electricalClause(m)}.`,
       confidence: "medium",
       note, lines,
     };
@@ -300,7 +354,7 @@ export function buildInsight(
       state: "stale",
       observation: `the RPM feed stopped reporting ${formatDuration(rpm.latest?.ageMs ?? 0)} ago.`,
       status: "cannot assess the current speed.",
-      evidence: "the last fresh RPM readings were below the baseline, but they no longer describe the present.",
+      evidence: `${staleRpmClause(rpm.deviation)}, but they no longer describe the present.`,
       confidence: "none",
       note, lines,
     };
@@ -316,6 +370,18 @@ export function buildInsight(
     };
   }
   lines.unshift({ kind: "measured", text: `fan_rpm ${formatNumber(rpm.latest?.value ?? 0, 0)} RPM, within the expected range` });
+  const others = (["temperature", "voltage", "current", "vibration"] as const).filter((id) => m[id].state === "attention");
+  if (others.length) {
+    for (const id of others) lines.splice(1, 0, { kind: "measured", text: `${METRIC_NAME[id]}: ${m[id].summary}` });
+    return {
+      state: "attention",
+      observation: `${outOfRangeList(m, others)} ${others.length > 1 ? "remain" : "remains"} outside the expected range.`,
+      status: "suspected anomaly.",
+      evidence: "sustained out-of-range readings; fan speed within the expected range. Cause not determined.",
+      confidence: "low",
+      note, lines,
+    };
+  }
   return {
     state: "nominal",
     observation: "all fresh readings stay within their expected ranges.",
@@ -324,6 +390,12 @@ export function buildInsight(
     confidence: lines.some((l) => l.kind !== "measured" && l.kind !== "inferred") ? "low" : "medium",
     note, lines,
   };
+}
+
+function staleRpmClause(deviation: number | null): string {
+  if (deviation === null) return "the last RPM readings had no usable baseline";
+  if (!isSignificantDeviation(deviation)) return "the last fresh RPM readings were within range of the baseline";
+  return `the last fresh RPM readings were ${deviation < 0 ? "below" : "above"} the baseline`;
 }
 
 /* ------------------------------------------------------------------- top level */
@@ -341,11 +413,11 @@ export interface Assessment {
 export function assess(scenario: Scenario): Assessment {
   const s = scenario.series;
   const metrics = {
-    rpm: assessMetric(s.rpm, scenario.asOf),
-    temperature: assessMetric(s.temperature, scenario.asOf),
-    voltage: assessMetric(s.voltage, scenario.asOf),
-    current: assessMetric(s.current, scenario.asOf),
-    vibration: assessMetric(s.vibration, scenario.asOf),
+    rpm: assessMetric(s.rpm, scenario.asOf, scenario.sampleIntervalMs),
+    temperature: assessMetric(s.temperature, scenario.asOf, scenario.sampleIntervalMs),
+    voltage: assessMetric(s.voltage, scenario.asOf, scenario.sampleIntervalMs),
+    current: assessMetric(s.current, scenario.asOf, scenario.sampleIntervalMs),
+    vibration: assessMetric(s.vibration, scenario.asOf, scenario.sampleIntervalMs),
   };
   const subsystems = assessSubsystems(metrics);
   const checks = evidenceChecks(metrics);
@@ -354,7 +426,7 @@ export function assess(scenario: Scenario): Assessment {
     scenario, metrics, subsystems, checks,
     coverage: { evaluated, total: checks.length, fraction: evaluated / checks.length },
     health: healthSummary(subsystems),
-    insight: buildInsight(metrics, subsystems),
+    insight: buildInsight(metrics, subsystems, s.rpm.baseline),
   };
 }
 
@@ -371,7 +443,9 @@ export function formatNumber(value: number, decimals: number): string {
 }
 
 export function formatPercent(fraction: number): string {
-  const pct = Math.round(fraction * 100);
+  if (!Number.isFinite(fraction)) return "—";
+  // Round half away from zero so +x and −x always print the same magnitude.
+  const pct = Math.sign(fraction) * Math.round(Math.abs(fraction) * 100);
   if (pct === 0) return "0%";
   return pct < 0 ? `${MINUS}${Math.abs(pct)}%` : `+${pct}%`;
 }

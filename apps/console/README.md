@@ -31,19 +31,29 @@ default:
 |---|---|
 | `/` | RPM 21% below the synthetic baseline for the last 210 s (default) |
 | `/?scenario=nominal` | every reading within range |
-| `/?scenario=stale-rpm` | the RPM feed stops 95 s before evaluation: no conclusion about the present |
+| `/?scenario=stale-rpm` | the RPM feed stops; its last reading is 95 s old at evaluation: no conclusion about the present |
 | `/?scenario=vibration-unavailable` | vibration sensor never reports: blade evidence insufficient |
 
 ## Verify
 
 ```sh
 npm run typecheck        # TypeScript strict (noUncheckedIndexedAccess, exactOptionalPropertyTypes)
-npm test                 # 48 tests: evidence rules, renderer, chart scale, interface behaviour
+npm test                 # 93 tests: evidence rules, renderer, chart scale, interface behaviour, offline guard fixtures
 npm run build
-npm run check:offline    # fails on external resources or fetch/XHR/WebSocket/EventSource/sendBeacon
+npm run check:offline    # fails on external resources, network APIs, unknown file types or a missing CSP
 ```
 
 The CI job `console` runs the same four steps.
+
+Offline is enforced by two independent barriers. At build time, `scripts/check-offline-build.mjs`
+rejects absolute or protocol-relative URLs (also with escaped slashes), resource attributes
+(quoted or not, `srcset`, form actions, meta refresh), network APIs (`fetch`, XHR, WebSocket,
+EventSource, `sendBeacon`, WebRTC, WebTransport, workers, `window.open`, dynamic `import()`) and any
+file type it cannot inspect; `scripts/check-offline-build.test.mjs` proves each rule fails on a
+fixture. At runtime, the built `index.html` carries a Content-Security-Policy with
+`connect-src 'none'` and only same-origin scripts, styles, fonts and images, so the browser refuses
+a request even if one reached the bundle. The CSP is added at build only (the dev server needs a
+websocket for hot reload).
 
 ## How the screen is derived
 
@@ -52,15 +62,15 @@ number and status on screen comes from it; none is typed into a component.
 
 | Rule | Value |
 |---|---|
-| Deviation counted | more than 10% from the synthetic baseline (RPM) or outside the expected range |
-| Suspicion (`attention`) | the deviation persists for at least 120 s |
+| Deviation counted | more than 10% from the synthetic baseline (RPM; a missing or non-positive baseline is never used) or outside the expected range |
+| Suspicion (`attention`) | the deviation persists for at least 120 s with no missing sample in between |
 | Stale | latest reading older than 30 s: the reading is shown greyed with its time, and no current-state conclusion is drawn |
 | Insufficient | less than 120 s of valid readings, no valid readings, or a needed sensor missing |
 | Unavailable | the sensor does not report; no value is shown |
-| Invalid samples | null, NaN and infinite values are dropped, never imputed; gaps break the chart line |
+| Invalid samples | null, NaN and infinite values are dropped, never imputed; a gap (more than 1.5 sample intervals) breaks a sustained run, the chart line and the sparklines |
 
 Evidence is labelled by kind: **measured** (read from a sensor), **inferred** (derived from other
-readings, e.g. Motor from electrical draw, Blades from overall vibration), **insufficient**,
+readings, e.g. Motor from electrical draw and temperature, Blades from overall vibration), **insufficient**,
 **stale** and **unavailable**. Inferred statuses carry a lower confidence and never name a cause.
 
 Two numbers in the reference image were replaced because they could not be justified:

@@ -1,6 +1,6 @@
-import { useEffect, useId, useMemo, useState } from "react";
+import { useId, useMemo, useState } from "react";
 import type { KeyboardEvent, PointerEvent as ReactPointerEvent } from "react";
-import { formatClock, formatNumber, validSamples } from "../domain/evidence";
+import { formatClock, formatNumber, maxGapMs, validSamples } from "../domain/evidence";
 import { METRIC_ORDER } from "../domain/scenario";
 import type { MetricId, Scenario } from "../domain/types";
 import { useElementSize } from "../hooks/useElementSize";
@@ -23,8 +23,12 @@ export function TelemetryChart({ scenario, metric, onMetric }: Props) {
   const gradientId = `chart-${useId().replace(/[^a-zA-Z0-9-]/g, "")}`;
   const titleId = useId();
   const samples = useMemo(() => validSamples(series), [series]);
-  const [cursor, setCursor] = useState<number | null>(null);
-  useEffect(() => setCursor(null), [metric, scenario.id]);
+  // The cursor belongs to one scenario and metric; deriving it from a key means a stale index
+  // from the previous series is never rendered, not even for one frame.
+  const cursorKey = `${scenario.id}:${metric}`;
+  const [cursorState, setCursorState] = useState<{ readonly key: string; readonly index: number } | null>(null);
+  const cursor = cursorState?.key === cursorKey ? cursorState.index : null;
+  const setCursor = (index: number | null) => setCursorState(index === null ? null : { key: cursorKey, index });
 
   const w = Math.max(160, size.width);
   const h = Math.max(110, size.height);
@@ -34,12 +38,12 @@ export function TelemetryChart({ scenario, metric, onMetric }: Props) {
   const x = (t: number) => PAD.left + ((t - scenario.windowStart) / (scenario.asOf - scenario.windowStart)) * iw;
   const y = (v: number) => PAD.top + ih - ((v - scale.min) / (scale.max - scale.min)) * ih;
 
-  // Break the line where samples are missing for more than two intervals (no interpolation).
+  // Break the line wherever a sample is missing (no interpolation).
   const segments: string[] = [];
   let current = "";
   let prevT: number | null = null;
   for (const s of samples) {
-    const gap = prevT !== null && s.t - prevT > scenario.sampleIntervalMs * 2;
+    const gap = prevT !== null && s.t - prevT > maxGapMs(scenario.sampleIntervalMs);
     if (gap && current) { segments.push(current); current = ""; }
     current += `${current ? "L" : "M"}${x(s.t).toFixed(1)} ${y(s.v as number).toFixed(1)}`;
     prevT = s.t;

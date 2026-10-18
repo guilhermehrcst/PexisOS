@@ -1,5 +1,5 @@
 import { useId } from "react";
-import { validSamples } from "../domain/evidence";
+import { maxGapMs, validSamples } from "../domain/evidence";
 import type { MetricSeries } from "../domain/types";
 
 interface Props {
@@ -23,18 +23,31 @@ export function Sparkline({ series, width = 220, height = 40, points = 24 }: Pro
   }
   // Bucket means show the trend without inventing values; the last point stays the exact
   // latest sample so a recent change (such as the RPM drop) is never averaged away.
+  // Buckets never span a data gap, and the line breaks there instead of bridging it.
+  const step = (series.samples[1]?.t ?? 0) - (series.samples[0]?.t ?? 0);
+  const maxGap = maxGapMs(step);
   const size = Math.max(1, Math.ceil(valid.length / points));
-  const sampled: { t: number; v: number }[] = [];
-  for (let i = 0; i < valid.length - 1; i += size) {
-    const bucket = valid.slice(i, Math.min(i + size, valid.length - 1));
-    sampled.push({
-      t: bucket.reduce((a, b) => a + b.t, 0) / bucket.length,
-      v: bucket.reduce((a, b) => a + (b.v as number), 0) / bucket.length,
-    });
+  const sampled: { t: number; v: number; gapBefore: boolean }[] = [];
+  let segmentStart = 0;
+  for (let i = 1; i <= valid.length; i++) {
+    const prev = valid[i - 1];
+    const cur = valid[i];
+    if (cur && prev && cur.t - prev.t <= maxGap) continue;
+    const segment = valid.slice(segmentStart, i);
+    const isLast = i === valid.length;
+    const body = isLast ? segment.slice(0, -1) : segment;
+    for (let j = 0; j < body.length; j += size) {
+      const bucket = body.slice(j, j + size);
+      sampled.push({
+        t: bucket.reduce((a, b) => a + b.t, 0) / bucket.length,
+        v: bucket.reduce((a, b) => a + (b.v as number), 0) / bucket.length,
+        gapBefore: j === 0 && segmentStart > 0,
+      });
+    }
+    if (isLast && prev) sampled.push({ t: prev.t, v: prev.v as number, gapBefore: body.length === 0 && segmentStart > 0 });
+    segmentStart = i;
   }
-  const lastSample = valid[valid.length - 1];
-  if (lastSample) sampled.push({ t: lastSample.t, v: lastSample.v as number });
-  const values = sampled.map((s) => s.v as number);
+  const values = sampled.map((s) => s.v);
   let min = Math.min(...values);
   let max = Math.max(...values);
   if (max - min < 1e-9) { min -= 1; max += 1; }
@@ -44,7 +57,8 @@ export function Sparkline({ series, width = 220, height = 40, points = 24 }: Pro
   const t1 = sampled[sampled.length - 1]?.t ?? 1;
   const x = (t: number) => ((t - t0) / (t1 - t0 || 1)) * width;
   const y = (v: number) => height - ((v - min) / (max - min)) * height;
-  const line = sampled.map((s, i) => `${i ? "L" : "M"}${x(s.t).toFixed(1)} ${y(s.v as number).toFixed(1)}`).join("");
+  const line = sampled.map((s, i) => `${i === 0 || s.gapBefore ? "M" : "L"}${x(s.t).toFixed(1)} ${y(s.v).toFixed(1)}`).join("");
+  const continuous = !sampled.some((s) => s.gapBefore);
   return (
     <svg className="sparkline" width="100%" height={height} viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" aria-hidden="true">
       <defs>
@@ -53,7 +67,7 @@ export function Sparkline({ series, width = 220, height = 40, points = 24 }: Pro
           <stop offset="1" stopColor="#1478ff" stopOpacity="0" />
         </linearGradient>
       </defs>
-      <path d={`${line}L${width} ${height}L0 ${height}Z`} fill={`url(#${gradientId})`} />
+      {continuous && <path d={`${line}L${width} ${height}L0 ${height}Z`} fill={`url(#${gradientId})`} />}
       <path d={line} fill="none" stroke="#1f7bf2" strokeWidth="1.6" strokeLinejoin="round" strokeLinecap="round" vectorEffect="non-scaling-stroke" />
     </svg>
   );

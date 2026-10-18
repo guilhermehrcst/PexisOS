@@ -48,7 +48,8 @@ export function ReportDialog({ report, fileName, onClose }: Props) {
     a.href = url;
     a.download = fileName;
     a.click();
-    URL.revokeObjectURL(url);
+    // Revoking synchronously can cancel the download in some browsers; release it after the click is handled.
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
     setStatus(`Saved ${fileName}`);
   };
 

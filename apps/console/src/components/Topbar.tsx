@@ -96,6 +96,12 @@ function SearchBox({ assessment, onNavigate }: { assessment: Assessment; onNavig
   };
   const onKey = (e: KeyboardEvent<HTMLInputElement>) => {
     if (!results.length) return;
+    // While the list is closed (for example after Escape), keys never act on hidden results;
+    // the arrows reopen it, as in a standard combobox.
+    if (!open) {
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); setOpen(true); }
+      return;
+    }
     if (e.key === "ArrowDown") { e.preventDefault(); setActive((a) => (a + 1) % results.length); }
     else if (e.key === "ArrowUp") { e.preventDefault(); setActive((a) => (a - 1 + results.length) % results.length); }
     else if (e.key === "Enter") { e.preventDefault(); const r = results[active]; if (r) go(r); }

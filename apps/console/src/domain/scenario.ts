@@ -17,7 +17,7 @@ export const RPM_BASELINE = 1800;
 /** In the deviation scenarios the fan settles at this speed for the last 210 s. */
 export const RPM_DEVIATED = 1420;
 export const RPM_DEVIATION_START = AS_OF - 210_000; // 10:26:30 UTC
-/** In the stale scenario the RPM feed stops reporting here (90 s before as-of). */
+/** In the stale scenario the RPM feed stops reporting here (90 s before as-of; the last sample is then 95 s old). */
 export const RPM_STALE_FROM = AS_OF - 90_000; // 10:28:30 UTC
 
 interface MetricSpec {
@@ -120,7 +120,7 @@ const SCENARIO_TEXT: Readonly<Record<ScenarioId, { label: string; description: s
   },
   "stale-rpm": {
     label: "Stale RPM feed",
-    description: "The RPM deviation starts, then the RPM feed stops reporting 90 s before the evaluation time.",
+    description: "The RPM deviation starts, then the RPM feed stops; its last reading is 95 s old at the evaluation time.",
   },
   "vibration-unavailable": {
     label: "Vibration sensor unavailable",

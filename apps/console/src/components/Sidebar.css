@@ -1,5 +1,7 @@
 .sidebar {
   grid-area: sidebar;
+  position: relative; /* paint and hit-test above the main subgrid, which spans this row */
+  z-index: 1;
   padding: 22px 12px 0 14px;
   border-right: 1px solid var(--border-soft);
   background: linear-gradient(180deg, rgba(252, 253, 254, 0.75) 0%, rgba(252, 253, 254, 0) 100%);

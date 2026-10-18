@@ -47,12 +47,13 @@ export function App({ initialScenario }: { initialScenario?: ScenarioId }) {
   }, []);
 
   const navigate = useCallback((t: SearchTarget) => {
+    const behavior: ScrollBehavior = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth";
     if (t.kind === "subsystem") {
       setSelected(t.id);
-      vizRef.current?.scrollIntoView?.({ behavior: "smooth", block: "center" });
+      vizRef.current?.scrollIntoView?.({ behavior, block: "center" });
     } else {
       setMetric(t.id);
-      chartRef.current?.scrollIntoView?.({ behavior: "smooth", block: "center" });
+      chartRef.current?.scrollIntoView?.({ behavior, block: "center" });
     }
   }, []);
 
@@ -67,19 +68,19 @@ export function App({ initialScenario }: { initialScenario?: ScenarioId }) {
             <DeviceVisualization subsystems={assessment.subsystems} selected={selected} onSelect={setSelected} />
           </div>
         </div>
+        <section className="app__metrics" aria-label="Telemetry readings">
+          {METRIC_ORDER.map((id) => (
+            <MetricCard key={id} series={assessment.scenario.series[id]} assessment={assessment.metrics[id]} />
+          ))}
+        </section>
+        <section className="app__panels" aria-label="Analysis">
+          <div ref={chartRef} className="app__panel-chart">
+            <TelemetryChart scenario={assessment.scenario} metric={metric} onMetric={setMetric} />
+          </div>
+          <SystemStatus subsystems={assessment.subsystems} health={assessment.health} />
+          <EvidenceInsight insight={assessment.insight} onOpenReport={() => setReportOpen(true)} />
+        </section>
       </main>
-      <section className="app__metrics" aria-label="Telemetry readings">
-        {METRIC_ORDER.map((id) => (
-          <MetricCard key={id} series={assessment.scenario.series[id]} assessment={assessment.metrics[id]} />
-        ))}
-      </section>
-      <section className="app__panels" aria-label="Analysis">
-        <div ref={chartRef} className="app__panel-chart">
-          <TelemetryChart scenario={assessment.scenario} metric={metric} onMetric={setMetric} />
-        </div>
-        <SystemStatus subsystems={assessment.subsystems} health={assessment.health} />
-        <EvidenceInsight insight={assessment.insight} onOpenReport={() => setReportOpen(true)} />
-      </section>
       <footer className="app__footer">
         <Info size={14} strokeWidth={2} aria-hidden="true" />
         <span>

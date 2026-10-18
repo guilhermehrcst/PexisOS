@@ -32,6 +32,8 @@ export function EvidenceInsight({ insight, onOpenReport }: Props) {
   const [menu, setMenu] = useState(false);
   const [copied, setCopied] = useState(false);
   const root = useRef<HTMLDivElement | null>(null);
+  const trigger = useRef<HTMLButtonElement | null>(null);
+  const popoverId = useId();
   const close = useCallback(() => setMenu(false), []);
   useDismiss(menu, root, close);
   const kinds = Array.from(new Set(insight.lines.map((l) => l.kind)));
@@ -54,13 +56,25 @@ export function EvidenceInsight({ insight, onOpenReport }: Props) {
         <h2 id={titleId} className="panel-title">AI Evidence Insight</h2>
         <span className="insight__chip">Read-only</span>
         <div className="insight__menu" ref={root}>
-          <button type="button" className="insight__more" aria-label="Insight actions" aria-haspopup="menu" aria-expanded={menu} onClick={() => setMenu((m) => !m)}>
+          <button ref={trigger} type="button" className="insight__more" aria-label="Insight actions" aria-expanded={menu} aria-controls={popoverId} onClick={() => setMenu((m) => !m)}>
             <MoreHorizontal size={20} strokeWidth={2.4} />
           </button>
           {menu && (
-            <div className="insight__popover" role="menu">
-              <button type="button" role="menuitem" onClick={copy}>Copy insight text</button>
-              <button type="button" role="menuitem" onClick={() => { setMenu(false); onOpenReport(); }}>Open full report</button>
+            // A plain group of buttons (Tab order), not an ARIA menu: no menu keyboard model is promised.
+            <div className="insight__popover" id={popoverId} role="group" aria-label="Insight actions">
+              <button type="button" onClick={copy}>Copy insight text</button>
+              <button
+                type="button"
+                onClick={() => {
+                  // Move focus to the persistent trigger first, so the report returns focus there
+                  // and not to this button, which unmounts when the popover closes.
+                  trigger.current?.focus();
+                  setMenu(false);
+                  onOpenReport();
+                }}
+              >
+                Open full report
+              </button>
             </div>
           )}
         </div>

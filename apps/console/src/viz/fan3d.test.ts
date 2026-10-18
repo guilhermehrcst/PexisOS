@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
-  DEFAULT_CAMERA, FRONT_CAMERA, ZOOM_MAX, ZOOM_MIN, buildFanScene, clampCamera, project, rotate,
+  DEFAULT_CAMERA, FRAME_GEOMETRY, FRONT_CAMERA, HOTSPOT_PART, VIBRATION_ANCHOR, ZOOM_MAX, ZOOM_MIN, buildFanScene, clampCamera,
+  project, rotate,
 } from "./fan3d";
 
 const VIEW = { width: 640, height: 420 };
@@ -67,5 +68,19 @@ describe("fan renderer", () => {
     const fills = (s: typeof plain, part: string) => s.shapes.filter((x) => x.part === part).map((x) => x.fill);
     expect(fills(lit, "blades")).not.toEqual(fills(plain, "blades"));
     expect(fills(lit, "hub")).toEqual(fills(plain, "hub"));
+  });
+
+  it("the vibration leader ends on the frame face it highlights", () => {
+    expect(HOTSPOT_PART.vibration).toBe("frame");
+    const [x, y, z] = VIBRATION_ANCHOR;
+    const g = FRAME_GEOMETRY;
+    expect(z).toBe(g.frontZ);
+    expect(Math.hypot(x, y)).toBeGreaterThan(g.bore + 4); // outside the opening
+    expect(Math.max(Math.abs(x), Math.abs(y))).toBeLessThan(g.half - 2); // inside the outer edge
+    for (const [sx, sy] of [[1, 1], [-1, 1], [-1, -1], [1, -1]] as const) {
+      expect(Math.hypot(x - sx * g.holeAt, y - sy * g.holeAt)).toBeGreaterThan(g.holeR + 4); // clear of the holes
+    }
+    const scene = buildFanScene(DEFAULT_CAMERA, VIEW);
+    expect(scene.anchors.vibration).toEqual(project(VIBRATION_ANCHOR, DEFAULT_CAMERA, VIEW));
   });
 });

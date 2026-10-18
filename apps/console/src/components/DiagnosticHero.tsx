@@ -85,7 +85,7 @@ export function DiagnosticHero({ assessment, onGenerateReport }: Props) {
         <span>Generate AI Report</span>
         <ChevronRight size={18} strokeWidth={2.4} aria-hidden="true" className="hero__cta-chevron" />
       </button>
-      <span id="cta-note" className="sr-only">Demonstration: builds a deterministic report from the synthetic data. No AI model is called.</span>
+      <p id="cta-note" className="hero__cta-note">Demo · deterministic report from synthetic data. No AI model is called.</p>
     </div>
   );
 }

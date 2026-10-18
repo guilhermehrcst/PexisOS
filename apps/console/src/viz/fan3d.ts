@@ -377,7 +377,7 @@ export function buildFanScene(camera: Camera, viewport: Viewport, highlight: Fan
     motor: toScreen([0, 0, hubFront]),
     rpmSensor: toScreen([-HUB_R + 6, HUB_R - 26, hubFront]),
     blades: toScreen(bladePoint(0, 0.68, 0.6)),
-    vibration: toScreen(bladePoint(4, 0.5, 0.5)),
+    vibration: toScreen(VIBRATION_ANCHOR),
     // Where a fan's power lead leaves the motor: along the lower-right strut, at the bore lip.
     powerInput: toScreen([(BORE + 4) * Math.cos(-0.62), (BORE + 4) * Math.sin(-0.62), ZF]),
   };
@@ -392,6 +392,13 @@ function mixBlue(fill: string): string {
   const t = 0.42;
   return `rgb(${Math.round(r + (20 - r) * t)},${Math.round(g + (120 - g) * t)},${Math.round(b + (255 - b) * t)})`;
 }
+
+/**
+ * Vibration is measured on the frame (HOTSPOT_PART.vibration), so its leader ends on the
+ * frame face: the left rail, between the bore and the outer edge, clear of the mounting holes.
+ */
+export const VIBRATION_ANCHOR: Vec3 = [-(HALF - 6), -HALF * 0.5, ZF];
+export const FRAME_GEOMETRY = { half: HALF, bore: BORE, holeAt: HOLE_AT, holeR: HOLE_R, frontZ: ZF } as const;
 
 export const HOTSPOT_PART: Readonly<Record<HotspotId, FanPart>> = {
   motor: "hub",

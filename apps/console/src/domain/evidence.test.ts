@@ -110,28 +110,28 @@ describe("metric rules", () => {
   });
   it("a series of only invalid samples is insufficient evidence", () => {
     const s = rpmSeries(ticks(WINDOW_START, AS_OF, () => null));
-    expect(assessMetric(s, AS_OF).state).toBe("insufficient");
+    expect(assessMetric(s, AS_OF, 5000).state).toBe("insufficient");
   });
   it("too little history is insufficient evidence", () => {
     const s = rpmSeries(ticks(AS_OF - 60_000, AS_OF, () => 1800));
-    expect(assessMetric(s, AS_OF).state).toBe("insufficient");
+    expect(assessMetric(s, AS_OF, 5000).state).toBe("insufficient");
   });
   it("a deviation shorter than the sustain window stays nominal", () => {
     const s = rpmSeries(ticks(WINDOW_START, AS_OF, (t) => (t > AS_OF - 60_000 ? 1400 : 1800)));
-    const m = assessMetric(s, AS_OF);
+    const m = assessMetric(s, AS_OF, 5000);
     expect(m.state).toBe("nominal");
     expect(m.sustainedMs).toBeLessThan(SUSTAINED_MS);
   });
   it("a deviation exactly at the sustain window becomes attention", () => {
     const s = rpmSeries(ticks(WINDOW_START, AS_OF, (t) => (t >= AS_OF - SUSTAINED_MS ? 1400 : 1800)));
-    expect(assessMetric(s, AS_OF).state).toBe("attention");
+    expect(assessMetric(s, AS_OF, 5000).state).toBe("attention");
   });
   it("a deviation within 10% is not counted", () => {
     const s = rpmSeries(ticks(WINDOW_START, AS_OF, () => 1650));
-    expect(assessMetric(s, AS_OF).state).toBe("nominal");
+    expect(assessMetric(s, AS_OF, 5000).state).toBe("nominal");
   });
   it("unavailable sensors never produce values", () => {
-    const m = assessMetric(rpmSeries([], { sensorAvailable: false }), AS_OF);
+    const m = assessMetric(rpmSeries([], { sensorAvailable: false }), AS_OF, 5000);
     expect(m.state).toBe("unavailable");
     expect(m.latest).toBeNull();
   });
