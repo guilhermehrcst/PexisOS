@@ -49,6 +49,17 @@ class FabricConfig:
     timeout_s: float = 30.0
 
 
+def _find_connector_error(error: BaseException) -> ConnectorError | None:
+    """Our own refusal, wherever task groups nested it."""
+    if isinstance(error, ConnectorError):
+        return error
+    for inner in getattr(error, "exceptions", ()) or ():
+        found = _find_connector_error(inner)
+        if found is not None:
+            return found
+    return None
+
+
 class FabricConnector:
     simulated = False
 
@@ -124,11 +135,11 @@ class FabricConnector:
         except ConnectorError:
             raise
         except BaseException as error:  # noqa: BLE001 - includes anyio exception groups and timeouts
-            inner = getattr(error, "exceptions", None)
-            if inner and isinstance(inner[0], ConnectorError):
-                raise inner[0] from None
             if isinstance(error, (KeyboardInterrupt, SystemExit)):
                 raise
+            found = _find_connector_error(error)
+            if found is not None:
+                raise found from None
             raise ConnectorError(f"transport_error:{type(error).__name__}") from None
 
     def call(self, name: str, args: dict) -> dict:
