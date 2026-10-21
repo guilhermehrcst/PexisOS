@@ -21,7 +21,6 @@ import os
 import sqlite3
 from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import Any
 
 from .mission import TRANSITIONS, MissionSpec, MissionState, canonical_json, check_transition
 from .redact import redact
