@@ -1,0 +1,213 @@
+{
+  "approvals": [
+    {
+      "approver": "e001-harness (Claude Code agent under the owner's PETRON V0.1 task authorization; synthetic fixture; not an independent human review)",
+      "channel": "cli",
+      "plan_sha256": "97df38f807abe869e7bf10f6cf795bf4f20907ca5236cbcd8a02beb3fd8df6d8"
+    }
+  ],
+  "baseline_tests": {
+    "exit_code": 1,
+    "timed_out": false
+  },
+  "diff": "--- a/calc/stats.py\n+++ b/calc/stats.py\n@@ -12,4 +12,6 @@\n         raise ValueError(\"median() of empty sequence\")\n     ordered = sorted(values)\n     middle = len(ordered) // 2\n-    return ordered[middle]\n+    if len(ordered) % 2:\n+        return ordered[middle]\n+    return (ordered[middle - 1] + ordered[middle]) / 2\n",
+  "diff_sha256": "7944c21a8ea7872c4ffec354b698f3526cbc6a25f80929494e9fbade651abeb1",
+  "event_chain": {
+    "first_bad_seq": null,
+    "ok": true
+  },
+  "event_count": 26,
+  "execution_disabled": [],
+  "failure_reason": null,
+  "final_state": "completed",
+  "mission_id": "petron-e001",
+  "notice": "SIMULATED PROVIDER: the plan came from a deterministic script. This run demonstrates PETRON's infrastructure (state machine, gates, sandbox, verification, evidence), not autonomous problem solving.",
+  "objective": "Synthetic fixture: calc.stats.median() returns the wrong value for even-length input. Make the existing tests pass by fixing calc/stats.py only. Tests are protected.",
+  "plan_sha256": "97df38f807abe869e7bf10f6cf795bf4f20907ca5236cbcd8a02beb3fd8df6d8",
+  "plan_steps": [
+    {
+      "args": {
+        "path": "calc/stats.py"
+      },
+      "tool": "read_file"
+    },
+    {
+      "args": {
+        "new": "    if len(ordered) % 2:\n        return ordered[middle]\n    return (ordered[middle - 1] + ordered[middle]) / 2\n",
+        "old": "    return ordered[middle]\n",
+        "path": "calc/stats.py"
+      },
+      "tool": "replace_in_file"
+    },
+    {
+      "args": {},
+      "tool": "run_tests"
+    }
+  ],
+  "provider": {
+    "model": null,
+    "provider": "deterministic",
+    "script": "e001_fix_median",
+    "simulated": true
+  },
+  "sandbox_probe": {
+    "backend": "docker",
+    "checks": {
+      "daemon_seccomp": true,
+      "egress_blocked": true,
+      "empty_bounding_set": true,
+      "image_present_pinned": true,
+      "loopback_only": true,
+      "memory_limited": true,
+      "no_docker_socket": true,
+      "no_effective_capabilities": true,
+      "no_new_privileges": true,
+      "no_permitted_capabilities": true,
+      "non_root_uid": true,
+      "only_expected_env": true,
+      "pids_limited": true,
+      "root_fs_read_only": true,
+      "seccomp_filter_active": true,
+      "workspace_read_only": true
+    },
+    "info": {
+      "image_env_names": [
+        "GPG_KEY",
+        "LANG",
+        "PATH",
+        "PYTHON_SHA256",
+        "PYTHON_VERSION"
+      ],
+      "inside": {
+        "cap_bnd": "0000000000000000",
+        "cap_eff": "0000000000000000",
+        "cap_prm": "0000000000000000",
+        "docker_socket": false,
+        "egress": "blocked",
+        "env_names": [
+          "GPG_KEY",
+          "HOME",
+          "HOSTNAME",
+          "LANG",
+          "PATH",
+          "PYTHONDONTWRITEBYTECODE",
+          "PYTHON_SHA256",
+          "PYTHON_VERSION"
+        ],
+        "gid": 65534,
+        "interfaces": [
+          "lo"
+        ],
+        "memory_max": "268435456",
+        "no_new_privs": "1",
+        "pids_max": "64",
+        "root_writable": false,
+        "seccomp": "2",
+        "uid": 65534,
+        "work_writable": false
+      },
+      "rootless": false,
+      "security_options": [
+        "name=seccomp,profile=builtin"
+      ],
+      "server_version": "29.8.2"
+    },
+    "ok": true,
+    "reason": null
+  },
+  "schema": "petron.report.v0",
+  "simulated_provider": true,
+  "spec_sha256": "742d923c740afd9299dbfb010760cd40962e0f1060808e0bcd60c5675e14a6bf",
+  "states": [
+    [
+      "created",
+      "planning",
+      null
+    ],
+    [
+      "planning",
+      "awaiting_approval",
+      null
+    ],
+    [
+      "awaiting_approval",
+      "running",
+      null
+    ],
+    [
+      "running",
+      "verifying",
+      null
+    ],
+    [
+      "verifying",
+      "completed",
+      null
+    ]
+  ],
+  "step_outcomes": [
+    {
+      "error": null,
+      "index": 0,
+      "ok": true,
+      "tool": "read_file"
+    },
+    {
+      "error": null,
+      "index": 1,
+      "ok": true,
+      "tool": "replace_in_file"
+    },
+    {
+      "error": null,
+      "index": 2,
+      "ok": true,
+      "tool": "run_tests"
+    }
+  ],
+  "tool_decisions": [
+    {
+      "args_sha256": "f672e25fed9100e658e252a5fb518c9d6f512331ad1ac26536f621655668515e",
+      "call": 1,
+      "decision": "allow",
+      "effect": "read",
+      "tool": "read_file"
+    },
+    {
+      "args_sha256": "0b0b0d2b0350fc4e9fec392ecb452cadf20cdf5cd6ebc41242d3bcf290bf0f4e",
+      "call": 2,
+      "decision": "allow",
+      "effect": "write_workspace",
+      "tool": "replace_in_file"
+    },
+    {
+      "args_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+      "call": 3,
+      "decision": "allow",
+      "effect": "execute",
+      "tool": "run_tests"
+    }
+  ],
+  "verification": {
+    "changed_paths": [
+      "calc/stats.py"
+    ],
+    "checks": {
+      "changes_within_writable_paths": true,
+      "event_chain_intact": true,
+      "protected_paths_unchanged": true,
+      "source_tree_unchanged": true,
+      "tests_pass_in_sandbox": true
+    },
+    "diff_sha256": "6207c089a3eeac4b8fbd10113997be9536d57d464fd57f4e44d36190f11fdc8f",
+    "protected_paths": [
+      "tests/__init__.py",
+      "tests/test_stats.py"
+    ],
+    "tests": {
+      "exit_code": 0,
+      "ran": true,
+      "timed_out": false
+    }
+  }
+}
