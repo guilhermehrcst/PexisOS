@@ -17,6 +17,7 @@ import re
 import secrets
 import shutil
 import subprocess
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -60,7 +61,7 @@ r['pids_max'] = first('/sys/fs/cgroup/pids.max', '/sys/fs/cgroup/pids/pids.max')
 r['memory_max'] = first('/sys/fs/cgroup/memory.max', '/sys/fs/cgroup/memory/memory.limit_in_bytes')
 print(json.dumps(r))
 """
-_SECRET_ENV = re.compile(r"(?i)(KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|AUTH)")
+_PETRON_ENV = frozenset({"PYTHONDONTWRITEBYTECODE", "HOME", "HOSTNAME"})
 
 
 class SandboxUnavailable(Exception):
@@ -140,7 +141,7 @@ class DockerSandbox:
                 "--mount", f"type=bind,source={source},target=/work,readonly", "--workdir", "/work",
                 "-e", "PYTHONDONTWRITEBYTECODE=1", "-e", "HOME=/tmp", self.image]
 
-    def probe(self, scratch: Path | None = None) -> ProbeReport:
+    def probe(self) -> ProbeReport:
         report = ProbeReport("docker", False)
         if not self.docker:
             report.reason = "docker_cli_missing"
@@ -156,18 +157,17 @@ class DockerSandbox:
             report.info["security_options"] = options
             report.info["rootless"] = any("rootless" in option for option in options)
             report.checks["daemon_seccomp"] = any("seccomp" in option for option in options)
-            image = self._cli(["image", "inspect", "--format", "{{json .RepoDigests}}", self.image], 20)
+            image = self._cli(["image", "inspect", "--format", "{{json .Config.Env}}", self.image], 20)
             report.checks["image_present_pinned"] = image.returncode == 0
             if image.returncode != 0:
                 report.reason = "image_not_present"
                 return report
-            workdir = Path(scratch) if scratch else None
-            if workdir is None:
-                import tempfile
-                workdir = Path(tempfile.mkdtemp(prefix="petron-probe-"))
-            os.chmod(workdir, 0o755)
-            name = f"petron-probe-{secrets.token_hex(6)}"
-            proc = self._cli([*self._flags(workdir, name), "python", "-I", "-c", _PROBE], 60)
+            image_env = sorted(item.split("=", 1)[0] for item in (json.loads(image.stdout or "[]") or []))
+            report.info["image_env_names"] = image_env
+            with tempfile.TemporaryDirectory(prefix="petron-probe-") as workdir:
+                os.chmod(workdir, 0o755)
+                name = f"petron-probe-{secrets.token_hex(6)}"
+                proc = self._cli([*self._flags(Path(workdir), name), "python", "-I", "-c", _PROBE], 60)
             if proc.returncode != 0:
                 report.reason = "probe_container_failed"
                 report.info["stderr"] = _cap(proc.stderr)[:2000]
@@ -189,7 +189,8 @@ class DockerSandbox:
             "root_fs_read_only": inside["root_writable"] is False,
             "workspace_read_only": inside["work_writable"] is False,
             "no_docker_socket": inside["docker_socket"] is False,
-            "no_secret_env": not any(_SECRET_ENV.search(n) for n in inside["env_names"]),
+            # Exactly the pinned image's own ENV plus what PETRON sets: nothing from the host leaks in.
+            "only_expected_env": set(inside["env_names"]) <= set(image_env) | _PETRON_ENV,
             "pids_limited": inside["pids_max"] not in (None, "max"),
             "memory_limited": inside["memory_max"] not in (None, "max")
                               and int(inside["memory_max"]) <= 256 * 1024 * 1024,
