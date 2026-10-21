@@ -22,7 +22,10 @@ from petron.workspace import Workspace
 from support import EngineCase
 
 HAVE_MCP = importlib.util.find_spec("mcp") is not None
-PEXISLINK_SRC = os.environ.get("PETRON_PEXISLINK_SRC", "")
+# In the PexisOS monorepo the Agent Fabric lives at <repo>/src; PETRON_PEXISLINK_SRC overrides it.
+_MONOREPO_SRC = Path(__file__).resolve().parents[3] / "src"
+PEXISLINK_SRC = os.environ.get("PETRON_PEXISLINK_SRC") or (
+    str(_MONOREPO_SRC) if (_MONOREPO_SRC / "pexislink" / "fabric").is_dir() else "")
 HAVE_FABRIC = HAVE_MCP and bool(PEXISLINK_SRC) and (Path(PEXISLINK_SRC) / "pexislink" / "fabric").is_dir()
 ANALYST, GUEST = "demo:principal:analyst", "demo:principal:guest"
 VEHICLE = "demo:vehicle:synthetic-01"
@@ -96,7 +99,7 @@ class HostileServerTests(unittest.TestCase):
         self.assertEqual(self.refused("wrong_name"), "unexpected_server")
 
 
-@unittest.skipUnless(HAVE_FABRIC, "PexisOS Agent Fabric not available (set PETRON_PEXISLINK_SRC)")
+@unittest.skipUnless(HAVE_FABRIC, "PexisOS Agent Fabric or mcp not available")
 class FabricContractTests(unittest.TestCase):
     def connector(self, principal):
         return FabricConnector(FabricConfig(principal, Path(PEXISLINK_SRC)))
@@ -125,7 +128,7 @@ class FabricContractTests(unittest.TestCase):
         self.assertEqual(data["assessed_at"], "2026-01-01T04:00:00Z")
 
 
-@unittest.skipUnless(HAVE_FABRIC, "PexisOS Agent Fabric not available (set PETRON_PEXISLINK_SRC)")
+@unittest.skipUnless(HAVE_FABRIC, "PexisOS Agent Fabric or mcp not available")
 class FabricThroughGatewayTests(EngineCase):
     def test_permitted_fabric_tool_runs_through_the_gateway(self):
         spec = self.spec()
