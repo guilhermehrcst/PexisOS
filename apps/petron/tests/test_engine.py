@@ -119,6 +119,58 @@ class IsolationUnavailableTests(EngineCase):
         self.assertEqual(self.sandbox.runs, [])
 
 
+    def test_plan_without_test_step_cannot_complete_when_isolation_is_unavailable(self):
+        mission_id = self.engine.create(self.spec("e001_fix_without_tests"))
+        self.engine.approve(mission_id, self.engine.plan(mission_id), "tester", "unit-test")
+        self.assertEqual(self.engine.run(mission_id), S.FAILED)
+        self.assertEqual(self.engine.store.mission(mission_id)["failure_reason"],
+                         "verification_failed:tests_pass_in_sandbox")
+        verdict = build_report(self.engine.store, mission_id)["verification"]
+        self.assertEqual(verdict["tests"], {"ran": False, "reason": "isolation_unavailable"})
+        self.assertEqual(self.sandbox.runs, [])
+
+
+class RuntimeVerificationTests(EngineCase):
+    def test_runtime_runs_tests_even_if_the_plan_does_not(self):
+        mission_id = self.engine.create(self.spec("e001_fix_without_tests"))
+        self.engine.approve(mission_id, self.engine.plan(mission_id), "tester", "unit-test")
+        self.assertEqual(self.engine.run(mission_id), S.COMPLETED)
+        self.assertEqual([p.name for p in self.sandbox.runs], ["base", "work"])
+
+
+class IndependentVerificationTests(EngineCase):
+    """Verification must catch a bad workspace on its own, as if the gateway had been bypassed."""
+
+    def verify_after_tampering(self, rel, old, new):
+        from petron.mission import VERIFICATION_COMMANDS
+        from petron.workspace import Workspace
+        mission_id, plan_sha = self.planned()
+        self.engine.approve(mission_id, plan_sha, "tester", "unit-test")
+        store = self.engine.store
+        store.transition(mission_id, S.AWAITING_APPROVAL, S.RUNNING)
+        store.transition(mission_id, S.RUNNING, S.VERIFYING)
+        base = Workspace.create(self.source, self.tmp / "area", "base")
+        work = Workspace.create(self.source, self.tmp / "area", "work")
+        work.replace_once("calc/stats.py", "    return ordered[middle]\n",
+                          "    if len(ordered) % 2:\n        return ordered[middle]\n"
+                          "    return (ordered[middle - 1] + ordered[middle]) / 2\n")
+        path = work.root / rel
+        path.write_text(path.read_text().replace(old, new, 1))
+        state = self.engine._verify(mission_id, store.spec(mission_id), base, work, self.sandbox, True,
+                                    VERIFICATION_COMMANDS["python-unittest"])
+        return state, store.mission(mission_id)["failure_reason"]
+
+    def test_modified_protected_test_file_is_caught(self):
+        state, reason = self.verify_after_tampering("tests/test_stats.py", "def test_single", "def test_single_x")
+        self.assertEqual(state, S.FAILED)
+        self.assertEqual(reason, "verification_failed:changes_within_writable_paths,protected_paths_unchanged")
+
+    def test_change_outside_writable_paths_is_caught(self):
+        state, reason = self.verify_after_tampering("calc/__init__.py", "Synthetic", "Tampered")
+        self.assertEqual(state, S.FAILED)
+        self.assertEqual(reason, "verification_failed:changes_within_writable_paths")
+
+
 class RealProviderGateTests(EngineCase):
     def test_real_provider_needs_explicit_authorization(self):
         spec = self.spec()

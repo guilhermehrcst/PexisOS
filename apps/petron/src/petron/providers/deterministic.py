@@ -28,6 +28,9 @@ SCRIPTS: dict[str, dict] = {
         [{"tool": "read_file", "args": {"path": "calc/stats.py"}},
          {"tool": "replace_in_file", "args": {"path": "calc/stats.py", "old": _E001_OLD, "new": _E001_NEW}},
          {"tool": "run_tests", "args": {}}]),
+    "e001_fix_without_tests": _plan(
+        "Scripted: applies the fix but never asks to run tests (verification must still run them).",
+        [{"tool": "replace_in_file", "args": {"path": "calc/stats.py", "old": _E001_OLD, "new": _E001_NEW}}]),
     "e001_wrong_fix": _plan(
         "Scripted wrong fix: changes behaviour without fixing the even-length case.",
         [{"tool": "replace_in_file", "args": {"path": "calc/stats.py", "old": _E001_OLD,

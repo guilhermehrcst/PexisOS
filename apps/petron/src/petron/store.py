@@ -246,7 +246,3 @@ class Store:
     def raw(self) -> sqlite3.Connection:
         """Direct connection, for tests that prove the SQL-level guards hold."""
         return self._db
-
-
-def dumps(value: Any) -> str:
-    return json.dumps(value, indent=2, sort_keys=True)
