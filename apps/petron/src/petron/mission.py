@@ -49,7 +49,7 @@ SPEC_SCHEMA = closed_object({
     "budget": closed_object({
         "max_steps": {"type": "integer", "minimum": 1, "maximum": 64},
         "max_tool_calls": {"type": "integer", "minimum": 1, "maximum": 256},
-        "max_model_calls": {"type": "integer", "minimum": 0, "maximum": 8},
+        "max_model_calls": {"type": "integer", "minimum": 0, "maximum": 64},
         "exec_timeout_s": {"type": "integer", "minimum": 1, "maximum": 600},
         "max_iterations": {"type": "integer", "minimum": 1, "maximum": 64},
         "max_total_tokens": {"type": "integer", "minimum": 1000, "maximum": 2000000},
@@ -141,6 +141,8 @@ class MissionSpec:
             raise SchemaError("provider.script", "deterministic provider needs a script")
         if provider["kind"] == "anthropic" and data["budget"]["max_model_calls"] < 1:
             raise SchemaError("budget.max_model_calls", "a real provider needs a model-call budget")
+        if data.get("mode", "plan") == "plan" and data["budget"]["max_model_calls"] > 8:
+            raise SchemaError("budget.max_model_calls", "plan mode allows at most 8 model calls")  # V0.1 bound
         if data.get("mode") == "agent" and "max_iterations" not in data["budget"]:
             raise SchemaError("budget.max_iterations", "agent mode needs an iteration limit")
         if data["sandbox"]["backend"] == "docker" and "image" not in data["sandbox"]:

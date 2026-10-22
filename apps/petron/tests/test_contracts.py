@@ -55,6 +55,12 @@ class SpecTests(unittest.TestCase):
         with self.assertRaises(SchemaError):
             MissionSpec.parse(spec)
 
+    def test_plan_mode_keeps_the_v01_model_call_bound(self):
+        spec = e001_spec(E001)
+        spec["budget"]["max_model_calls"] = 9
+        with self.assertRaises(SchemaError):
+            MissionSpec.parse(spec)
+
     def test_real_provider_requires_model_call_budget(self):
         spec = e001_spec(E001, provider={"kind": "anthropic"})
         with self.assertRaises(SchemaError):

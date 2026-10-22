@@ -96,7 +96,7 @@ def render_markdown(report: dict) -> str:
         f"- Final state: **{report['final_state']}**" + (f" (`{report['failure_reason']}`)"
                                                         if report["failure_reason"] else ""),
         f"- Spec sha256: `{report['spec_sha256']}`",
-        f"- Plan sha256: `{report['plan_sha256']}`",
+        f"- {'Scope' if report['mode'] == 'agent' else 'Plan'} sha256 (approved): `{report['plan_sha256']}`",
         f"- Provider: `{json.dumps(report['provider'], sort_keys=True)}`",
         f"- Event chain: {'intact' if report['event_chain']['ok'] else 'BROKEN at ' + str(report['event_chain']['first_bad_seq'])}"
         f" ({report['event_count']} mission events)",
