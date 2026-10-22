@@ -37,6 +37,18 @@ with an optional real model provider and an optional read-only PexisOS connector
 | Impostor / write-capable Fabric | Connector launches with `-I -B`, minimal env, empty cwd; only five tool names callable | Server name, exact tool set and read-only annotations checked after `initialize` | Connector refuses to work |
 | Real model used without consent or credit | Needs `--allow-real-model`, `ANTHROPIC_API_KEY`, and a model-call budget; explicit `base_url` | `provider.call` events counted against the budget | `provider_error:*` |
 
+### V0.2 agent loop
+
+| Hazard | Prevention | Detection / containment | Safe state |
+|---|---|---|---|
+| Model claims success | `conclude` accepted only after a passing runtime verification on the same workspace state | final V0.1 verification runs again | `verification_required` observation; mission cannot complete |
+| Model fabricates tool results or grants itself permissions | closed decision schema (no result/permission fields) | invalid decisions counted | `limit:invalid_decisions` |
+| Endless or repetitive loop | iteration, tool-call, model-call and token limits | identical action on unchanged workspace refused | `limit:*` |
+| Widened scope after approval | scope stored write-once, approval bound to its hash | scope recomputed from the spec at run time | `approval_missing` / `plan_integrity` |
+| Two runners on one mission | compare-and-set transitions | run lease (pid/host) | `lease_held` |
+| Resume repeats an unknown effect | resume only from a checkpoint | workspace tree must equal the checkpoint's | `resume_refused:workspace_diverged` |
+| Silent model substitution | plain Messages API, no fallback option | refusal recorded | `provider_error:model_refusal` |
+
 ### Independence of barriers
 
 - Plan validation and gateway authorization share one premise (the spec's tool list), so they

@@ -39,6 +39,18 @@ operator ──spec.json──▶ CLI ──▶ Engine ────────�
    All true → `completed`, else `failed:verification_failed:<checks>`.
 6. `report` — Markdown/JSON from the database only.
 
+## Agent mode (V0.2)
+
+`agent.py` adds an iterative loop inside the same engine: `plan` stores a scope document
+(derived from the spec) instead of a plan; after approval, each turn asks the provider for one
+closed-schema decision, runs tools only through the gateway, records the observation and a
+checkpoint, and ends on a verified `conclude`, a handoff, a stop or a limit. The final
+verification is the V0.1 one. See ADR-0003.
+
+```
+objective → scope approval → [ decision → gateway → sandbox/tool → observation → checkpoint ]* → verification
+```
+
 ## Data
 
 `$PETRON_HOME/petron.sqlite3` (mode 0600, directory 0700) and `$PETRON_HOME/workspaces/<id>/{base,work}`
