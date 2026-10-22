@@ -15,7 +15,7 @@ error: approval_missing
 [exit 2]
 $ petron mission show petron-e002
 {
-  "created_at": "2026-10-22T17:40:23.969938Z",
+  "created_at": "2026-10-22T18:10:26.638648Z",
   "failure_reason": null,
   "mission_id": "petron-e002",
   "mode": "agent",
@@ -113,9 +113,6 @@ $ petron mission diff petron-e002
              result[-1][1] = max(result[-1][1], end)
          else:
              result.append([start, end])
-[exit 0]
-$ petron mission list
-petron-e002                      completed          
 [exit 0]
 $ petron events verify
 {
