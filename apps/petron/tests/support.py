@@ -71,3 +71,59 @@ class EngineCase(unittest.TestCase):
 
     def kinds(self, mission_id: str) -> list[str]:
         return [event["kind"] for event in self.engine.store.events(mission_id)]
+
+
+E002 = ROOT / "fixtures" / "e002"
+
+
+def e002_spec(source: Path, script: str = "e002_adaptive", **budget) -> dict:
+    spec = json.loads((E002 / "mission.json").read_text())
+    spec["workspace"]["source"] = str(source)
+    spec["sandbox"] = {"backend": "none"}
+    spec["provider"] = {"kind": "deterministic", "script": script}
+    spec["budget"].update(budget)
+    return spec
+
+
+class E002FakeSandbox(FakeSandbox):
+    """Infers the E002 test outcome from file contents (never executes fixture code)."""
+
+    def run(self, workspace: Path, argv, timeout_s: int) -> RunResult:
+        if not self.ok:
+            raise SandboxUnavailable("fake_unavailable")
+        self.runs.append(Path(workspace))
+        code = (Path(workspace) / "intervals" / "merge.py").read_text()
+        failing = []
+        if "max(result[-1][1], end)" not in code:
+            failing.append("test_overlapping")
+        if "sorted(intervals)" not in code:
+            failing.append("test_unsorted_input")
+        if "start <= result[-1][1]" not in code:
+            failing.append("test_touching_intervals_merge")
+        lines = [f"FAIL: {name} (tests.test_merge.MergeTests.{name})" for name in failing]
+        summary = f"FAILED (failures={len(failing)})" if failing else "OK"
+        return RunResult(1 if failing else 0, "", "\n".join(lines + ["", "Ran 6 tests in 0.001s", "", summary]), False)
+
+
+class AgentCase(EngineCase):
+    """EngineCase on the E002 fixture with the content-inferring fake sandbox."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="petron-agent-"))
+        self.source = self.tmp / "source"
+        shutil.copytree(E002 / "project", self.source)
+        self.sandbox = E002FakeSandbox(self.sandbox_ok)
+        self.engine = Engine(self.tmp / "home", sandbox_factory=lambda spec: self.sandbox)
+
+    def start(self, script: str = "e002_adaptive", approve: bool = True, **budget) -> str:
+        mission_id = self.engine.create(e002_spec(self.source, script, **budget))
+        scope_sha = self.engine.plan(mission_id)
+        if approve:
+            self.engine.approve(mission_id, scope_sha, "tester", "unit-test")
+        return mission_id
+
+    def turns(self, mission_id: str) -> list[dict]:
+        return [e["payload"] for e in self.engine.store.events(mission_id) if e["kind"] == "agent.turn"]
+
+    def reason(self, mission_id: str) -> str:
+        return self.engine.store.mission(mission_id)["failure_reason"]
