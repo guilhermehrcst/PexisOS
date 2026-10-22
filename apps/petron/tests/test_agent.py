@@ -142,6 +142,22 @@ class ScopeAuthorizationTests(AgentCase):
         self.assertEqual(self.reason(mission_id), "plan_integrity")
         self.assertEqual(self.sandbox.runs, [])
 
+    def test_forged_approval_for_a_widened_scope_is_caught_by_recomputation(self):
+        # (c) everything consistent in the database (scope, hash and an approval for that hash),
+        # but the scope no longer matches the immutable spec: only recomputation catches this.
+        mission_id = self.start(approve=False)
+        raw = self.engine.store.raw()
+        raw.execute("DROP TRIGGER missions_plan_guard")
+        scope = json.loads(self.engine.store.mission(mission_id)["plan_json"])
+        scope["writable"].append("tests/test_merge.py")
+        forged = sha256_json(scope)
+        raw.execute("UPDATE missions SET plan_json = ?, plan_sha256 = ? WHERE mission_id = ?",
+                    (json.dumps(scope), forged, mission_id))
+        self.engine.approve(mission_id, forged, "mallory", "forged")
+        self.assertEqual(self.engine.run(mission_id), S.FAILED)
+        self.assertEqual(self.reason(mission_id), "plan_integrity")
+        self.assertEqual(self.sandbox.runs, [])
+
     def test_agent_mode_requires_an_iteration_limit(self):
         from petron.mission import MissionSpec
         from petron.schema import SchemaError
@@ -167,11 +183,18 @@ class AdversarialPolicyTests(AgentCase):
         self.assertEqual(work.read_text(), (self.source / "tests" / "test_merge.py").read_text())
 
     def test_unverified_conclusion_is_refused(self):
-        mission_id = self.start("e002_premature", max_iterations=3)
+        mission_id = self.start("e002_premature", max_iterations=2)
         self.assertEqual(self.engine.run(mission_id), S.FAILED)
         self.assertEqual(self.reason(mission_id), "limit:max_iterations")
-        self.assertTrue(all(t["observation"]["error_class"] == "verification_required"
-                            for t in self.turns(mission_id)))
+        self.assertEqual([t["observation"]["error_class"] for t in self.turns(mission_id)],
+                         ["verification_required"] * 2)
+
+    def test_repeated_unverified_conclusions_hit_a_second_independent_bound(self):
+        mission_id = self.start("e002_premature", max_iterations=24)
+        self.assertEqual(self.engine.run(mission_id), S.FAILED)
+        self.assertEqual(self.reason(mission_id), "limit:no_progress")
+        self.assertEqual([t["observation"]["error_class"] for t in self.turns(mission_id)],
+                         ["verification_required"] * 2 + ["no_progress"] * 2)
 
     def test_repeated_identical_actions_stop_for_lack_of_progress(self):
         mission_id = self.start("e002_stubborn")

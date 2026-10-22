@@ -30,7 +30,9 @@ verification must survive the change.
 5. **Success is the runtime's call.** `conclude` is accepted only right after a passing
    `request_verification` on the unchanged workspace; then the full V0.1 verification runs again.
 6. **Bounded by construction:** iterations, tool calls, model calls and tokens; three invalid
-   decisions in a row; identical actions on an unchanged workspace are refused after two runs.
+   decisions in a row; any identical decision (tool call, verification request or conclusion;
+   free text ignored) on an unchanged workspace is refused after two runs, and two refusals end
+   the mission. Every loop therefore has at least two independent bounds.
 7. **Persistence and recovery:** every turn (`agent.turn`) and checkpoint (`agent.checkpoint`)
    is an event in the hash-chained log. A run lease (`run.lease`) blocks a second live runner.
    `resume` continues from the last checkpoint only if the workspace tree matches it exactly;

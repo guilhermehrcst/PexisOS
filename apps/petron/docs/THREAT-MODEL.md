@@ -43,7 +43,7 @@ with an optional real model provider and an optional read-only PexisOS connector
 |---|---|---|---|
 | Model claims success | `conclude` accepted only after a passing runtime verification on the same workspace state | final V0.1 verification runs again | `verification_required` observation; mission cannot complete |
 | Model fabricates tool results or grants itself permissions | closed decision schema (no result/permission fields) | invalid decisions counted | `limit:invalid_decisions` |
-| Endless or repetitive loop | iteration, tool-call, model-call and token limits | identical action on unchanged workspace refused | `limit:*` |
+| Endless or repetitive loop | iteration, tool-call, model-call and token limits | any identical decision on an unchanged workspace refused after two runs | `limit:*` |
 | Widened scope after approval | scope stored write-once, approval bound to its hash | scope recomputed from the spec at run time | `approval_missing` / `plan_integrity` |
 | Two runners on one mission | compare-and-set transitions | run lease (pid/host) | `lease_held` |
 | Resume repeats an unknown effect | resume only from a checkpoint | workspace tree must equal the checkpoint's | `resume_refused:workspace_diverged` |

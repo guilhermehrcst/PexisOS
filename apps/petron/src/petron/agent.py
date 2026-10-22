@@ -224,15 +224,20 @@ class AgentLoop:
         return None
 
     # -- one turn ---------------------------------------------------------------------------
-    def _observe_tool(self, decision: dict, tree_before: str) -> dict:
-        signature = digest([decision["tool"], decision["args"], tree_before])
+    def _repeated(self, decision: dict, tree_before: str) -> dict | None:
+        """Any decision (tool or not) repeated on an unchanged workspace is refused after
+        MAX_IDENTICAL_ACTIONS runs. Free text is ignored so rewording does not evade it."""
+        signature = digest([decision["kind"], decision.get("tool"), decision.get("args"), tree_before])
         seen = self.state.action_counts.get(signature, 0)
         if seen >= MAX_IDENTICAL_ACTIONS:
             self.state.no_progress_refusals += 1
-            return {"ok": False, "error_class": "no_progress", "error": "identical_action_on_unchanged_workspace",
-                    "detail": f"this exact action already ran {seen} times on this workspace state; "
+            return {"ok": False, "error_class": "no_progress", "error": "identical_decision_on_unchanged_workspace",
+                    "detail": f"this exact decision already ran {seen} times on this workspace state; "
                               "change approach"}
         self.state.action_counts[signature] = seen + 1
+        return None
+
+    def _observe_tool(self, decision: dict, tree_before: str) -> dict:
         outcome = self.engine.gateway.call(self.ctx, decision["tool"], decision["args"])
         return {"ok": outcome["ok"] and classify(outcome) is None, "error_class": classify(outcome),
                 "error": outcome.get("error"), "result": bound(outcome.get("result"))}
@@ -271,7 +276,10 @@ class AgentLoop:
                 continue
             s.consecutive_invalid = 0
             kind = decision["kind"]
-            if kind == "tool_call":
+            refusal = self._repeated(decision, tree_before) if kind != "request_approval" and kind != "stop" else None
+            if refusal is not None:
+                observation = refusal
+            elif kind == "tool_call":
                 observation = self._observe_tool(decision, tree_before)
             elif kind == "request_verification":
                 passed, verdict = self.checks_fn()
