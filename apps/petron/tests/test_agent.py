@@ -52,6 +52,13 @@ class DecisionContractTests(unittest.TestCase):
             self.assertEqual(classify(outcome), expected)
         self.assertIsNone(classify({"ok": True, "result": {"exit_code": 0, "timed_out": False}}))
 
+    def test_bounding_keeps_head_of_files_and_tail_of_output(self):
+        from petron.agent import bound
+        text = "HEAD" + "x" * 10000 + "TAIL"
+        bounded = bound({"content": text, "stderr": text}, limit=100)
+        self.assertTrue(bounded["content"].startswith("HEAD") and "read a line range" in bounded["content"])
+        self.assertTrue(bounded["stderr"].endswith("TAIL") and bounded["stderr"].startswith("[truncated"))
+
     def test_unittest_summary_parser(self):
         output = ("FAIL: test_x (tests.test_m.T.test_x)\nERROR: test_y (tests.test_m.T.test_y)\n"
                   "Ran 6 tests in 0.01s\n\nFAILED (failures=1, errors=1)\n")

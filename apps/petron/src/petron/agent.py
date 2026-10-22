@@ -121,16 +121,22 @@ def classify(outcome: dict) -> str | None:
     return "tool_error"
 
 
-def bound(value: Any, limit: int = OBSERVATION_TEXT_LIMIT) -> Any:
-    """Truncate long strings (keeping the tail of test output, the head of everything else)."""
+_TAIL_KEYS = frozenset({"stdout", "stderr", "output", "test_output_tail"})
+
+
+def bound(value: Any, limit: int = OBSERVATION_TEXT_LIMIT, _key: str | None = None) -> Any:
+    """Truncate long strings: keep the tail of execution output (where failures are reported)
+    and the head of everything else (file contents, diffs), and say so."""
     if isinstance(value, str):
         if len(value) <= limit:
             return value
-        return f"[truncated {len(value) - limit} chars]\n" + value[-limit:]
+        if _key in _TAIL_KEYS:
+            return f"[truncated: first {len(value) - limit} chars omitted]\n" + value[-limit:]
+        return value[:limit] + f"\n[truncated: last {len(value) - limit} chars omitted; read a line range]"
     if isinstance(value, dict):
-        return {key: bound(item, limit) for key, item in value.items()}
+        return {key: bound(item, limit, key) for key, item in value.items()}
     if isinstance(value, list):
-        return [bound(item, limit) for item in value[:200]]
+        return [bound(item, limit, _key) for item in value[:200]]
     return value
 
 
