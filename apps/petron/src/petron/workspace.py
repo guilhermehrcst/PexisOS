@@ -105,19 +105,66 @@ class Workspace:
             raise WorkspaceError("file_too_large")
         return path.read_text(encoding="utf-8", errors="replace")
 
-    def replace_once(self, rel: str, old: str, new: str) -> None:
+    def file_sha256(self, rel: str) -> str:
+        return hashlib.sha256(self.read_text(rel, limit=MAX_FILE_BYTES).encode()).hexdigest()
+
+    def read_lines(self, rel: str, start: int | None = None, end: int | None = None,
+                   limit: int = 64 * 1024) -> dict:
+        """A file (or a 1-based inclusive line range) plus the whole file's sha256 for atomic edits."""
+        text = self.read_text(rel, limit=MAX_FILE_BYTES)
+        lines = text.splitlines(keepends=True)
+        first = max(1, start or 1)
+        last = min(len(lines), end or len(lines))
+        if first > max(last, 1) and lines:
+            raise WorkspaceError("invalid_line_range")
+        content = "".join(lines[first - 1:last])
+        truncated = len(content) > limit
+        return {"path": rel, "content": content[:limit], "truncated": truncated, "start_line": first,
+                "end_line": last, "total_lines": len(lines), "sha256": hashlib.sha256(text.encode()).hexdigest()}
+
+    def search(self, pattern: str, prefix: str | None = None, max_results: int = 20) -> dict:
+        """Literal (non-regex) substring search over UTF-8 files; bounded output."""
+        if prefix:
+            self.resolve(prefix.rstrip("/"))  # same confinement rules as every other path
+        matches, files_scanned, truncated = [], 0, False
+        for rel in self.list_files():
+            if prefix and not (rel == prefix.rstrip("/") or rel.startswith(prefix.rstrip("/") + "/")):
+                continue
+            files_scanned += 1
+            try:
+                text = (self.root / rel).read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                continue
+            for number, line in enumerate(text.splitlines(), 1):
+                if pattern in line:
+                    if len(matches) >= max_results:
+                        truncated = True
+                        break
+                    matches.append({"path": rel, "line": number, "text": line[:300]})
+            if truncated:
+                break
+        return {"pattern": pattern, "matches": matches, "truncated": truncated, "files_scanned": files_scanned}
+
+    def replace_once(self, rel: str, old: str, new: str, expected_sha256: str | None = None) -> str:
+        """Replace exactly one occurrence; refuse if the file changed since ``expected_sha256``.
+        Returns the new file sha256."""
         path = self.resolve(rel)
         if not path.is_file():
             raise WorkspaceError("not_a_file")
         text = path.read_text(encoding="utf-8")
+        if expected_sha256 is not None and hashlib.sha256(text.encode()).hexdigest() != expected_sha256:
+            raise WorkspaceError("stale_file_version")
         count = text.count(old)
         if count != 1:
             raise WorkspaceError("old_text_not_unique" if count else "old_text_not_found")
         updated = text.replace(old, new, 1)
         if len(updated.encode()) > MAX_FILE_BYTES:
             raise WorkspaceError("file_too_large")
-        path.write_text(updated, encoding="utf-8")
-        os.chmod(path, 0o644)
+        temporary = path.with_name(f".{path.name}.petron-tmp")
+        temporary.write_text(updated, encoding="utf-8")
+        os.chmod(temporary, 0o644)
+        os.replace(temporary, path)  # atomic within the workspace filesystem
+        return hashlib.sha256(updated.encode()).hexdigest()
 
 
 def unified_diff(before_root: Path, after_root: Path, paths: list[str]) -> str:
