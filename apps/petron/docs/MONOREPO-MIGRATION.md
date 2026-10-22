@@ -73,13 +73,13 @@ throwaway merge; **not committed anywhere**, for the owner and PR #21 to decide)
 
 Structural coverage is not a legal conclusion (`legal_signoff` stays `not_recorded`).
 
-Decisions required before publication:
+Decisions:
 
-1. **License of PETRON.** Pushing this branch to the public repository publishes PETRON and,
-   absent another notice, places it under the repository's Apache-2.0. If PETRON is meant to
-   be proprietary or part of a future enterprise offering, it must not be pushed here.
+1. **License of PETRON: Apache-2.0** (owner decision, 2026-10-22). `apps/petron/LICENSE` is an
+   identical copy of `/LICENSE`; metadata and third-party notices in `docs/LICENSING.md`.
 2. Inventory classification of `apps/petron/` (rules above or others), to be added through
    PR #21's inventory once one of the two branches is rebased on the other.
 3. Whether PR #21's CI-bypass contract should also cover `petron.yml` (or all workflows).
-4. Third-party references: optional `anthropic` (installed only on request) and `mcp==2.2.0`
-   (same hash-locked file as the core); the sandbox image is referenced by digest, not vendored.
+4. Third-party references (not distributed): optional `anthropic` (Apache-2.0, installed only on
+   request) and `mcp==2.2.0` (MIT, same hash-locked file as the core); the sandbox image is
+   referenced by digest, not vendored. See `docs/LICENSING.md`.

@@ -48,6 +48,18 @@ class PetronDoesNotImportCore(unittest.TestCase):
         self.assertNotIn("pexislink", str(project.get("optional-dependencies", {})).lower())
 
 
+class LicenseTests(unittest.TestCase):
+    def test_package_declares_apache_2_and_ships_the_text(self):
+        project = tomllib.loads((PETRON_ROOT / "pyproject.toml").read_text())["project"]
+        self.assertEqual(project["license"], "Apache-2.0")
+        self.assertEqual(project["license-files"], ["LICENSE"])
+        self.assertIn("Apache License", (PETRON_ROOT / "LICENSE").read_text()[:200])
+
+    @unittest.skipUnless(IN_MONOREPO, "not inside the PexisOS monorepo")
+    def test_license_copy_matches_the_repository_license(self):
+        self.assertEqual((PETRON_ROOT / "LICENSE").read_bytes(), (REPO_ROOT / "LICENSE").read_bytes())
+
+
 @unittest.skipUnless(IN_MONOREPO, "not inside the PexisOS monorepo")
 class CoreDoesNotDependOnPetron(unittest.TestCase):
     def test_core_never_imports_petron(self):

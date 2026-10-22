@@ -52,13 +52,11 @@ Docker tests run only if the isolation probe passes; Agent Fabric tests need `mc
 monorepo's `src/` (or `PETRON_PEXISLINK_SRC`). Skips are reported, never counted as passes. CI:
 `.github/workflows/petron.yml` (the isolation job fails if anything is skipped).
 
-## Licensing status
+## License
 
-PETRON has no license field of its own yet. Publishing this directory in the public PexisOS
-repository would place it under the repository license (Apache-2.0, `/LICENSE`) unless decided
-otherwise. That decision, and its open-core inventory entry, are pending the owner's sign-off;
-see `docs/MONOREPO-MIGRATION.md`.
+Apache-2.0, the PexisOS repository license (`LICENSE` here is an identical copy of `/LICENSE`).
+Third-party components and notices: `docs/LICENSING.md`.
 
 Docs: `docs/ARCHITECTURE.md`, `docs/THREAT-MODEL.md`, `docs/adr/`, `docs/PREFLIGHT-2026-10-21.md`
 (historical: written when PETRON was a separate local repository), `docs/MONOREPO-MIGRATION.md`,
-`docs/experiments/PETRON-E001.md`.
+`docs/experiments/PETRON-E001.md`, `docs/LICENSING.md`.

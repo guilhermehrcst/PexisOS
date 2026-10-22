@@ -30,6 +30,7 @@ repository, two components that are integrable and operationally independent:
 ## Consequences
 
 - Cross-component changes can be reviewed and tested in one pull request.
-- PETRON becomes public when this branch is pushed; licensing must be decided first.
+- PETRON is published under Apache-2.0, the repository license (owner decision, 2026-10-22;
+  `docs/LICENSING.md`).
 - PETRON's history was imported with paths rewritten under `apps/petron/` (original SHAs
   recorded in the migration document).
