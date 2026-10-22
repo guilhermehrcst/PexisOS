@@ -19,9 +19,10 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from .agent import AgentLoop, LoopState
 from .mission import (VERIFICATION_COMMANDS, MissionSpec, MissionState, PlanRejected, is_protected, is_writable,
-                      sha256_json, validate_plan)
-from .providers import ProviderError, build_provider
+                      scope_document, sha256_json, validate_plan)
+from .providers import ProviderError, build_agent_provider, build_provider
 from .providers.base import PlanRequest
 from .redact import redact_text
 from .sandbox import DisabledSandbox, DockerSandbox, SandboxUnavailable
@@ -51,7 +52,8 @@ class Engine:
     def __init__(self, home: Path | str, *, clock: Callable[[], str] = utc_now,
                  sandbox_factory: Callable[[MissionSpec], Any] = default_sandbox,
                  connector_factory: Callable[[MissionSpec], Any] | None = None,
-                 provider_factory: Callable[..., Any] = build_provider):
+                 provider_factory: Callable[..., Any] = build_provider,
+                 agent_provider_factory: Callable[..., Any] = build_agent_provider):
         self.home = Path(home)
         self.home.mkdir(parents=True, exist_ok=True)
         os.chmod(self.home, 0o700)
@@ -59,6 +61,7 @@ class Engine:
         self.sandbox_factory = sandbox_factory
         self.connector_factory = connector_factory
         self.provider_factory = provider_factory
+        self.agent_provider_factory = agent_provider_factory
         self.gateway = Gateway()
 
     def close(self) -> None:
@@ -99,6 +102,13 @@ class Engine:
     def plan(self, mission_id: str, *, allow_real_model: bool = False) -> str:
         spec = self.store.spec(mission_id)
         self.store.transition(mission_id, S.CREATED, S.PLANNING)
+        if spec.mode == "agent":
+            # No model call: the operator approves the scope the loop will act within, not steps.
+            scope = scope_document(spec)
+            scope_sha256 = sha256_json(scope)
+            self.store.set_scope(mission_id, scope, scope_sha256)
+            self.store.transition(mission_id, S.PLANNING, S.AWAITING_APPROVAL, payload={"scope_sha256": scope_sha256})
+            return scope_sha256
         try:
             provider = self.provider_factory(spec.raw["provider"], allow_real_model=allow_real_model)
             if not provider.simulated:
@@ -143,7 +153,7 @@ class Engine:
         except StoreError:
             pass  # someone else (e.g. a cancel) moved the mission first; their state stands
 
-    def run(self, mission_id: str) -> MissionState:
+    def run(self, mission_id: str, *, allow_real_model: bool = False) -> MissionState:
         row = self.store.mission(mission_id)
         spec = self.store.spec(mission_id)
         if row["state"] != S.AWAITING_APPROVAL.value:
@@ -151,6 +161,12 @@ class Engine:
         plan_sha256 = row["plan_sha256"]
         if self.store.approval_for(mission_id, plan_sha256) is None:
             raise EngineError("approval_missing")
+        agent_provider = None
+        if spec.mode == "agent":
+            try:  # built before running: a refused provider leaves the mission awaiting approval
+                agent_provider = self.agent_provider_factory(spec.raw["provider"], allow_real_model=allow_real_model)
+            except ProviderError as error:
+                raise EngineError(f"provider_error:{error.code}") from None
         try:
             self.store.transition(mission_id, S.AWAITING_APPROVAL, S.RUNNING, payload={"plan_sha256": plan_sha256})
         except StoreError as error:
@@ -158,7 +174,7 @@ class Engine:
         current = S.RUNNING
         try:
             plan = json.loads(row["plan_json"])
-            if sha256_json(plan) != plan_sha256:
+            if sha256_json(plan) != plan_sha256 or (spec.mode == "agent" and plan != scope_document(spec)):
                 self._fail(mission_id, current, "plan_integrity")
                 return self.store.state(mission_id)
             sandbox = self.sandbox_factory(spec)
@@ -179,7 +195,9 @@ class Engine:
                                         {"exit_code": baseline.exit_code, "timed_out": baseline.timed_out})
                 self.store.put_artifact(mission_id, "tests.before.txt", baseline.stdout + baseline.stderr)
             connector = self.connector_factory(spec) if (self.connector_factory and "pexisos" in spec.raw) else None
-            ctx = MissionContext(self.store, spec, work, sandbox, plan_sha256, connector)
+            ctx = MissionContext(self.store, spec, work, sandbox, plan_sha256, connector, base=base)
+            if spec.mode == "agent":
+                return self._run_agent(mission_id, spec, ctx, base, work, sandbox, probe.ok, argv, agent_provider)
             for index, step in enumerate(plan["steps"]):
                 outcome = self.gateway.call(ctx, step["tool"], step["args"])
                 self.store.append_event(mission_id, "step.outcome",
@@ -195,8 +213,9 @@ class Engine:
             self._fail(mission_id, current, f"internal_error:{type(error).__name__}")
             return self.store.state(mission_id)
 
-    def _verify(self, mission_id: str, spec: MissionSpec, base: Workspace, work: Workspace, sandbox: Any,
-                isolation_ok: bool, argv: tuple[str, ...]) -> MissionState:
+    def _checks(self, mission_id: str, spec: MissionSpec, base: Workspace, work: Workspace, sandbox: Any,
+                isolation_ok: bool, argv: tuple[str, ...]) -> dict:
+        """Runtime-owned checks of the current workspace. Records nothing (the loop may call it)."""
         before, after = snapshot(base.root), snapshot(work.root)
         changed = changed_paths(before, after)
         protected = sorted(p for p in set(before) | set(after) if is_protected(spec, p))
@@ -207,13 +226,13 @@ class Engine:
                                      == self._source_tree(mission_id),
         }
         diff = unified_diff(base.root, work.root, changed)
-        self.store.put_artifact(mission_id, "diff.patch", diff)
         tests: dict[str, Any] = {"ran": False}
+        output = ""
         if isolation_ok:
             try:
                 result = sandbox.run(work.root, argv, spec.budget["exec_timeout_s"])
                 tests = {"ran": True, "exit_code": result.exit_code, "timed_out": result.timed_out}
-                self.store.put_artifact(mission_id, "tests.after.txt", result.stdout + result.stderr)
+                output = result.stdout + result.stderr
                 checks["tests_pass_in_sandbox"] = result.exit_code == 0 and not result.timed_out
             except SandboxUnavailable as error:
                 tests["reason"] = error.reason
@@ -221,10 +240,21 @@ class Engine:
         else:
             tests["reason"] = "isolation_unavailable"
             checks["tests_pass_in_sandbox"] = False  # fail closed: unverified is not verified
+        return {"checks": checks, "changed_paths": changed, "protected_paths": protected, "tests": tests,
+                "diff": diff, "output": output}
+
+    def _verify(self, mission_id: str, spec: MissionSpec, base: Workspace, work: Workspace, sandbox: Any,
+                isolation_ok: bool, argv: tuple[str, ...]) -> MissionState:
+        result = self._checks(mission_id, spec, base, work, sandbox, isolation_ok, argv)
+        checks = result["checks"]
+        self.store.put_artifact(mission_id, "diff.patch", result["diff"])
+        if result["tests"]["ran"]:
+            self.store.put_artifact(mission_id, "tests.after.txt", result["output"])
         chain_ok, _ = self.store.verify_chain()
         checks["event_chain_intact"] = chain_ok
-        verdict = {"checks": checks, "changed_paths": changed, "protected_paths": protected, "tests": tests,
-                   "diff_sha256": sha256_json(diff)}
+        verdict = {"checks": checks, "changed_paths": result["changed_paths"],
+                   "protected_paths": result["protected_paths"], "tests": result["tests"],
+                   "diff_sha256": sha256_json(result["diff"])}
         self.store.append_event(mission_id, "verification.result", verdict)
         failed = sorted(name for name, ok in checks.items() if not ok)
         if failed:
@@ -232,6 +262,84 @@ class Engine:
         else:
             self.store.transition(mission_id, S.VERIFYING, S.COMPLETED)
         return self.store.state(mission_id)
+
+    # agent mode ------------------------------------------------------------------------------
+    def _run_agent(self, mission_id: str, spec: MissionSpec, ctx: MissionContext, base: Workspace,
+                   work: Workspace, sandbox: Any, isolation_ok: bool, argv: tuple[str, ...], provider: Any,
+                   state: LoopState | None = None) -> MissionState:
+        try:
+            self.store.acquire_lease(mission_id)
+        except StoreError as error:
+            raise EngineError(error.code) from None
+
+        def precheck() -> tuple[bool, dict]:
+            result = self._checks(mission_id, spec, base, work, sandbox, isolation_ok, argv)
+            passed = all(result["checks"].values())
+            return passed, {"checks": result["checks"], "changed_paths": result["changed_paths"],
+                            "tests": result["tests"], "test_output_tail": result["output"][-4000:]}
+
+        outcome = AgentLoop(self, spec, ctx, provider, precheck, state).run()
+        self.store.append_event(mission_id, "agent.outcome", {"verify": outcome.verify, "reason": outcome.reason})
+        if not outcome.verify:
+            if outcome.reason != "interrupted":
+                self._fail(mission_id, S.RUNNING, outcome.reason)
+            return self.store.state(mission_id)
+        self.store.transition(mission_id, S.RUNNING, S.VERIFYING)
+        return self._verify(mission_id, spec, base, work, sandbox, isolation_ok, argv)
+
+    def resume(self, mission_id: str, *, allow_real_model: bool = False) -> MissionState:
+        """Continue an interrupted agent mission from its last checkpoint, only if the workspace is
+        exactly as recorded there (otherwise the effect of the interrupted step is unknown)."""
+        row = self.store.mission(mission_id)
+        spec = self.store.spec(mission_id)
+        if row["state"] != S.RUNNING.value:
+            raise EngineError("not_running")
+        if spec.mode != "agent":
+            raise EngineError("resume_supported_for_agent_mode_only")
+        if self.store.lease_alive(mission_id):
+            raise EngineError("lease_held")
+        try:
+            provider = self.agent_provider_factory(spec.raw["provider"], allow_real_model=allow_real_model)
+        except ProviderError as error:
+            raise EngineError(f"provider_error:{error.code}") from None
+        if not provider.simulated:
+            raise EngineError("resume_unsupported_for_real_provider")  # its conversation lives in memory
+        events = self.store.events(mission_id)
+        turns = [e["payload"] for e in events if e["kind"] == "agent.turn"]
+        checkpoints = [e["payload"] for e in events if e["kind"] == "agent.checkpoint"]
+        created = [e["payload"] for e in events if e["kind"] == "workspace.created"]
+        area = self.home / "workspaces" / mission_id
+        base, work = Workspace(area / "base"), Workspace(area / "work")
+        if not created or not (base.root.is_dir() and work.root.is_dir()):
+            self._fail(mission_id, S.RUNNING, "resume_refused:workspace_missing")
+            return self.store.state(mission_id)
+        expected = checkpoints[-1]["workspace_tree_sha256"] if checkpoints else created[-1]["tree_sha256"]
+        if tree_sha256(snapshot(work.root)) != expected:
+            self._fail(mission_id, S.RUNNING, "resume_refused:workspace_diverged")
+            return self.store.state(mission_id)
+        sandbox = self.sandbox_factory(spec)
+        probe = sandbox.probe()
+        self.store.append_event(mission_id, "sandbox.probe", probe.to_dict())
+        last = checkpoints[-1] if checkpoints else {}
+        state = LoopState(iteration=last.get("iteration", 0), model_calls=last.get("model_calls", 0),
+                          tokens=last.get("tokens", 0), consecutive_invalid=last.get("consecutive_invalid", 0),
+                          no_progress_refusals=last.get("no_progress_refusals", 0),
+                          action_counts=dict(last.get("action_counts", {})),
+                          history=[{k: t[k] for k in ("iteration", "decision", "observation")} for t in turns],
+                          verified_tree=last.get("verified_tree"))
+        connector = self.connector_factory(spec) if (self.connector_factory and "pexisos" in spec.raw) else None
+        ctx = MissionContext(self.store, spec, work, sandbox, row["plan_sha256"], connector, base=base,
+                             tool_calls=last.get("tool_calls", 0))
+        self.store.append_event(mission_id, "agent.resumed", {"from_iteration": state.iteration,
+                                                              "workspace_tree_sha256": expected})
+        argv = VERIFICATION_COMMANDS[spec.raw["verification"]["command"]]
+        try:
+            return self._run_agent(mission_id, spec, ctx, base, work, sandbox, probe.ok, argv, provider, state)
+        except EngineError:
+            raise
+        except Exception as error:
+            self._fail(mission_id, self.store.state(mission_id), f"internal_error:{type(error).__name__}")
+            return self.store.state(mission_id)
 
     def discard_workspaces(self, mission_id: str) -> None:
         state = self.store.state(mission_id)

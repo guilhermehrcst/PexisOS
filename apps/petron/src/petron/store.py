@@ -18,6 +18,8 @@ import datetime as _dt
 import hashlib
 import json
 import os
+import secrets
+import socket
 import sqlite3
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -208,6 +210,49 @@ class Store:
             self._append(db, mission_id, "plan.proposed", {"plan_sha256": plan_sha256, "provider": provider_info,
                                                            "steps": plan["steps"], "rationale": plan["rationale"]})
 
+    def set_scope(self, mission_id: str, scope: dict, scope_sha256: str) -> None:
+        """Agent missions store their scope document where plans live: written once, while
+        ``planning``, protected by the same SQL triggers, approved by the same hash check."""
+        with self._tx() as db:
+            cursor = db.execute("UPDATE missions SET plan_json = ?, plan_sha256 = ?, updated_at = ? "
+                                "WHERE mission_id = ? AND state = 'planning' AND plan_json IS NULL",
+                                (canonical_json(scope), scope_sha256, self.clock(), mission_id))
+            if cursor.rowcount != 1:
+                raise StoreError("plan_conflict")
+            self._append(db, mission_id, "scope.proposed", {"scope_sha256": scope_sha256, "scope": scope})
+
+    # leases ---------------------------------------------------------------------------------
+    def acquire_lease(self, mission_id: str) -> dict:
+        """One live runner per mission. A previous holder blocks only while its process is alive
+        on this host; a holder on another host always blocks (liveness cannot be checked)."""
+        holder = {"pid": os.getpid(), "host": socket.gethostname(), "token": secrets.token_hex(8)}
+        with self._tx() as db:
+            row = db.execute("SELECT payload_json FROM events WHERE mission_id = ? AND kind = 'run.lease' "
+                             "ORDER BY seq DESC LIMIT 1", (mission_id,)).fetchone()
+            if row:
+                previous = json.loads(row["payload_json"])
+                if previous.get("host") != holder["host"]:
+                    raise StoreError("lease_held_elsewhere")
+                if previous.get("pid") != holder["pid"] and _pid_alive(previous.get("pid")):
+                    raise StoreError("lease_held")
+            self._append(db, mission_id, "run.lease", holder)
+        return holder
+
+    def lease_alive(self, mission_id: str) -> bool | None:
+        row = self._db.execute("SELECT payload_json FROM events WHERE mission_id = ? AND kind = 'run.lease' "
+                               "ORDER BY seq DESC LIMIT 1", (mission_id,)).fetchone()
+        if row is None:
+            return None
+        previous = json.loads(row["payload_json"])
+        if previous.get("host") != socket.gethostname():
+            return True
+        # A lease held by this very process belongs to a run that already unwound (crashed).
+        return previous.get("pid") != os.getpid() and _pid_alive(previous.get("pid"))
+
+    def missions(self) -> list[dict]:
+        return [dict(r) for r in self._db.execute(
+            "SELECT mission_id, state, failure_reason, created_at, updated_at FROM missions ORDER BY created_at")]
+
     # approvals ----------------------------------------------------------------------------
     def record_approval(self, mission_id: str, plan_sha256: str, approver: str, channel: str) -> None:
         with self._tx() as db:
@@ -245,3 +290,15 @@ class Store:
     def raw(self) -> sqlite3.Connection:
         """Direct connection, for tests that prove the SQL-level guards hold."""
         return self._db
+
+
+def _pid_alive(pid) -> bool:
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
