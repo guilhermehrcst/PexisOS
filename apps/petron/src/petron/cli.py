@@ -12,6 +12,8 @@
     petron fabric probe --principal ID --pexislink-src DIR --pexislink-src-sha256 HEX [--fabric-python PY]
     petron experiment e001 [--approver NAME] [--sandbox docker|none] [--image REF]
     petron experiment e002 [--approver NAME] [--provider deterministic|anthropic --allow-real-model]
+    petron brain serve [--port 8765]     (loopback-only; read-only by default)
+    petron brain serve --interactive --template SPEC.json [--allow-real-model]
     petron provider check --model ID      (Models API; needs ANTHROPIC_API_KEY)
 
 Exit codes: 0 success; 1 the mission or check did not succeed; 2 invalid input or refused.
@@ -273,6 +275,16 @@ def build_parser() -> argparse.ArgumentParser:
     experiment.add_argument("--image", default=DEFAULT_IMAGE)
     experiment.add_argument("--mission-id")
 
+    brain = sub.add_parser("brain", help="the Brain interface, connected read-only to this PETRON_HOME")
+    brain.add_argument("action", choices=["serve"])
+    brain.add_argument("--host", default="127.0.0.1", help="loopback only: 127.0.0.1, ::1 or localhost")
+    brain.add_argument("--port", type=int, default=8765)
+    brain.add_argument("--interactive", action="store_true",
+                       help="accept mission drafts and hold-to-approve from the Brain (needs --template)")
+    brain.add_argument("--template", help="agent-mode spec the operator authorizes for Brain missions")
+    brain.add_argument("--allow-real-model", action="store_true",
+                       help="permit a template whose provider is a real (paid) model")
+
     provider = sub.add_parser("provider")
     provider.add_argument("action", choices=["check"])
     provider.add_argument("--model", default="claude-opus-5-5")
@@ -285,6 +297,46 @@ def main(argv: list[str] | None = None) -> int:
             (args.plan_sha256 or args.scope_sha256) and args.approver):
         print("error: approve needs --plan-sha256 (or --scope-sha256) and --approver", file=sys.stderr)
         return 2
+    if args.command == "brain":
+        import secrets as _secrets
+        from .brain_bridge import serve
+        commands, secret = None, None
+        if args.interactive or args.template:
+            if not (args.interactive and args.template):
+                print("error: --interactive and --template go together", file=sys.stderr)
+                return 2
+            from .brain_commands import BrainCommands, load_template
+            try:
+                commands = BrainCommands(_home(args), load_template(Path(args.template)),
+                                         allow_real_model=args.allow_real_model)
+            except (ValueError, OSError, SchemaError) as error:
+                print(f"error: template refused: {error}", file=sys.stderr)
+                return 2
+            secret = _secrets.token_urlsafe(32)
+        try:
+            server = serve(_home(args), args.host, args.port, commands, secret)
+        except (ValueError, FileNotFoundError, OSError) as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 2
+        host = f"[{args.host}]" if ":" in args.host else args.host
+        base = f"http://{host}:{server.port}/"
+        if commands is None:
+            print(f"PETRON Brain (read-only) at {base}  state: {_home(args)}", flush=True)
+        else:
+            print(f"PETRON Brain (interactive) at {base}#k={secret}\n"
+                  f"  state: {_home(args)}   template: {args.template}\n"
+                  "  The key after #k= is valid until this process stops; it never reaches the server in URLs.\n"
+                  "  Tap the sphere (or Enter) and type a request; Enter sends, Escape cancels.\n"
+                  "  While it waits, press and hold the sphere ~2 s (or hold Space) to approve; Escape discards.",
+                  flush=True)
+        try:
+            server.serve_forever()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            server.stopping.set()
+            server.server_close()
+        return 0
     if args.command == "provider":
         from .providers import ProviderError
         from .providers.anthropic_provider import check_model
