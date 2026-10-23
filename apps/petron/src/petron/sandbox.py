@@ -1,0 +1,375 @@
+"""Isolated execution (M2). Execution is enabled only after the isolation is *measured*.
+
+``DockerSandbox.probe()`` runs a probe inside a container started with exactly the flags
+real runs use and checks, from the inside, what the container can do. Every required check
+must pass or ``run`` refuses. There is no host fallback: when isolation cannot be shown, code
+does not run. ``DisabledSandbox`` is what a mission gets when no backend is configured.
+
+The command comes from ``VERIFICATION_COMMANDS`` (selected by the operator's spec); no
+provider-supplied argv ever reaches ``docker``.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import secrets
+import shutil
+import subprocess
+import tempfile
+import threading
+import time
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from .redact import redact_text
+
+MAX_OUTPUT = 64 * 1024                 # characters kept per stream, however much the container writes
+_HEAD_BYTES = 48 * 1024                # the first bytes of a stream ...
+_TAIL_BYTES = 16 * 1024                # ... and the last: a unittest summary is printed at the end
+_CHUNK = 64 * 1024
+_KILL_GRACE_S = 20
+_DEADLINE_SLACK_S = 10                 # the container's own deadline sits after the host's
+_IMAGE = re.compile(r"^[a-z0-9./_-]+@sha256:[0-9a-f]{64}$")
+_MEMORY = "256m"
+_PIDS = "64"
+_CPUS = 1.0
+
+# Runs inside the container. Prints one JSON object describing what the process can do.
+_PROBE = r"""
+import json, os, socket
+r = {}
+s = open('/proc/self/status').read()
+f = dict(l.split(':', 1) for l in s.splitlines() if ':' in l)
+r['uid'] = os.getuid(); r['gid'] = os.getgid()
+r['cap_eff'] = f['CapEff'].strip(); r['cap_prm'] = f['CapPrm'].strip(); r['cap_bnd'] = f['CapBnd'].strip()
+r['no_new_privs'] = f.get('NoNewPrivs', '').strip(); r['seccomp'] = f.get('Seccomp', '').strip()
+r['interfaces'] = sorted(os.listdir('/sys/class/net'))
+try:
+    c = socket.socket(); c.settimeout(2); c.connect(('192.0.2.1', 9)); r['egress'] = 'open'
+except OSError:
+    r['egress'] = 'blocked'
+def writable(p):
+    try:
+        open(p, 'w').close(); os.unlink(p); return True
+    except OSError:
+        return False
+r['root_writable'] = writable('/petron-probe'); r['work_writable'] = writable('/work/.petron-probe')
+r['docker_socket'] = any(os.path.exists(p) for p in ('/var/run/docker.sock', '/run/docker.sock'))
+r['env_names'] = sorted(os.environ)
+def first(*ps):
+    for p in ps:
+        try:
+            return open(p).read().strip()
+        except OSError:
+            pass
+    return None
+r['pids_max'] = first('/sys/fs/cgroup/pids.max', '/sys/fs/cgroup/pids/pids.max')
+r['memory_max'] = first('/sys/fs/cgroup/memory.max', '/sys/fs/cgroup/memory/memory.limit_in_bytes')
+r['cpu_max'] = first('/sys/fs/cgroup/cpu.max')
+q = first('/sys/fs/cgroup/cpu/cpu.cfs_quota_us', '/sys/fs/cgroup/cpu,cpuacct/cpu.cfs_quota_us')
+p = first('/sys/fs/cgroup/cpu/cpu.cfs_period_us', '/sys/fs/cgroup/cpu,cpuacct/cpu.cfs_period_us')
+r['cpu_cfs'] = [q, p] if q is not None and p is not None else None
+import shutil
+r['has_timeout'] = shutil.which('timeout') is not None
+print(json.dumps(r))
+"""
+_PETRON_ENV = frozenset({"PYTHONDONTWRITEBYTECODE", "HOME", "HOSTNAME"})
+
+
+class SandboxUnavailable(Exception):
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
+
+
+@dataclass
+class ProbeReport:
+    backend: str
+    ok: bool
+    checks: dict[str, bool] = field(default_factory=dict)
+    info: dict = field(default_factory=dict)
+    reason: str | None = None
+
+    def to_dict(self) -> dict:
+        return {"backend": self.backend, "ok": self.ok, "checks": self.checks, "info": self.info,
+                "reason": self.reason}
+
+
+@dataclass
+class RunResult:
+    exit_code: int
+    stdout: str
+    stderr: str
+    timed_out: bool
+    cancelled: bool = False
+    stdout_bytes: int = 0          # what the container wrote, not what was kept
+    stderr_bytes: int = 0
+    stdout_truncated: bool = False
+    stderr_truncated: bool = False
+
+    def to_dict(self) -> dict:
+        return {"exit_code": self.exit_code, "timed_out": self.timed_out, "cancelled": self.cancelled,
+                "stdout": self.stdout, "stderr": self.stderr,
+                "stdout_bytes": self.stdout_bytes, "stderr_bytes": self.stderr_bytes,
+                "stdout_truncated": self.stdout_truncated, "stderr_truncated": self.stderr_truncated}
+
+
+class DisabledSandbox:
+    backend = "none"
+
+    def probe(self) -> ProbeReport:
+        return ProbeReport("none", False, reason="no_isolation_backend")
+
+    def run(self, workspace: Path, argv: tuple[str, ...], timeout_s: int, cancelled=None) -> RunResult:
+        raise SandboxUnavailable("no_isolation_backend")
+
+
+def _cap(text: str) -> str:
+    text = redact_text(text)
+    return text if len(text) <= MAX_OUTPUT else text[:MAX_OUTPUT] + "\n[truncated]"
+
+
+class _BoundedReader(threading.Thread):
+    """Drains one pipe continuously (so the child can never block on a full pipe) while keeping only
+    the first and last bytes. Memory is constant: ``head`` + at most two tails, whatever is written."""
+
+    def __init__(self, fd: int):
+        super().__init__(daemon=True)
+        self.fd, self.head, self.tail, self.total = fd, bytearray(), bytearray(), 0
+
+    def run(self) -> None:
+        while True:
+            try:
+                chunk = os.read(self.fd, _CHUNK)
+            except OSError:
+                return
+            if not chunk:
+                return
+            self.total += len(chunk)
+            room = _HEAD_BYTES - len(self.head)
+            if room > 0:
+                self.head += chunk[:room]
+                chunk = chunk[room:]
+            if chunk:
+                self.tail += chunk
+                if len(self.tail) > 2 * _TAIL_BYTES:
+                    del self.tail[:len(self.tail) - _TAIL_BYTES]
+
+    def text(self) -> tuple[str, int, bool]:
+        tail = bytes(self.tail[-_TAIL_BYTES:]) if self.total > len(self.head) else b""
+        omitted = self.total - len(self.head) - len(tail)
+        middle = f"\n[... {omitted} bytes omitted ...]\n" if omitted > 0 else ""
+        text = redact_text(bytes(self.head).decode("utf-8", "replace") + middle + tail.decode("utf-8", "replace"))
+        return text[:MAX_OUTPUT + 64], self.total, omitted > 0
+
+
+def isolation_checks(inside: dict, image_env: list[str]) -> dict[str, bool]:
+    """Pure function over what the probe measured inside the container. Every ceiling must be
+    *measured* and no greater than the declared one; an unreadable value fails closed."""
+    def number(value) -> int | None:
+        try:
+            return int(str(value).strip())
+        except (TypeError, ValueError):
+            return None
+
+    def cpu_ok() -> bool:
+        quota = period = None
+        raw = inside.get("cpu_max")
+        if isinstance(raw, str) and len(raw.split()) == 2:
+            quota, period = (number(part) for part in raw.split())
+        elif isinstance(inside.get("cpu_cfs"), list) and len(inside["cpu_cfs"]) == 2:
+            quota, period = (number(part) for part in inside["cpu_cfs"])
+        return bool(quota and period and quota > 0 and period > 0 and quota / period <= _CPUS + 1e-9)
+
+    pids, memory = number(inside.get("pids_max")), number(inside.get("memory_max"))
+    return {
+        "non_root_uid": inside["uid"] != 0 and inside["gid"] != 0,
+        "no_effective_capabilities": int(inside["cap_eff"], 16) == 0,
+        "no_permitted_capabilities": int(inside["cap_prm"], 16) == 0,
+        "empty_bounding_set": int(inside["cap_bnd"], 16) == 0,
+        "no_new_privileges": inside["no_new_privs"] == "1",
+        "seccomp_filter_active": inside["seccomp"] == "2",
+        "loopback_only": inside["interfaces"] == ["lo"],
+        "egress_blocked": inside["egress"] == "blocked",
+        "root_fs_read_only": inside["root_writable"] is False,
+        "workspace_read_only": inside["work_writable"] is False,
+        "no_docker_socket": inside["docker_socket"] is False,
+        # Exactly the pinned image's own ENV plus what PETRON sets: nothing from the host leaks in.
+        "only_expected_env": set(inside["env_names"]) <= set(image_env) | _PETRON_ENV,
+        "pids_limited": pids is not None and 0 < pids <= int(_PIDS),
+        "memory_limited": memory is not None and 0 < memory <= 256 * 1024 * 1024,
+        "cpu_limited": cpu_ok(),
+        # The container must be able to end itself if the host loses the daemon.
+        "intrinsic_deadline_available": inside.get("has_timeout") is True,
+    }
+
+
+class DockerSandbox:
+    backend = "docker"
+
+    def __init__(self, image: str, docker: str | None = None):
+        if not _IMAGE.fullmatch(image):
+            raise ValueError("image must be pinned by digest")
+        self.image = image
+        self.docker = docker or shutil.which("docker")
+        self._verified: ProbeReport | None = None
+
+    def _env(self) -> dict[str, str]:
+        env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin")}
+        if "HOME" in os.environ:
+            env["HOME"] = os.environ["HOME"]
+        return env
+
+    def _cli(self, args: list[str], timeout: float) -> subprocess.CompletedProcess:
+        return subprocess.run([self.docker, *args], capture_output=True, text=True, timeout=timeout,
+                              env=self._env(), stdin=subprocess.DEVNULL)
+
+    def _flags(self, workspace: Path, name: str) -> list[str]:
+        source = str(Path(workspace).resolve(strict=True))
+        if "," in source or "=" in source:
+            raise SandboxUnavailable("unsupported_workspace_path")
+        return ["run", "--rm", "--name", name, "--pull", "never", "--network", "none", "--cap-drop", "ALL",
+                "--security-opt", "no-new-privileges", "--read-only", "--tmpfs", "/tmp:rw,noexec,nosuid,size=16m",
+                "--user", "65534:65534", "--pids-limit", _PIDS, "--memory", _MEMORY, "--memory-swap", _MEMORY,
+                "--cpus", "1", "--ulimit", "nofile=256:256", "--log-driver", "none", "--hostname", "petron",
+                "--mount", f"type=bind,source={source},target=/work,readonly", "--workdir", "/work",
+                "-e", "PYTHONDONTWRITEBYTECODE=1", "-e", "HOME=/tmp", self.image]
+
+    def probe(self) -> ProbeReport:
+        report = ProbeReport("docker", False)
+        if not self.docker:
+            report.reason = "docker_cli_missing"
+            return report
+        try:
+            server = self._cli(["version", "--format", "{{.Server.Version}}"], 20)
+            if server.returncode != 0:
+                report.reason = "docker_daemon_unreachable"
+                return report
+            report.info["server_version"] = server.stdout.strip()
+            sec = self._cli(["info", "--format", "{{json .SecurityOptions}}"], 20)
+            options = json.loads(sec.stdout or "[]") if sec.returncode == 0 else []
+            report.info["security_options"] = options
+            report.info["rootless"] = any("rootless" in option for option in options)
+            report.checks["daemon_seccomp"] = any("seccomp" in option for option in options)
+            image = self._cli(["image", "inspect", "--format", "{{json .Config.Env}}", self.image], 20)
+            report.checks["image_present_pinned"] = image.returncode == 0
+            if image.returncode != 0:
+                report.reason = "image_not_present"
+                return report
+            image_env = sorted(item.split("=", 1)[0] for item in (json.loads(image.stdout or "[]") or []))
+            report.info["image_env_names"] = image_env
+            with tempfile.TemporaryDirectory(prefix="petron-probe-") as workdir:
+                os.chmod(workdir, 0o755)
+                name = f"petron-probe-{secrets.token_hex(6)}"
+                proc = self._run_bounded([self.docker, *self._flags(Path(workdir), name), "python", "-I", "-c", _PROBE],
+                                         name, 60)
+            if proc.exit_code != 0 or proc.timed_out:
+                report.reason = "probe_container_failed"
+                report.info["stderr"] = _cap(proc.stderr)[:2000]
+                return report
+            inside = json.loads(proc.stdout.strip().splitlines()[-1])
+        except SandboxUnavailable as error:
+            report.reason = f"probe_{error.reason}"
+            return report
+        except (OSError, subprocess.SubprocessError, ValueError, IndexError):
+            report.reason = "probe_error"
+            return report
+        report.info["inside"] = inside
+        try:
+            report.checks.update(isolation_checks(inside, image_env))
+        except (KeyError, TypeError, ValueError):
+            report.reason = "probe_error"
+            return report
+        report.ok = all(report.checks.values())
+        if not report.ok:
+            report.reason = "isolation_check_failed:" + ",".join(sorted(k for k, v in report.checks.items() if not v))
+        self._verified = report if report.ok else None
+        return report
+
+    def _deadline_wrapped(self, argv: tuple[str, ...], timeout_s: int) -> tuple[str, ...]:
+        """The container carries its own, later deadline: if the host loses the daemon (or cannot
+        kill the container) the workload still ends by itself. The probe checks `timeout` exists."""
+        return ("timeout", "-s", "KILL", str(int(timeout_s) + _DEADLINE_SLACK_S), *argv)
+
+    def _gone(self, name: str) -> bool:
+        deadline = time.monotonic() + 6
+        while True:
+            try:
+                listed = self._cli(["ps", "-a", "--filter", f"name=^{name}$", "--format", "{{.Names}}"], 15)
+                if listed.returncode == 0 and not listed.stdout.strip():
+                    return True
+            except (OSError, subprocess.SubprocessError):
+                pass
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.3)
+
+    def _terminate(self, name: str, client: subprocess.Popen) -> None:
+        """Kill the container, fall back to force removal, always reap the local client, and
+        report (never swallow) a container that could not be removed."""
+        steps = (["kill", name], ["rm", "-f", name])
+        gone = False
+        for step in steps:
+            try:
+                self._cli(step, _KILL_GRACE_S)
+            except (OSError, subprocess.SubprocessError):
+                pass
+            if self._gone(name):
+                gone = True
+                break
+        try:
+            client.kill()
+            client.wait(timeout=10)
+        except (OSError, subprocess.SubprocessError):
+            pass
+        if not gone:
+            raise SandboxUnavailable("container_cleanup_failed")
+
+    def _run_bounded(self, command: list[str], name: str, timeout_s: float,
+                     cancelled: Callable[[], bool] | None = None) -> RunResult:
+        try:
+            proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                    env=self._env(), stdin=subprocess.DEVNULL)
+        except OSError:
+            raise SandboxUnavailable("docker_exec_failed") from None
+        readers = (_BoundedReader(proc.stdout.fileno()), _BoundedReader(proc.stderr.fileno()))
+        for reader in readers:
+            reader.start()
+        timed_out = was_cancelled = False
+        deadline = time.monotonic() + timeout_s
+        try:
+            while proc.poll() is None:
+                if cancelled is not None:
+                    try:
+                        was_cancelled = bool(cancelled())
+                    except Exception:  # a failing probe must not cancel (or crash) a run
+                        was_cancelled = False
+                    if was_cancelled:
+                        break
+                if time.monotonic() >= deadline:
+                    timed_out = True
+                    break
+                time.sleep(0.05)
+            if timed_out or was_cancelled:
+                self._terminate(name, proc)
+            else:
+                proc.wait()
+        finally:
+            for reader in readers:
+                reader.join(15)
+            proc.stdout.close()
+            proc.stderr.close()
+        (out, out_total, out_cut), (err, err_total, err_cut) = readers[0].text(), readers[1].text()
+        code = -1 if (timed_out or was_cancelled) else proc.returncode
+        return RunResult(code, out, err, timed_out, was_cancelled, out_total, err_total, out_cut, err_cut)
+
+    def run(self, workspace: Path, argv: tuple[str, ...], timeout_s: int,
+            cancelled: Callable[[], bool] | None = None) -> RunResult:
+        if self._verified is None:
+            raise SandboxUnavailable("isolation_not_verified")
+        name = f"petron-run-{secrets.token_hex(6)}"
+        command = [self.docker, *self._flags(workspace, name), *self._deadline_wrapped(argv, timeout_s)]
+        return self._run_bounded(command, name, timeout_s, cancelled)
