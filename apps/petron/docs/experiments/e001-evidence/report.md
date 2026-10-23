@@ -4,10 +4,10 @@
 
 - Objective: Synthetic fixture: calc.stats.median() returns the wrong value for even-length input. Make the existing tests pass by fixing calc/stats.py only. Tests are protected.
 - Final state: **completed**
-- Spec sha256: `742d923c740afd9299dbfb010760cd40962e0f1060808e0bcd60c5675e14a6bf`
+- Spec sha256: `d9fef326d258cba34ea4a7aad80f14464d3a58575bf505c80d613d253bb1e952`
 - Plan sha256: `97df38f807abe869e7bf10f6cf795bf4f20907ca5236cbcd8a02beb3fd8df6d8`
 - Provider: `{"model": null, "provider": "deterministic", "script": "e001_fix_median", "simulated": true}`
-- Event chain: intact (26 mission events)
+- Event chain (unkeyed hash chain; see `petron events verify`): intact (26 mission events)
 
 ## State transitions
 
@@ -24,10 +24,12 @@
 ## Isolation
 
 - Backend `docker`: verified
+  - PASS cpu_limited
   - PASS daemon_seccomp
   - PASS egress_blocked
   - PASS empty_bounding_set
   - PASS image_present_pinned
+  - PASS intrinsic_deadline_available
   - PASS loopback_only
   - PASS memory_limited
   - PASS no_docker_socket

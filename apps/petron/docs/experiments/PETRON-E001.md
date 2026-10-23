@@ -1,6 +1,6 @@
 # PETRON-E001 — Autonomous Software Engineering (infrastructure run)
 
-- Date: 2026-10-21
+- Date: 2026-10-21 (first run); evidence regenerated 2026-10-23 on the security-hardened runtime
 - Provider: **deterministic (simulated)**, script `e001_fix_median`
 - Result: **completed** with isolation; **failed closed** without isolation
 - Evidence: `docs/experiments/e001-evidence/` (transcript, Markdown + JSON reports)
@@ -9,6 +9,15 @@
 > advance as a script. No model reasoned about the defect. What is demonstrated is that
 > PETRON receives, persists, gates, isolates, executes, verifies and records a code change
 > correctly, and refuses when it cannot.
+
+> **Evidence regeneration.** The first evidence set (2026-10-21) predates the review fixes. After them,
+> E001 was run again through the same CLI sequence (real Docker sandbox, deterministic provider) and
+> the files in `e001-evidence/` were rewritten from that run. What changed and why: the probe has two
+> more checks (`cpu_limited`, `intrinsic_deadline_available`); `verification.diff_sha256` is now the
+> digest of the stored `diff.patch` artifact (it used to be a different hash of the same diff); the spec
+> hash differs because the absolute fixture path of this run is part of the spec; the transcript now
+> shows the approver argument quoted as the shell needs it. The plan hash, the outcome (completed with
+> isolation, failed closed without) and the adversarial variants are unchanged.
 
 ## Fixture
 
@@ -20,13 +29,13 @@ middle element for even-length input. Six unittest tests; `test_even_length` fai
 
 | Step | Evidence (from the event log / reports) |
 |---|---|
-| Mission received | `mission.created` with spec sha256 `742d923c…a6bf`; closed-schema validation passed |
+| Mission received | `mission.created` with spec sha256 `d9fef326…e952`; closed-schema validation passed |
 | Persisted | SQLite `missions` row; `workspace.source` with the source tree hash |
 | Planned | `created → planning → awaiting_approval`; plan sha256 `97df38f8…f6d8`; provider marked `simulated: true` |
 | Gate held | `mission run` before approval → `error: approval_missing` (exit 2); approval with a wrong hash → `plan_hash_mismatch` (exit 2) |
 | Approved | approval recorded for exactly `97df38f8…`, approver label states it was the E001 harness under the owner's task authorization, **not an independent human review** |
 | Tools authorized | three `tool.authorization` = allow (read, write_workspace, execute), each with an args digest |
-| Disposable environment | `base` and `work` copies under `$PETRON_HOME/workspaces/petron-e001/`; Docker probe 16/16 checks PASS |
+| Disposable environment | `base` and `work` copies under `$PETRON_HOME/workspaces/petron-e001/`; Docker probe 18/18 checks PASS (includes the CPU ceiling and the intrinsic container deadline) |
 | Defect reproduced | baseline run in the sandbox: exit 1, `FAILED (failures=1)` on `test_even_length` |
 | Controlled change | `replace_in_file` on `calc/stats.py` only |
 | Tests run | in the sandbox (no network, read-only workspace, uid 65534): exit 0, 6/6 OK |
@@ -35,7 +44,7 @@ middle element for even-length input. Six unittest tests; `test_even_length` fai
 | Final report | `report.md` / `report.json`; `petron events verify` → chain intact; re-running a completed mission → `not_awaiting_approval` |
 
 Measured on the development VM (4 vCPU, 16 GiB; **not** the FX-6300 target): `mission run`
-took 1.75 s wall time; the peak RSS of the `petron` process was 40.5 MiB (container memory is
+took 1.95 s wall time; the peak RSS of the `petron` process was 41.2 MiB (container memory is
 capped separately at 256 MiB and not included).
 
 ## Fail-closed counterpart

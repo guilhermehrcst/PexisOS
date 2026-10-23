@@ -22,7 +22,7 @@ pip install -e apps/petron                 # PETRON only; the PexisOS core is no
 petron sandbox probe                       # measures Docker isolation; exit 1 = execution disabled
 petron experiment e001                     # creates + plans E001, stops at awaiting_approval
 petron mission show petron-e001            # review the plan
-petron mission approve petron-e001 --plan-sha256 <hex> --approver "<your name>"
+petron mission approve petron-e001 --plan-sha256 YOUR_PLAN_SHA256 --approver "your name"   # use the sha256 printed by mission show
 petron mission run petron-e001
 petron mission report petron-e001
 petron events verify
