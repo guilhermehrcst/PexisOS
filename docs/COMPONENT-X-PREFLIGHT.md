@@ -188,9 +188,12 @@ hash it); run the preflight; only then, with authorisation, the operational file
 
 ## 7. Limitations and what is not validated
 
-- **The real files have never been seen by this tool.** File names, headers, encoding,
-  delimiter, quoting and numeric format are assumptions from secondary sources. A
-  real header that differs will fail visibly (`missing_key_column`,
+- **No actual dataset files have been inspected by this tool.** The exact nine CSV
+  and two documentation filenames were confirmed from the official v3 publisher
+  catalog, but their contents and checksums have not been validated locally.
+  Headers, encoding, delimiter, quoting and numeric format remain unverified;
+  the structural expectations come from source descriptions, not real file reads.
+  A real header that differs will fail visibly (`missing_key_column`,
   `unsupported_column_name`), not silently.
 - Column names must match `[A-Za-z0-9_.-]{1,64}`; others fail the file. Vehicle IDs
   must match the same pattern.
