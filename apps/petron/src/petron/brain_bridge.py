@@ -52,6 +52,7 @@ _ASSETS = {
     "/brain.js": ("brain.js", "text/javascript; charset=utf-8"),
     "/live.js": ("live.js", "text/javascript; charset=utf-8"),
     "/brain-texture.webp": ("brain-texture.webp", "image/webp"),
+    "/brain-mask.webp": ("brain-mask.webp", "image/webp"),
 }
 _CSP = ("default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self'; "
         "connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")

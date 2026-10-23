@@ -170,7 +170,7 @@ class ServerCase(BridgeCase):
 
 class ServerSecurityTests(ServerCase):
     def test_assets_are_an_allowlist(self):
-        for path in ("/", "/brain.js", "/live.js", "/brain-texture.webp"):
+        for path in ("/", "/brain.js", "/live.js", "/brain-texture.webp", "/brain-mask.webp"):
             self.assertEqual(self.request(path)[0].status, 200, path)
         for path in ("/README.md", "/../petron.sqlite3", "/brain/../../src/petron/store.py", "/api/missions"):
             self.assertEqual(self.request(path)[0].status, 404, path)
@@ -250,6 +250,18 @@ class AssetTests(unittest.TestCase):
         for mode in ("idle", "thinking", "working", "success", "error", "listening", "verifying",
                      "awaiting_approval", "disconnected"):
             self.assertRegex(brain, rf"\b{mode}: \{{")
+
+    def test_color_palettes(self):
+        brain = (BRAIN_DIR / "brain.js").read_text()
+        index = (BRAIN_DIR / "index.html").read_text()
+        self.assertIn("const PALETTES = Object.freeze(['adaptive', 'spectrum', 'mono']);", brain)
+        self.assertIn("PALETTES.includes(requested) ? requested : 'adaptive'", brain)   # default adaptive
+        for state in ("idle", "listening", "thinking", "working", "verifying", "awaiting_approval",
+                      "success", "error", "disconnected", "confirming"):
+            self.assertRegex(brain, rf"\n    {state}: (tone\(|SPECTRUM)", state)        # every mode has a look
+        self.assertIn('<div class="brain-chroma" aria-hidden="true"></div>', index)
+        self.assertIn("mask: url('./brain-mask.webp')", index)                          # local asset, no remote URL
+        self.assertTrue((BRAIN_DIR / "brain-mask.webp").read_bytes().startswith(b"RIFF"))
 
 
 if __name__ == "__main__":

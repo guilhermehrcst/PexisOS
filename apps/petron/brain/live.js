@@ -32,7 +32,7 @@
 
   // The key lives only in memory; it is removed from the address bar immediately.
   const key = new URLSearchParams(window.location.hash.slice(1)).get('k') || '';
-  if (window.location.hash) window.history.replaceState(null, '', window.location.pathname);
+  if (window.location.hash) window.history.replaceState(null, '', window.location.pathname + window.location.search);
 
   let lastSeq = -1;
   let label = 'conectando ao runtime';

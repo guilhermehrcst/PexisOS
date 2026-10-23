@@ -1,6 +1,6 @@
 /**
- * PETRON Brain V0.1 (runtime-ready)
- * A self-contained, CPU-friendly monochrome particle sculpture.
+ * PETRON Brain V0.1 (runtime-ready, color edition)
+ * A self-contained, CPU-friendly particle sculpture with optional colors.
  * No dependencies, remote requests, sensors, model calls or visible controls.
  *
  * Integration API (V0.1 calls unchanged; additions marked +):
@@ -12,6 +12,8 @@
  *   window.PetronBrain.getState()
  * + window.PetronBrain.pulse()          one discreet ring, as on touch
  * + window.PetronBrain.modes            the accepted mode names
+ * + window.PetronBrain.setPalette(p)    adaptive (default) | spectrum | mono  ('state' = adaptive)
+ * + window.PetronBrain.getPalette()     also in getState().palette; initial value from ?palette=
  *
  * The Brain only draws what a host tells it. It never infers mission status by itself.
  */
@@ -23,6 +25,9 @@
   // The approved texture layer follows the state's luminosity too (idle keeps its 0.92).
   const reference = document.querySelector('.brain-reference');
   let referenceOpacity = -1;
+  // The approved color layer: a conic spectrum masked to the texture's own alpha.
+  const chromaLayer = document.querySelector('.brain-chroma');
+  let chromaKey = '';
   const context = canvas.getContext('2d', { alpha: true, desynchronized: true });
   if (!context) return;
 
@@ -45,6 +50,61 @@
   });
   const KEYS = ['speed', 'shimmer', 'breathe', 'glow', 'flow'];
 
+  // Color. Three palettes, never a visible switch:
+  //   mono      the original black-and-white identity (its exact colors);
+  //   spectrum  the approved continuous color treatment, the same in every state;
+  //   adaptive  (default) the color energy follows the state the host reports.
+  // A look is a target, interpolated like the motion parameters, so a state change re-tints
+  // and never flashes. Motion still carries the state; color only reinforces it.
+  const PALETTES = Object.freeze(['adaptive', 'spectrum', 'mono']);
+  const MONO = { particle: [241, 246, 255], strand: [230, 238, 248], dust: [250, 251, 255], ring: [250, 250, 255] };
+  const STRAND_TINT = [0, 3, 4, 5, 2, 0];   // which spectrum tint each rim filament takes
+  const DUST_TINT = [1, 0, 3, 4, 4];
+  function hsl(h, s, l) {
+    const f = (n) => {
+      const k = (n + h / 30) % 12;
+      return Math.round(255 * (l - s * Math.min(l, 1 - l) * Math.max(-1, Math.min(k - 3, 9 - k, 1))));
+    };
+    return [f(0), f(8), f(4)];
+  }
+  const hex = (v) => [1, 3, 5].map((i) => parseInt(v.slice(i, i + 2), 16));
+  // The approved spectrum, exactly as in the color prototype (gradient stops, particle hues).
+  const SPECTRUM = Object.freeze({
+    stops: ['#1f77f8', '#52ddfb', '#62cffe', '#c982f7', '#ed64a4', '#ffb36b', '#65ffd1'].map(hex),
+    tints: [210, 188, 180, 270, 320, 31, 163].map((h) => hsl(h, 0.95, 0.76)),
+    amount: 1, chroma: 0.97, base: 0.27,
+  });
+  const MONOCHROME = Object.freeze({ ...SPECTRUM, amount: 0, chroma: 0, base: 0.92 });
+  // Adaptive: seven hues per state (spread around the sphere), how saturated they are, how
+  // strong the color layer is and how much of the white texture remains.
+  function tone(hues, sat, chroma, base) {
+    return Object.freeze({
+      stops: hues.map((h) => hsl(h, 0.95 * sat, 0.62 + 0.18 * (1 - sat))),
+      tints: hues.map((h) => hsl(h, 0.95 * sat, 0.76 + 0.1 * (1 - sat))),
+      amount: 1, chroma, base,
+    });
+  }
+  const ADAPTIVE = Object.freeze({
+    idle: tone([214, 206, 222, 232, 212, 198, 218], 0.38, 0.62, 0.5),        // calm, pale, cool
+    listening: tone([196, 188, 202, 212, 192, 184, 206], 0.95, 0.95, 0.3),   // cyan / electric blue
+    thinking: tone([226, 238, 250, 262, 290, 246, 232], 0.82, 0.95, 0.27),   // indigo, violet, a little magenta
+    working: tone([212, 240, 272, 304, 330, 286, 198], 1, 1, 0.27),          // blue, violet, pink
+    verifying: tone([204, 198, 212, 194, 216, 206, 200], 0.5, 0.8, 0.45),    // cool white-blue clarity
+    awaiting_approval: tone([232, 240, 246, 236, 228, 244, 238], 0.48, 0.6, 0.42),  // still, restrained
+    success: SPECTRUM,                                                       // the full bloom
+    error: tone([8, 214, 24, 226, 2, 208, 32], 0.66, 0.8, 0.3),           // restrained warm accents
+    disconnected: tone([220, 222, 216, 226, 218, 212, 224], 0.14, 0.3, 0.5), // subdued (and dimmed by glow)
+    confirming: tone([198, 208, 218, 204, 194, 212, 206], 0.65, 0.9, 0.4),
+  });
+  const canonical = (value) => (value === 'state' ? 'adaptive' : value);
+  const requested = canonical(new URLSearchParams(window.location.search).get('palette'));
+  let palette = PALETTES.includes(requested) ? requested : 'adaptive';
+  const lookFor = () => (palette === 'mono' ? MONOCHROME : palette === 'spectrum' ? SPECTRUM : ADAPTIVE[mode] || SPECTRUM);
+  const copyLook = (l) => ({ stops: l.stops.map((c) => [...c]), tints: l.tints.map((c) => [...c]),
+    amount: l.amount, chroma: l.chroma, base: l.base });
+  const mix = (a, b, f) => [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, a[2] + (b[2] - a[2]) * f];
+  const rgba = (c, alpha) => `rgba(${Math.round(c[0])},${Math.round(c[1])},${Math.round(c[2])},${alpha})`;
+
   let width = 1;
   let height = 1;
   let scale = 1;
@@ -66,6 +126,7 @@
   // Smoothly interpolated parameters and an integrated phase: changing mode changes the rate
   // of motion, never jumps the current position.
   const cur = { ...MODES.idle };
+  let look = null;   // current (interpolated) colors; set once the initial mode is known
   let phase = 0;
   let lastDrawMs = null;
 
@@ -155,13 +216,31 @@
     const k = reduced ? 1 : 1 - Math.exp(-dt / 0.6);  // ~0.6 s time constant
     for (const key of KEYS) cur[key] += (target[key] - cur[key]) * k;
     const cfg = cur;
+    const want = lookFor();
+    if (!look) look = copyLook(want);
+    for (let i = 0; i < 7; i++) {
+      look.stops[i] = mix(look.stops[i], want.stops[i], k);
+      look.tints[i] = mix(look.tints[i], want.tints[i], k);
+    }
+    for (const key of ['amount', 'chroma', 'base']) look[key] += (want[key] - look[key]) * k;
     phase += dt * cfg.speed * (1 + 0.4 * (energy - 0.25));
     const t = reduced ? 0 : phase;
     if (reference) {
-      const opacity = clamp(0.92 * cfg.glow, 0.3, 1);
+      const opacity = clamp(look.base * cfg.glow, 0.1, 1);
       if (Math.abs(opacity - referenceOpacity) > 0.004) {
         reference.style.opacity = opacity.toFixed(3);
         referenceOpacity = opacity;
+      }
+    }
+    if (chromaLayer) {
+      // Written only when it visibly changes (during transitions), never every frame at rest.
+      const opacity = clamp(look.chroma * cfg.glow, 0, 1).toFixed(2);
+      const stops = look.stops.map((c) => rgba(c, 1));
+      const key = opacity + stops.join('');
+      if (key !== chromaKey) {
+        chromaKey = key;
+        chromaLayer.style.opacity = opacity;
+        stops.forEach((c, i) => chromaLayer.style.setProperty(`--c${i}`, c));
       }
     }
     const breath = reduced ? 1 : 1 + cfg.breathe * Math.sin(seconds * 1.05 + energy);
@@ -191,7 +270,9 @@
 
     // Renderer uses 11 brightness buckets to batch thousands of particles.
     // Many faint interior dots, densely concentrated luminous outline.
-    const buckets = Array.from({ length: 11 }, () => []);
+    // With color, seven hue sectors (around the sphere) times the same 11 brightness buckets.
+    const nHues = look.amount > 0.002 ? 7 : 1;
+    const buckets = Array.from({ length: 11 * nHues }, () => []);
     const frame = reduced ? 0 : t;
     const flutter = reduced ? 0 : cfg.shimmer;
     const spin = (reduced ? 0 : seconds * 0.06);
@@ -223,13 +304,16 @@
       alpha = clamp(alpha, 0.04, 0.97);
       const b = Math.min(10, Math.floor(alpha * 11));
       const size = p.small ? (rim > 0.68 ? 1.02 : 0.83) : (rim > 0.68 ? 1.65 : 1.18);
-      buckets[b].push([cx + xx * R, cy + yy * R, size]);
+      const hue = nHues === 1 ? 0 : Math.min(6, Math.floor((Math.atan2(yy, xx) / TAU + 1) % 1 * 7));
+      buckets[hue * 11 + b].push([cx + xx * R, cy + yy * R, size]);
     }
     context.save();
     for (let b = 0; b < buckets.length; b++) {
       if (!buckets[b].length) continue;
       context.beginPath();
-      context.fillStyle = `rgba(241,246,255,${(b + 0.55) / 11 * 0.88})`;
+      const alpha = (b % 11 + 0.55) / 11 * 0.88;
+      context.fillStyle = nHues === 1 ? `rgba(241,246,255,${alpha})`
+        : rgba(mix(MONO.particle, look.tints[Math.floor(b / 11)], look.amount), alpha);
       for (const p of buckets[b]) {
         context.moveTo(p[0] + p[2], p[1]);
         context.arc(p[0], p[1], p[2], 0, TAU);
@@ -253,7 +337,8 @@
         const y = cy + v * Math.sin(a);
         if (!i) context.moveTo(x, y); else context.lineTo(x, y);
       }
-      context.strokeStyle = `rgba(230,238,248,${strand % 2 ? 0.065 : 0.035})`;
+      context.strokeStyle = rgba(mix(MONO.strand, look.tints[STRAND_TINT[strand]], look.amount),
+        (strand % 2 ? 0.065 : 0.035) * (1 + 0.23 * look.amount));
       context.lineWidth = 0.8;
       context.stroke();
     }
@@ -272,7 +357,7 @@
       dustBuckets[b].push([cx + dist * Math.cos(a), cy + dist * Math.sin(a), p.size]);
     }
     for (let b = 0; b < 5; b++) {
-      context.fillStyle = `rgba(250,251,255,${0.11 + b * 0.155})`;
+      context.fillStyle = rgba(mix(MONO.dust, look.tints[DUST_TINT[b]], look.amount), 0.11 + b * 0.155);
       context.beginPath();
       for (const p of dustBuckets[b]) {
         const sz = p[2] > 0.975 ? 1.9 : p[2] > 0.65 ? 1.0 : 0.58;
@@ -290,7 +375,7 @@
       context.beginPath();
       context.arc(cx, cy, v, 0, TAU);
       context.lineWidth = 1.0 + 0.5 * (1 - f);
-      context.strokeStyle = `rgba(250,250,255,${0.24 * Math.pow(1 - f, 2)})`;
+      context.strokeStyle = rgba(mix(MONO.ring, look.tints[0], look.amount), 0.24 * Math.pow(1 - f, 2));
       context.stroke();
     }
   }
@@ -330,6 +415,14 @@
     return true;
   }
 
+  function setPalette(value) {
+    const next = canonical(value);
+    if (typeof next !== 'string' || !PALETTES.includes(next)) return false;
+    palette = next;
+    if (motionQuery.matches || stopped) draw(now);
+    return true;
+  }
+
   function pulse() {
     pulseTime = now * 0.001;
     if (motionQuery.matches || stopped) draw(now);
@@ -337,9 +430,11 @@
   }
 
   window.PetronBrain = Object.freeze({
-    setState, setActivity, pulse,
+    setState, setActivity, pulse, setPalette,
     modes: Object.freeze(Object.keys(MODES)),
-    getState: () => Object.freeze({ mode, activity, reducedMotion: motionQuery.matches }),
+    palettes: PALETTES,
+    getPalette: () => palette,
+    getState: () => Object.freeze({ mode, activity, palette, reducedMotion: motionQuery.matches }),
     pause: () => { stopped = true; window.cancelAnimationFrame(raf); raf = 0; },
     resume: () => { stopped = false; request(); },
   });
