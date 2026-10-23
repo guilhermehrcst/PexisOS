@@ -1,0 +1,74 @@
+.hotspot {
+  position: absolute;
+  z-index: 2;
+}
+.hotspot--left { transform: translate(-100%, -50%); }
+.hotspot--right { transform: translate(0, -50%); }
+.hotspot.is-selected { z-index: 5; }
+
+.hotspot__button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px 8px 8px;
+  min-width: 112px;
+  background: var(--surface-glass);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  border: 1px solid rgba(255, 255, 255, 0.9);
+  border-radius: 14px;
+  box-shadow: var(--shadow-float);
+  text-align: left;
+  transition: box-shadow var(--dur) var(--ease), transform var(--dur) var(--ease);
+}
+.hotspot__button:hover { transform: translateY(-1px); }
+.hotspot.is-selected .hotspot__button { box-shadow: 0 0 0 2px var(--primary), var(--shadow-float); }
+
+.hotspot__icon {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  color: #fff;
+  background: var(--primary-gradient);
+  box-shadow: 0 4px 10px -3px rgba(20, 120, 255, 0.6);
+  flex: none;
+}
+.hotspot--attention .hotspot__icon { background: linear-gradient(180deg, #ffad4f 0%, #f59e38 100%); box-shadow: 0 4px 10px -3px rgba(245, 158, 56, 0.6); }
+.hotspot--stale .hotspot__icon,
+.hotspot--unavailable .hotspot__icon,
+.hotspot--insufficient .hotspot__icon { background: linear-gradient(180deg, #b6c1d1 0%, #94a3b8 100%); box-shadow: none; }
+
+.hotspot__text { display: grid; line-height: 1.25; }
+.hotspot__title { font-size: 13px; font-weight: 600; color: var(--text); white-space: nowrap; }
+.hotspot__status { font-size: var(--fs-micro); color: var(--text-3); white-space: nowrap; }
+
+.hotspot__detail {
+  position: absolute;
+  top: calc(100% + 8px);
+  width: 250px;
+  padding: 12px 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow-float);
+  font-size: var(--fs-label);
+  color: var(--text-2);
+}
+.hotspot--left .hotspot__detail { right: 0; }
+.hotspot--right .hotspot__detail { right: 0; } /* open towards the device, never off-screen */
+.hotspot__detail p { margin: 8px 0; line-height: 1.45; }
+.hotspot__detail-row { display: flex; align-items: center; gap: 8px; color: var(--text); }
+.hotspot__chip {
+  margin-left: auto;
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-3);
+  color: var(--text-3);
+  font-size: var(--fs-micro);
+  white-space: nowrap;
+}
+.hotspot__detail dl { display: flex; gap: 18px; margin: 0; }
+.hotspot__detail dt { font-size: var(--fs-micro); color: var(--text-4); }
+.hotspot__detail dd { margin: 0; color: var(--text); text-transform: capitalize; }

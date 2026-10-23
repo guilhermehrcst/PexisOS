@@ -1,0 +1,69 @@
+.viz {
+  position: relative;
+  min-width: 0;
+  height: 100%;
+}
+.viz__stage {
+  position: absolute;
+  inset: 0 64px 0 0;
+}
+.viz__stage::before {
+  /* faint dot field behind the device, fading out towards the edges */
+  content: "";
+  position: absolute;
+  inset: 4% 6%;
+  background-image: radial-gradient(rgba(100, 116, 139, 0.18) 1px, transparent 1.2px);
+  background-size: 14px 14px;
+  -webkit-mask-image: radial-gradient(closest-side, #000 30%, transparent 100%);
+  mask-image: radial-gradient(closest-side, #000 30%, transparent 100%);
+  pointer-events: none;
+}
+.viz__canvas {
+  position: absolute;
+  inset: 0;
+  border-radius: var(--radius-lg);
+}
+.viz__svg {
+  display: block;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+.viz__svg.is-dragging { cursor: grabbing; }
+.viz__link path {
+  fill: none;
+  stroke: rgba(148, 163, 184, 0.75);
+  stroke-width: 1;
+}
+.viz__link.is-on path { stroke: var(--primary); stroke-width: 1.4; }
+.viz__anchor {
+  fill: var(--primary);
+  stroke: #fff;
+  stroke-width: 2.5;
+  filter: drop-shadow(0 1px 3px rgba(20, 120, 255, 0.45));
+}
+
+.viz__controls {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-38%);
+  display: grid;
+  gap: 10px;
+}
+.viz__control {
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow-float);
+  transition: transform var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+.viz__control:hover:not(:disabled) { color: var(--primary); transform: translateY(-1px); }
+.viz__control:disabled { color: var(--text-4); cursor: not-allowed; box-shadow: var(--shadow-card); }
+.viz__control--text { font-size: 13px; font-weight: 650; letter-spacing: 0.01em; }
+.viz__control--text[aria-pressed="true"] { color: var(--text); }
+.viz__control--text[aria-pressed="false"] { color: var(--text-4); }

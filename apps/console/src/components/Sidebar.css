@@ -1,0 +1,30 @@
+.sidebar {
+  grid-area: sidebar;
+  position: relative; /* paint and hit-test above the main subgrid, which spans this row */
+  z-index: 1;
+  padding: 22px 12px 0 14px;
+  border-right: 1px solid var(--border-soft);
+  background: linear-gradient(180deg, rgba(252, 253, 254, 0.75) 0%, rgba(252, 253, 254, 0) 100%);
+}
+.sidebar ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 18px; }
+.sidebar__item {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  height: 46px;
+  padding: 0 14px;
+  border-radius: 12px;
+  font-size: 13.5px;
+  font-weight: 500;
+  color: var(--text-2);
+  text-decoration: none;
+  transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+.sidebar__item svg { color: #6b7a90; flex: none; }
+.sidebar__item.is-active {
+  background: linear-gradient(90deg, #e8f2ff 0%, #eef5ff 100%);
+  color: var(--primary);
+  font-weight: 600;
+}
+.sidebar__item.is-active svg { color: var(--primary); }
+.sidebar__item[aria-disabled="true"] { cursor: default; }
