@@ -28,6 +28,15 @@ PETRON = Path(__file__).resolve().parents[2]          # apps/petron
 FIXTURE = PETRON / "fixtures" / "e002"
 
 
+def tint(path: Path) -> dict:
+    """Mean saturation, and red minus blue over the lit pixels (warm > 0 > cool)."""
+    image = Image.open(path).convert("RGB")
+    lit = [px for px in image.getdata() if sum(px) > 90]
+    sat = ImageStat.Stat(image.convert("HSV").split()[1]).mean[0]
+    warm = sum(r - b for r, _, b in lit) / max(1, len(lit))
+    return {"saturation": round(sat, 2), "warm": round(warm, 2)}
+
+
 def free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
@@ -114,13 +123,15 @@ def main() -> int:
 
         # 1. Only the Brain is visible.
         dom = page.evaluate("""() => ({
-          children: [...document.querySelector('main').children].map(e => e.tagName.toLowerCase() + (e.id ? '#' + e.id : '')),
+          children: [...document.querySelector('main').children].map(e => e.tagName.toLowerCase()
+            + (e.id ? '#' + e.id : e.className ? '.' + e.className : '')),
           controls: document.querySelectorAll('button,nav,a,input,textarea,select,form,dialog').length,
           status: (() => { const r = document.getElementById('petron-status').getBoundingClientRect(); return [r.width, r.height]; })(),
           scroll: document.documentElement.scrollWidth > innerWidth || document.documentElement.scrollHeight > innerHeight,
           live: document.querySelector('meta[name=petron-mode]')?.content })""")
         run.check("only_brain_visible", dom["controls"] == 0 and dom["status"][0] <= 1 and not dom["scroll"]
-                  and dom["children"] == ["img", "canvas#brain", "div#petron-status"], dom)
+                  and dom["children"] == ["img.brain-reference", "div.brain-chroma", "canvas#brain",
+                                          "div#petron-status"], dom)
         page.screenshot(path=str(args.out / "1-idle-desktop.png"))
         time.sleep(0.6)
         page.screenshot(path=str(args.out / "1b-idle-desktop.png"))
@@ -129,6 +140,7 @@ def main() -> int:
         run.check("brain_rendered_and_animating", ImageStat.Stat(a).mean[0] > 3 and
                   ImageChops.difference(a, b).getbbox() is not None, round(ImageStat.Stat(a).mean[0], 2))
         run.check("initial_state_idle", page.evaluate("window.PetronBrain.getState().mode") == "idle")
+        run.check("default_palette_adaptive", page.evaluate("window.PetronBrain.getPalette()") == "adaptive")
 
         # 2. Mission created through the CLI -> awaiting approval.
         created = run.cli("experiment", "e002")
@@ -180,6 +192,7 @@ def main() -> int:
         seen = modes_since(page, start)
         run.check("failure_shows_error_never_success", failed.returncode == 1 and "error" in seen
                   and "success" not in seen, {"modes": seen, "cli": failed.stdout.strip().splitlines()[-2:]})
+        page.wait_for_timeout(2500)   # let the color settle (same ~0.6 s easing as motion)
         page.screenshot(path=str(args.out / "4-error.png"))
 
         # 5. Bridge killed -> disconnected, and nothing else, until it returns.
@@ -192,6 +205,12 @@ def main() -> int:
         run.check("no_fake_activity_while_disconnected", set(modes_since(page, start)) <= {"disconnected"},
                   modes_since(page, start))
         page.screenshot(path=str(args.out / "5-disconnected.png"))
+        colors = {name: tint(args.out / f) for name, f in
+                  (("idle", "1-idle-desktop.png"), ("error", "4-error.png"), ("disconnected", "5-disconnected.png"))}
+        run.check("adaptive_color_follows_real_states", colors["idle"]["warm"] < 0
+                  and colors["error"]["warm"] - colors["idle"]["warm"] > 8      # error clearly warmer than idle
+                  and colors["disconnected"]["saturation"] < min(colors["idle"]["saturation"],
+                                                                colors["error"]["saturation"]), colors)
 
         # 6. Bridge restarted -> recovers the authoritative state, no success replay.
         bridge = run.start_bridge(port)
@@ -222,6 +241,12 @@ def main() -> int:
         reduced.goto(url)
         reduced.wait_for_timeout(600)
         run.check("reduced_motion_respected", reduced.evaluate("window.PetronBrain.getState().reducedMotion"))
+        mono = browser.new_page(viewport={"width": 1200, "height": 800})
+        mono.goto(url + "?palette=mono")
+        mono.wait_for_timeout(1500)
+        mono.screenshot(path=str(args.out / "8-mono.png"))
+        run.check("mono_palette_stays_monochrome", mono.evaluate("window.PetronBrain.getPalette()") == "mono"
+                  and tint(args.out / "8-mono.png")["saturation"] < 12, tint(args.out / "8-mono.png"))
         page.keyboard.press("Tab")
         page.keyboard.press("Enter")
         run.check("keyboard_focus_and_status", page.evaluate("document.activeElement.id") == "brain"

@@ -111,7 +111,8 @@ def main() -> int:
           visible: [...document.querySelectorAll('main > *')].filter(e => { const r = e.getBoundingClientRect();
             return r.width > 2 && r.height > 2; }).map(e => e.tagName.toLowerCase()),
           controls: document.querySelectorAll('button,nav,a,input,select,form,dialog').length })""")
-        run.check("still_only_the_brain_visible", dom["visible"] == ["img", "canvas"] and dom["controls"] == 0, dom)
+        run.check("still_only_the_brain_visible", dom["visible"] == ["img", "div", "canvas"]
+                  and dom["controls"] == 0, dom)
 
         # 1. Tap opens an invisible input session; typing; Enter creates a draft that waits.
         page.mouse.click(**center)
@@ -199,7 +200,19 @@ def main() -> int:
                   and dict(run.missions())[third] == "completed",
                   {"state": dict(run.missions())[third]})
 
-        # 6. Without the key, the same server cannot be driven.
+        # 6. A palette chosen in the URL survives the key's removal; entry still works.
+        colored = browser.new_page(viewport={"width": 1000, "height": 700})
+        colored.on("pageerror", lambda e: errors.append(str(e)))
+        colored.goto(url.replace("/#k=", "/?palette=spectrum#k="))
+        colored.wait_for_timeout(1000)
+        address = colored.evaluate("[location.search, location.hash]")
+        colored.mouse.click(500, 350)
+        run.check("palette_query_survives_key_removal", address == ["?palette=spectrum", ""]
+                  and colored.evaluate("window.PetronBrain.getPalette()") == "spectrum"
+                  and wait_mode(colored, {"listening"}, 2) == "listening", address)
+        colored.keyboard.press("Escape")
+
+        # 7. Without the key, the same server cannot be driven.
         nokey = browser.new_page(viewport={"width": 1000, "height": 700})
         nokey.goto(base)
         nokey.wait_for_timeout(1000)
@@ -214,7 +227,7 @@ def main() -> int:
     bridge.terminate()
     bridge.wait(timeout=10)
 
-    # 7. Read-only bridge: nothing to act on.
+    # 8. Read-only bridge: nothing to act on.
     port2 = free_port()
     readonly, url2 = run.bridge(port2, interactive=False)
     with sync_playwright() as pw:

@@ -60,7 +60,8 @@ petron brain serve --interactive --template apps/petron/fixtures/e002/mission.js
 
 Read-only, the Brain only shows the real state of missions run with the CLI. Interactive, it also
 accepts a request typed on the sphere, turns it into a draft scoped by the operator's template and
-runs it only after a deliberate hold on the sphere. See `brain/README.md`.
+runs it only after a deliberate hold on the sphere. Color follows the runtime state by default
+(`?palette=spectrum` or `?palette=mono` in the URL to change it). See `brain/README.md`.
 
 Without installing: `PYTHONPATH=apps/petron/src python -m petron …`.
 

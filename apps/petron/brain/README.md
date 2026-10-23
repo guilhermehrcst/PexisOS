@@ -1,6 +1,6 @@
 # PETRON Brain
 
-The entire PETRON interface is the Brain: one monochrome particle sphere on pure black.
+The entire PETRON interface is the Brain: one particle sphere on pure black, in color by default.
 Nothing else is visible: no text, panels, buttons or labels. Status is spoken to screen readers
 through a visually hidden live region.
 
@@ -23,7 +23,7 @@ PYTHONPATH=apps/petron/src python -m petron brain serve      # or: petron brain 
 Then run missions with the normal CLI (`petron experiment e002`, `mission approve`, `mission run`)
 and watch the Brain respond.
 
-## States (all monochrome; transitions are interpolated, ~0.6 s)
+## States (motion and color are interpolated, ~0.6 s)
 
 | Brain state | Shown when (authoritative runtime event) |
 |---|---|
@@ -129,6 +129,51 @@ would take. The contract:
 4. **No paid model** sees a transcript unless the operator started the bridge with
    `--allow-real-model`.
 
+## Color
+
+Three palettes. None of them has a visible switch:
+
+| Palette | Look |
+|---|---|
+| `adaptive` (default) | the color energy follows the runtime state (table below) |
+| `spectrum` | the approved color edition: one continuous spectrum, the same in every state |
+| `mono` | the original black-and-white Brain, pixel-identical to it (verified under reduced motion) |
+
+Choose one with the URL: `http://127.0.0.1:8765/?palette=mono`. In interactive mode it goes before
+the key: `/?palette=spectrum#k=…`; the query survives the key's removal. A host can also call
+`window.PetronBrain.setPalette('mono' | 'spectrum' | 'adaptive')`. The prototype's name `'state'`
+is still accepted, as an alias of `'adaptive'`.
+
+**Adaptive** reinforces the motion that each state already has. The motion still carries the
+meaning; the color only reinforces it:
+
+| State | Color energy |
+|---|---|
+| `idle` | calm, pale, cool white-blue |
+| `listening` | cyan / electric blue |
+| `thinking` | indigo, blue-violet, a little magenta |
+| `working` | richer blue, violet, pink |
+| `verifying` | cool white-blue clarity |
+| `awaiting_approval` | still, restrained periwinkle |
+| `confirming` (hold) | brightening cool blue |
+| `success` | the full spectrum bloom (only from a fresh runtime `completed`), then back to calm |
+| `error` | restrained warm accents (rose, amber) among muted blues |
+| `disconnected` | nearly grey and dimmed, clearly below idle |
+
+How it is built:
+
+- The approved color layer is the prototype's `conic-gradient`, masked to the texture's own
+  alpha (`brain-mask.webp`, imported unchanged). Its stops and the canvas particle tints are
+  targets per palette and state.
+- Those targets are interpolated with the same time constant as the motion, so the sphere
+  re-tints smoothly and never flashes.
+- At rest no style is written. Colors are cues only; they never claim a mission state that the
+  runtime did not report.
+
+**Known limit:** opened directly as a `file://` page, Chromium refuses the mask image (CSS masks
+are fetched with CORS). The color layer then stays hidden, and the particles alone carry the
+color. Served over HTTP (the bridge, or any static server) everything renders.
+
 ## Notes on the approved visual
 
 The prototype's renderer is preserved. Additions: four states, interpolated parameters, an
@@ -136,6 +181,9 @@ integrated animation phase (state changes no longer jump the motion), the textur
 following state luminosity (idle unchanged at 0.92), `pulse()` and `modes`. The approved
 palette contains very faint cool tints (halo `rgb(150,160,185)` at ≤2.3 % alpha, particles
 `rgb(241,246,255)`); they are kept as approved (measured chroma ≤ 0.36/255 in screenshots).
+The color edition (`PETRON-Brain-Colors-source.zip`) contributed only its visual layer: the
+spectrum, the mask and the palette API. The bridge, the event mapping, the interpolation and
+the phase fix are unchanged, as that prototype's own notes ask.
 
 ## Tests
 
