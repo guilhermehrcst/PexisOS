@@ -1,0 +1,73 @@
+/*
+ * PexisOS Console design tokens (light only).
+ * Values were sampled from the V1 reference image and tuned by eye; keep components on
+ * these tokens instead of literal colours so the look stays consistent.
+ */
+:root {
+  color-scheme: light;
+
+  /* surfaces */
+  --bg: #eef2f7;
+  --bg-gradient: radial-gradient(1200px 700px at 12% 0%, #f6f9fc 0%, rgba(246, 249, 252, 0) 60%),
+    radial-gradient(900px 600px at 78% 32%, #e6ecf3 0%, rgba(230, 236, 243, 0) 70%),
+    linear-gradient(180deg, #f2f5f9 0%, #ebf0f5 100%);
+  --surface: #ffffff;
+  --surface-2: #f7f9fc;
+  --surface-3: #f1f5fb;
+  --surface-glass: rgba(255, 255, 255, 0.82);
+
+  /* brand + semantic */
+  --primary: #1478ff;
+  --primary-hover: #0866e8;
+  --primary-soft: #eaf3ff;
+  --primary-softer: #f3f8ff;
+  --primary-gradient: linear-gradient(180deg, #2f8cff 0%, #1673f6 100%);
+  --success: #16b86a;
+  --success-ring: #30c56c;
+  --success-soft: #e3f7ec;
+  --warning: #f59e38;
+  --warning-soft: #fff3e3;
+  --danger: #ef4444;
+  --neutral-state: #94a3b8;
+
+  /* text */
+  --text: #111827;
+  --text-2: #475569;
+  --text-3: #64748b;
+  --text-4: #94a3b8;
+
+  /* lines */
+  --border: #e5eaf1;
+  --border-soft: #edf1f6;
+  --grid: #eef2f7;
+
+  /* type */
+  --font: "Inter Variable", "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --fs-display: 48px;
+  --fs-metric: 22px;
+  --fs-title: 15px;
+  --fs-body: 13px;
+  --fs-label: 12px;
+  --fs-micro: 11px;
+
+  /* geometry */
+  --radius-sm: 10px;
+  --radius: 14px;
+  --radius-lg: 18px;
+  --radius-pill: 999px;
+  --topbar-h: 72px;
+  --sidebar-w: 186px;
+  --page-inset-left: 84px;
+  --page-inset-right: 18px;
+  --gap: 10px;
+
+  /* elevation */
+  --shadow-card: 0 1px 2px rgba(15, 23, 42, 0.04), 0 8px 24px -12px rgba(15, 23, 42, 0.12);
+  --shadow-float: 0 2px 6px rgba(15, 23, 42, 0.06), 0 14px 32px -14px rgba(15, 23, 42, 0.2);
+  --shadow-button: 0 10px 24px -8px rgba(20, 120, 255, 0.55), 0 2px 6px rgba(20, 120, 255, 0.25);
+  --focus-ring: 0 0 0 3px rgba(20, 120, 255, 0.28);
+
+  /* motion */
+  --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+  --dur: 160ms;
+}

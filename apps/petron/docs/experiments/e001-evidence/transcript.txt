@@ -1,0 +1,120 @@
+$ petron sandbox probe
+{
+  "backend": "docker",
+  "checks": {
+    "cpu_limited": true,
+    "daemon_seccomp": true,
+    "egress_blocked": true,
+    "empty_bounding_set": true,
+    "image_present_pinned": true,
+    "intrinsic_deadline_available": true,
+    "loopback_only": true,
+    "memory_limited": true,
+    "no_docker_socket": true,
+    "no_effective_capabilities": true,
+    "no_new_privileges": true,
+    "no_permitted_capabilities": true,
+    "non_root_uid": true,
+    "only_expected_env": true,
+    "pids_limited": true,
+    "root_fs_read_only": true,
+    "seccomp_filter_active": true,
+    "workspace_read_only": true
+  },
+  "info": {
+    "image_env_names": [
+      "GPG_KEY",
+      "LANG",
+      "PATH",
+      "PYTHON_SHA256",
+      "PYTHON_VERSION"
+    ],
+    "inside": {
+      "cap_bnd": "0000000000000000",
+      "cap_eff": "0000000000000000",
+      "cap_prm": "0000000000000000",
+      "cpu_cfs": [
+        "100000",
+        "100000"
+      ],
+      "cpu_max": null,
+      "docker_socket": false,
+      "egress": "blocked",
+      "env_names": [
+        "GPG_KEY",
+        "HOME",
+        "HOSTNAME",
+        "LANG",
+        "PATH",
+        "PYTHONDONTWRITEBYTECODE",
+        "PYTHON_SHA256",
+        "PYTHON_VERSION"
+      ],
+      "gid": 65534,
+      "has_timeout": true,
+      "interfaces": [
+        "lo"
+      ],
+      "memory_max": "268435456",
+      "no_new_privs": "1",
+      "pids_max": "64",
+      "root_writable": false,
+      "seccomp": "2",
+      "uid": 65534,
+      "work_writable": false
+    },
+    "rootless": false,
+    "security_options": [
+      "name=seccomp,profile=builtin"
+    ],
+    "server_version": "29.8.2"
+  },
+  "ok": true,
+  "reason": null
+}
+[exit 0]
+$ petron experiment e001
+{
+  "mission_id": "petron-e001",
+  "next": "petron mission approve petron-e001 --plan-sha256 97df38f807abe869e7bf10f6cf795bf4f20907ca5236cbcd8a02beb3fd8df6d8 --approver NAME",
+  "plan_sha256": "97df38f807abe869e7bf10f6cf795bf4f20907ca5236cbcd8a02beb3fd8df6d8",
+  "state": "awaiting_approval"
+}
+[exit 0]
+$ petron mission run petron-e001
+error: approval_missing
+[exit 2]
+$ petron mission approve petron-e001 --plan-sha256 0000000000000000000000000000000000000000000000000000000000000000 --approver e001-harness
+error: plan_hash_mismatch
+[exit 2]
+$ petron mission approve petron-e001 --plan-sha256 97df38f807abe869e7bf10f6cf795bf4f20907ca5236cbcd8a02beb3fd8df6d8 --approver 'e001-harness (Claude Code agent under the owner'"'"'s PETRON V0.1 task authorization; synthetic fixture; not an independent human review)'
+{
+  "approved": "97df38f807abe869e7bf10f6cf795bf4f20907ca5236cbcd8a02beb3fd8df6d8",
+  "mission_id": "petron-e001"
+}
+[exit 0]
+$ petron mission run petron-e001   (wall time / peak RSS of the petron process measured with resource.getrusage)
+{
+  "mission_id": "petron-e001",
+  "state": "completed"
+}
+[exit 0] wall=1.95s peak_rss_petron=41.2MiB
+$ petron mission report petron-e001
+(written to report.md)
+[exit 0]
+$ petron mission report petron-e001 --format json
+(written to report.json)
+[exit 0]
+$ petron events verify
+{
+  "chain_ok": true,
+  "first_bad_seq": null,
+  "note": "unkeyed hash chain: detects accidental damage, edits and deletions in the middle, and (via the local anchor file, or a head you recorded elsewhere) truncation of the newest events. It is not tamper-proof: whoever can rewrite the database and the anchor can recompute everything. Record `petron events head` somewhere independent and pass it back with --expect-head."
+}
+[exit 0]
+$ petron mission run petron-e001
+error: not_awaiting_approval
+[exit 2]
+$ petron experiment e001 --sandbox none --mission-id petron-e001-noiso --approver 'e001-harness (Claude Code agent under the owner'"'"'s PETRON V0.1 task authorization; synthetic fixture; not an independent human review)'
+(written to report-no-isolation.md)
+[exit 1]

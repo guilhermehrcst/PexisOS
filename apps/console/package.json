@@ -1,0 +1,37 @@
+{
+  "name": "pexisos-console",
+  "private": true,
+  "version": "0.1.0",
+  "description": "PexisOS Console V1: offline, synthetic-data demonstration UI (Lab 001 · Smart Fan, Evidence Diagnostic).",
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc -b --pretty",
+    "test": "vitest run",
+    "check:offline": "node scripts/check-offline-build.mjs dist"
+  },
+  "dependencies": {
+    "@fontsource-variable/inter": "5.1.1",
+    "lucide-react": "0.468.0",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "6.6.3",
+    "@testing-library/react": "16.1.0",
+    "@testing-library/user-event": "14.5.2",
+    "@types/react": "18.3.18",
+    "@types/react-dom": "18.3.5",
+    "@vitejs/plugin-react": "4.3.4",
+    "jsdom": "25.0.1",
+    "typescript": "5.7.2",
+    "vite": "5.4.21",
+    "vitest": "2.1.9"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

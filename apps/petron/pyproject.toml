@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=77.0.3"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "petron"
+version = "0.1.0"
+description = "PETRON V0.1: supervised engineering runtime (experimental)"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+dependencies = []
+
+[project.optional-dependencies]
+# Real provider (optional, opt-in per run; never needed offline).
+anthropic = ["anthropic>=2.1,<3"]
+# Read-only PexisOS Agent Fabric connector; same pin as PexisOS requirements/fabric-mcp.txt.
+pexisos = ["mcp==2.2.0"]
+
+[project.scripts]
+petron = "petron.cli:main"
+
+# The E001 fixture lives beside the sources (apps/petron/fixtures) and is shipped inside the wheel as
+# the package ``petron.fixtures``, so ``petron experiment e001`` works from an installed copy too.
+[tool.setuptools]
+package-dir = {"" = "src", "petron.fixtures" = "fixtures"}
+packages = ["petron", "petron.connectors", "petron.providers", "petron.fixtures"]
+
+[tool.setuptools.package-data]
+"petron.fixtures" = ["e001/mission.json", "e001/project/**/*.py"]

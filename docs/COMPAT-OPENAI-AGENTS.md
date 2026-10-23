@@ -1,5 +1,7 @@
 # Interoperability: OpenAI Agents SDK as an MCP client of the Agent Fabric
 
+Other clients (Codex CLI, Claude Code, Claude Agent SDK): see [COMPAT-MULTI-PROVIDER.md](COMPAT-MULTI-PROVIDER.md).
+
 > [!IMPORTANT]
 > This is an **optional, test-only** compatibility suite. It shows that an independent, published SDK can consume the PexisLink MCP tool contract over local stdio:
 > - **without** a model, an API key, Codex, a cloud service or a device;
@@ -144,7 +146,7 @@ All other pins are identical to `requirements/fabric-mcp.txt`, with the licences
 | An LLM-driven `Runner.run` using these tools | NOT_RUN | Requires a model and an API key, which is out of scope by design |
 | Hosted MCP / connectors (Responses API, remote HTTP) | NOT_RUN | Requires a network-reachable authenticated server. Blocked by Agent Fabric decision B1. |
 | Whether a hosted model API accepts the PexisLink schemas in strict mode (`pattern`, `if`/`then`) | NOT_VERIFIED | Needs the hosted API. I1 already shows the SDK's strict conversion is unsatisfiable for `latest`. |
-| Codex CLI as a client | NOT_RUN | Manual-only per the kit. Not installed, never required by CI. |
+| Codex CLI as a client | Covered elsewhere | Not part of this suite. A separate CI job, `compat-codex-cli`, installs a pinned, integrity-locked, test-only Codex CLI and requires every Codex case to PASS (`run_clients.py --require codex-cli`), with no login, no credential and no model call. See [COMPAT-MULTI-PROVIDER.md](COMPAT-MULTI-PROVIDER.md) |
 | openai-agents 0.23.1 | NOT_RUN | Only 0.22.3 (lock) and 0.24.0 (latest) were executed |
 | Windows / macOS | NOT_RUN | Linux x86_64 only |
 | Independent security review of this suite | PENDING | Requested on the PR |
