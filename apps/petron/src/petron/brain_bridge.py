@@ -40,7 +40,9 @@ from urllib.parse import parse_qs, urlsplit
 
 from .store import Store
 
-BRAIN_DIR = Path(__file__).resolve().parents[2] / "brain"
+_PACKAGED_BRAIN = Path(__file__).resolve().parent / "brain_assets"
+# Source checkout: apps/petron/brain; installed wheel: petron/brain_assets.
+BRAIN_DIR = _PACKAGED_BRAIN if (_PACKAGED_BRAIN / "index.html").is_file() else Path(__file__).resolve().parents[2] / "brain"
 LOOPBACK = ("127.0.0.1", "::1", "localhost")
 FRESH_S = 15.0                 # a completion/failure older than this is shown as calm, never replayed
 POLL_S = 0.25

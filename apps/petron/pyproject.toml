@@ -23,8 +23,9 @@ petron = "petron.cli:main"
 # The E001 fixture lives beside the sources (apps/petron/fixtures) and is shipped inside the wheel as
 # the package ``petron.fixtures``, so ``petron experiment e001`` works from an installed copy too.
 [tool.setuptools]
-package-dir = {"" = "src", "petron.fixtures" = "fixtures"}
-packages = ["petron", "petron.connectors", "petron.providers", "petron.fixtures"]
+package-dir = {"" = "src", "petron.fixtures" = "fixtures", "petron.brain_assets" = "brain"}
+packages = ["petron", "petron.connectors", "petron.providers", "petron.fixtures", "petron.brain_assets"]
 
 [tool.setuptools.package-data]
 "petron.fixtures" = ["e001/mission.json", "e001/project/**/*.py"]
+"petron.brain_assets" = ["*.html", "*.js", "*.webp"]
