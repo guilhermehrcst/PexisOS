@@ -50,6 +50,14 @@ petron mission resume petron-e002          # continue from the last checkpoint, 
 
 Real model (opt-in, costs money): see `docs/experiments/PETRON-E002.md` (E002-B).
 
+The Brain (the visual interface), connected read-only to the same `PETRON_HOME`:
+
+```bash
+petron brain serve                         # then open http://127.0.0.1:8765/
+```
+
+Missions are still run with the CLI; the Brain only shows their real state. See `brain/README.md`.
+
 Without installing: `PYTHONPATH=apps/petron/src python -m petron …`.
 
 Requirements: Python ≥ 3.11. Execution also needs a running Docker daemon and the pinned image

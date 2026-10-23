@@ -1,0 +1,141 @@
+{
+  "checks": {
+    "only_brain_visible": {
+      "ok": true,
+      "detail": {
+        "children": [
+          "img",
+          "canvas#brain",
+          "div#petron-status"
+        ],
+        "controls": 0,
+        "status": [
+          1,
+          1
+        ],
+        "scroll": false,
+        "live": "live"
+      }
+    },
+    "brain_rendered_and_animating": {
+      "ok": true,
+      "detail": 14.59
+    },
+    "initial_state_idle": {
+      "ok": true
+    },
+    "awaiting_approval_shown": {
+      "ok": true
+    },
+    "approval_recorded_is_not_execution": {
+      "ok": true
+    },
+    "e002_cli_completed": {
+      "ok": true,
+      "detail": [
+        "  \"failure_reason\": null,",
+        "  \"mission_id\": \"petron-e002\",",
+        "  \"state\": \"completed\"",
+        "}"
+      ]
+    },
+    "brain_followed_live_states": {
+      "ok": true,
+      "detail": [
+        "working",
+        "verifying",
+        "success"
+      ]
+    },
+    "success_only_after_runtime_verification": {
+      "ok": true,
+      "detail": {
+        "first_success_index": 98,
+        "verification_result_index": [
+          97
+        ]
+      }
+    },
+    "decisions_streamed": {
+      "ok": true,
+      "detail": {
+        "decision_requested": 18,
+        "tool_authorizations": 16,
+        "thinking_messages_on_wire": 18,
+        "note": "deterministic decisions take microseconds, so 'thinking' is on the wire but rarely visible on screen; a real model's decision time would keep it visible"
+      }
+    },
+    "events_in_order_no_duplicates": {
+      "ok": true,
+      "detail": 99
+    },
+    "success_returns_to_calm": {
+      "ok": true
+    },
+    "failure_shows_error_never_success": {
+      "ok": true,
+      "detail": {
+        "modes": [
+          "working",
+          "error"
+        ],
+        "cli": [
+          "  \"state\": \"failed\"",
+          "}"
+        ]
+      }
+    },
+    "disconnect_detected": {
+      "ok": true
+    },
+    "no_fake_activity_while_disconnected": {
+      "ok": true,
+      "detail": []
+    },
+    "reconnect_recovers_state_without_replaying_success": {
+      "ok": true,
+      "detail": {
+        "recovered": "error",
+        "modes": [
+          "error"
+        ]
+      }
+    },
+    "no_page_errors_outside_the_deliberate_outage": {
+      "ok": true,
+      "detail": {
+        "unexpected": [],
+        "expected_refused_during_outage": 4
+      }
+    },
+    "only_local_requests": {
+      "ok": true,
+      "detail": [
+        "http://127.0.0.1:58075/",
+        "http://127.0.0.1:58075/api/events",
+        "http://127.0.0.1:58075/brain-texture.webp",
+        "http://127.0.0.1:58075/brain.js",
+        "http://127.0.0.1:58075/live.js"
+      ]
+    },
+    "mobile_layout": {
+      "ok": true,
+      "detail": {
+        "scroll": false,
+        "canvas": [
+          585,
+          1266
+        ]
+      }
+    },
+    "reduced_motion_respected": {
+      "ok": true
+    },
+    "keyboard_focus_and_status": {
+      "ok": true,
+      "detail": "PETRON: miss\u00e3o falhou."
+    }
+  },
+  "notes": [],
+  "ok": true
+}
