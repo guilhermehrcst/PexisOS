@@ -3,8 +3,11 @@
     petron brain serve [--port 8765]      ->  http://127.0.0.1:8765/
 
 What it does: serves the approved Brain assets and streams the runtime's own events, mapped to
-visual states, over Server-Sent Events. What it does not do: execute, approve, cancel or create
-anything. There is no mutation endpoint; the CLI remains the only way to act on missions.
+visual states, over Server-Sent Events. By default it is strictly read-only. With
+``--interactive --template SPEC`` it also accepts three commands from the Brain (see
+``brain_commands``): draft a mission from words, approve a Brain draft by a deliberate gesture,
+discard a Brain draft. Those require a per-run secret delivered only in the URL fragment printed
+in the operator's terminal, an exact same-origin ``Origin``, a JSON body and a closed schema.
 
 Security posture:
 
@@ -23,7 +26,9 @@ no CPU, token or progress figure is invented. ``activity`` is a fixed value per 
 from __future__ import annotations
 
 import datetime as _dt
+import hmac
 import json
+import re
 import socket
 import sqlite3
 import threading
@@ -53,6 +58,8 @@ _CSP = ("default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'
 # Activity per tool effect class (heuristic: heavier effects animate more; not a measurement).
 _EFFECT_ACTIVITY = {"read": 0.45, "external_read": 0.5, "write_workspace": 0.6, "execute": 0.8}
 _TERMINAL = {"completed", "failed", "cancelled"}
+_COMMAND_PATH = re.compile(r"^/api/missions(?:/(brain-[0-9]{14}-[0-9a-f]{6})/(approve|discard))?$")
+_MAX_BODY = 2048
 
 
 def _parse_at(value: str) -> _dt.datetime | None:
@@ -157,7 +164,7 @@ class EventReader:
 
     def latest_mission(self) -> dict | None:
         db = self._conn()
-        row = db.execute("SELECT mission_id, state FROM missions ORDER BY updated_at DESC LIMIT 1").fetchone() \
+        row = db.execute("SELECT mission_id, state, plan_sha256 FROM missions ORDER BY updated_at DESC LIMIT 1").fetchone() \
             if db else None
         return dict(row) if row else None
 
@@ -205,8 +212,13 @@ def snapshot(reader: EventReader, now: _dt.datetime | None = None) -> dict:
             if mapped and mapped["state"] not in ("success", "error"):
                 visual = mapped
     visual = visual or _state("idle", 0.25, "em repouso")
-    return {"type": "snapshot", "seq": seq, "mission_id": mission["mission_id"], "mission_state": state,
-            "interrupted": interrupted, **visual}
+    result = {"type": "snapshot", "seq": seq, "mission_id": mission["mission_id"], "mission_state": state,
+              "interrupted": interrupted, **visual}
+    if state == "awaiting_approval":
+        # Lets a reloaded Brain page approve the exact pending Brain draft (the server re-checks it).
+        result["scope_sha256"] = mission.get("plan_sha256")
+        result["brain_draft"] = any(e["kind"] == "brain.draft" for e in events)
+    return result
 
 
 def runtime_message(event: dict, now: _dt.datetime) -> dict:
@@ -216,24 +228,35 @@ def runtime_message(event: dict, now: _dt.datetime) -> dict:
             "at": event["at"], **mapped}
 
 
-def _live_index(html: str) -> str:
+def _live_index(html: str, interactive: bool = False) -> str:
     marker = '<script src="./brain.js" defer></script>'
     if marker not in html:
         raise RuntimeError("index.html does not reference brain.js as expected")
     live = (marker + '\n    <script src="./live.js" defer></script>')
-    return (html.replace(marker, live)
+    html = (html.replace(marker, live)
             .replace('<meta name="color-scheme" content="dark">',
                      '<meta name="color-scheme" content="dark">\n    <meta name="petron-mode" content="live">')
             .replace("PETRON em modo visual autônomo, sem conexão com o runtime.", "PETRON conectando ao runtime."))
+    if not interactive:
+        return html   # read-only bridge: no input element exists at all
+    return html.replace('<div id="petron-status"',
+                        '<textarea id="petron-input" class="petron-status" aria-label="Pedido para o PETRON" '
+                        'autocomplete="off" autocapitalize="sentences" spellcheck="false" maxlength="500" '
+                        'rows="1" tabindex="-1"></textarea>\n      <div id="petron-status"')
 
 
 class BrainServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, home: Path, host: str = "127.0.0.1", port: int = 8765):
+    def __init__(self, home: Path, host: str = "127.0.0.1", port: int = 8765, commands=None,
+                 secret: str | None = None):
         if host not in LOOPBACK:
             raise ValueError("the Brain bridge binds to a loopback address only")
+        if commands is not None and (not secret or len(secret) < 32):
+            raise ValueError("interactive mode needs a strong per-run secret")
+        self.commands = commands
+        self.secret = secret
         family = socket.AF_INET6 if host == "::1" else socket.AF_INET
         self.address_family = family
         self.db_path = Path(home) / "petron.sqlite3"
@@ -304,7 +327,7 @@ class BrainHandler(BaseHTTPRequestHandler):
         if url.path == "/api/snapshot":
             reader = EventReader(self.server.db_path)
             try:
-                body = json.dumps(snapshot(reader)).encode()
+                body = json.dumps({**snapshot(reader), "interactive": self.server.commands is not None}).encode()
             finally:
                 reader.close()
             self._headers(200, "application/json", len(body))
@@ -318,13 +341,62 @@ class BrainHandler(BaseHTTPRequestHandler):
     def _refuse_method(self) -> None:
         self._refuse(HTTPStatus.METHOD_NOT_ALLOWED)
 
-    do_POST = do_PUT = do_PATCH = do_DELETE = do_OPTIONS = _refuse_method  # noqa: N815 - read-only bridge
+    do_PUT = do_PATCH = do_DELETE = do_OPTIONS = _refuse_method  # noqa: N815
+
+    def _json(self, status: int, payload: dict) -> None:
+        body = json.dumps(payload).encode()
+        self._headers(status, "application/json", len(body))
+        self.wfile.write(body)
+
+    def do_POST(self) -> None:  # noqa: N802
+        commands = self.server.commands
+        if commands is None:
+            return self._refuse(HTTPStatus.METHOD_NOT_ALLOWED)   # read-only unless --interactive
+        if not self._guard():
+            return
+        if self.headers.get("Origin") not in self.server.allowed_origins:   # required, not just tolerated
+            return self._refuse(HTTPStatus.FORBIDDEN)
+        if self.headers.get("Sec-Fetch-Site", "same-origin") != "same-origin":
+            return self._refuse(HTTPStatus.FORBIDDEN)
+        if (self.headers.get("Content-Type") or "").split(";")[0].strip() != "application/json":
+            return self._refuse(HTTPStatus.UNSUPPORTED_MEDIA_TYPE)
+        key = self.headers.get("X-Petron-Key") or ""
+        if not hmac.compare_digest(key.encode(), self.server.secret.encode()):
+            return self._refuse(HTTPStatus.FORBIDDEN)
+        match = _COMMAND_PATH.fullmatch(urlsplit(self.path).path)
+        if match is None:
+            return self._refuse(HTTPStatus.NOT_FOUND)
+        try:
+            length = int(self.headers.get("Content-Length") or "0")
+        except ValueError:
+            return self._refuse(HTTPStatus.BAD_REQUEST)
+        if length < 2 or length > _MAX_BODY:
+            return self._refuse(HTTPStatus.REQUEST_ENTITY_TOO_LARGE if length > _MAX_BODY else HTTPStatus.BAD_REQUEST)
+        try:
+            body = json.loads(self.rfile.read(length))
+        except ValueError:
+            return self._refuse(HTTPStatus.BAD_REQUEST)
+        mission_id, action = match.groups()
+        expected = {None: {"objective"}, "approve": {"scope_sha256"}, "discard": set()}[action]
+        if not isinstance(body, dict) or set(body) != expected:
+            return self._json(400, {"error": "invalid_request"})
+        from .brain_commands import CommandRefused
+        try:
+            if action is None:
+                result = commands.create_draft(body["objective"])
+            elif action == "approve":
+                result = commands.approve_and_run(mission_id, body["scope_sha256"])
+            else:
+                result = commands.discard(mission_id)
+        except CommandRefused as refused:
+            return self._json(refused.status, {"error": refused.code})
+        self._json(200, result)
 
     def _asset(self, path: str) -> None:
         name, content_type = _ASSETS[path]
         data = (BRAIN_DIR / name).read_bytes()
         if name == "index.html":
-            data = _live_index(data.decode("utf-8")).encode("utf-8")
+            data = _live_index(data.decode("utf-8"), self.server.commands is not None).encode("utf-8")
         self._headers(200, content_type, len(data), cache="no-cache")
         if self.command != "HEAD":
             self.wfile.write(data)
@@ -355,7 +427,7 @@ class BrainHandler(BaseHTTPRequestHandler):
             if last is not None:  # reconnect: catch up (freshness-guarded), then the authoritative snapshot
                 for event in reader.events_after(last, limit=1000):
                     self._send("runtime", runtime_message(event, now), event["seq"])
-            current = snapshot(reader, now)
+            current = {**snapshot(reader, now), "interactive": self.server.commands is not None}
             self._send("snapshot", current, current["seq"])
             last = current["seq"]
             watched = current.get("mission_id")
@@ -382,8 +454,9 @@ class BrainHandler(BaseHTTPRequestHandler):
             self.server.streams.release()
 
 
-def serve(home: Path, host: str = "127.0.0.1", port: int = 8765) -> BrainServer:
+def serve(home: Path, host: str = "127.0.0.1", port: int = 8765, commands=None,
+          secret: str | None = None) -> BrainServer:
     """Build the server (not started). Callers run ``serve_forever`` and ``shutdown``."""
     if not (BRAIN_DIR / "index.html").is_file():
         raise FileNotFoundError("Brain assets not found next to the package (apps/petron/brain)")
-    return BrainServer(Path(home), host, port)
+    return BrainServer(Path(home), host, port, commands, secret)
