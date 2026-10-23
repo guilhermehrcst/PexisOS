@@ -110,8 +110,10 @@ def summarize_unittest(output: str) -> dict:
 
 def _run_tests(ctx: MissionContext, args: dict) -> dict:
     argv = VERIFICATION_COMMANDS[ctx.spec.raw["verification"]["command"]]
-    result = ctx.sandbox.run(ctx.workspace.root, argv, ctx.spec.budget["exec_timeout_s"]).to_dict()
-    result["passed"] = result["exit_code"] == 0 and not result["timed_out"]
+    # An operator's cancel reaches the running container, not just the state column.
+    cancelled = lambda: ctx.store.state(ctx.spec.mission_id) is MissionState.CANCELLED  # noqa: E731
+    result = ctx.sandbox.run(ctx.workspace.root, argv, ctx.spec.budget["exec_timeout_s"], cancelled=cancelled).to_dict()
+    result["passed"] = result["exit_code"] == 0 and not result["timed_out"] and not result["cancelled"]
     result["summary"] = summarize_unittest(result["stdout"] + "\n" + result["stderr"])
     return result
 

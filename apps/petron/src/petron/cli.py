@@ -3,12 +3,13 @@
     petron [--home DIR] mission create SPEC.json
     petron mission plan ID [--allow-real-model]
     petron mission approve ID (--plan-sha256 | --scope-sha256) HEX --approver NAME [--channel cli]
-    petron mission run ID [--allow-real-model] [--pexislink-src DIR --fabric-python PY]
+    petron mission run ID [--allow-real-model] [--pexislink-src DIR --pexislink-src-sha256 HEX --fabric-python PY]
     petron mission list | show ID | log ID [--follow] | diff ID | report ID [--format md|json]
     petron mission stop ID | cancel ID | resume ID | discard ID
     petron events verify
     petron sandbox probe --image REF@sha256:...
-    petron fabric probe --principal ID --pexislink-src DIR [--fabric-python PY]
+    petron fabric digest --pexislink-src DIR
+    petron fabric probe --principal ID --pexislink-src DIR --pexislink-src-sha256 HEX [--fabric-python PY]
     petron experiment e001 [--approver NAME] [--sandbox docker|none] [--image REF]
     petron experiment e002 [--approver NAME] [--provider deterministic|anthropic --allow-real-model]
     petron provider check --model ID      (Models API; needs ANTHROPIC_API_KEY)
@@ -26,14 +27,30 @@ import sys
 from pathlib import Path
 
 from .engine import Engine, EngineError
+from .workspace import WorkspaceError
 from .mission import MissionState
+from .redact import redact
 from .report import build_report, render_markdown
 from .schema import SchemaError
 from .store import StoreError
 
 DEFAULT_IMAGE = ("mirror.gcr.io/library/python@sha256:"
                  "cce12316475d7d56d605f76e1d811d0dc4e7227f2d4afd29951521264f504ff8")
-FIXTURES = Path(__file__).resolve().parents[2] / "fixtures"
+
+
+def _fixtures_dir() -> Path:
+    """Installed wheel: ``petron/fixtures`` (package data). Source checkout: ``apps/petron/fixtures``."""
+    packaged = Path(__file__).resolve().parent / "fixtures"
+    return packaged if (packaged / "e001" / "mission.json").is_file() else Path(__file__).resolve().parents[2] / "fixtures"
+
+
+FIXTURES = _fixtures_dir()
+
+
+CHAIN_NOTE = ("unkeyed hash chain: detects accidental damage, edits and deletions in the middle, and (via the "
+              "local anchor file, or a head you recorded elsewhere) truncation of the newest events. It is not "
+              "tamper-proof: whoever can rewrite the database and the anchor can recompute everything. Record "
+              "`petron events head` somewhere independent and pass it back with --expect-head.")
 
 
 def _home(args) -> Path:
@@ -42,10 +59,15 @@ def _home(args) -> Path:
 
 def _load_spec(path: Path, overrides: dict | None = None) -> dict:
     data = json.loads(path.read_text(encoding="utf-8"))
-    workspace = data.get("workspace", {})
-    source = Path(workspace.get("source", ""))
-    if workspace.get("source") and not source.is_absolute():
-        workspace["source"] = str((path.parent / source).resolve())
+    if not isinstance(data, dict):
+        raise SchemaError("", "expected object")
+    workspace = data.get("workspace")
+    # Types are checked before they are used; anything else flows on to MissionSpec.parse, which
+    # reports it with a domain error instead of a traceback.
+    if isinstance(workspace, dict) and isinstance(workspace.get("source"), str) and workspace["source"]:
+        source = Path(workspace["source"])
+        if not source.is_absolute():
+            workspace["source"] = str((path.parent / source).resolve())
     for key, value in (overrides or {}).items():
         data[key] = value
     return data
@@ -58,7 +80,8 @@ def _connector_factory(args):
 
     def factory(spec):
         return FabricConnector(FabricConfig(spec.raw["pexisos"]["principal"], Path(args.pexislink_src),
-                                            args.fabric_python or sys.executable))
+                                            args.fabric_python or sys.executable,
+                                            pexislink_src_sha256=args.pexislink_src_sha256))
     return factory
 
 
@@ -151,7 +174,7 @@ def _mission(args, engine: Engine) -> int:
     elif args.action == "show":
         row = engine.store.mission(args.target)
         mode = json.loads(row["spec_json"]).get("mode", "plan")
-        document = json.loads(row["plan_json"]) if row["plan_json"] else None
+        document = redact(json.loads(row["plan_json"])) if row["plan_json"] else None
         _print({**{k: row[k] for k in ("mission_id", "state", "failure_reason", "created_at")}, "mode": mode,
                 ("scope_sha256" if mode == "agent" else "plan_sha256"): row["plan_sha256"],
                 ("scope" if mode == "agent" else "plan"): document})
@@ -222,19 +245,23 @@ def build_parser() -> argparse.ArgumentParser:
     mission.add_argument("--channel", default="cli")
     mission.add_argument("--format", choices=["md", "json"], default="md")
     mission.add_argument("--pexislink-src")
+    mission.add_argument("--pexislink-src-sha256", help="operator's pin of the MCP server source tree")
     mission.add_argument("--fabric-python")
 
     events = sub.add_parser("events")
-    events.add_argument("action", choices=["verify"])
+    events.add_argument("action", choices=["verify", "head"])
+    events.add_argument("--expect-head", metavar="SEQ:HASH",
+                        help="a head you recorded elsewhere (petron events head); detects truncation or rollback")
 
     sandbox = sub.add_parser("sandbox")
     sandbox.add_argument("action", choices=["probe"])
     sandbox.add_argument("--image", default=DEFAULT_IMAGE)
 
     fabric = sub.add_parser("fabric")
-    fabric.add_argument("action", choices=["probe"])
-    fabric.add_argument("--principal", required=True)
+    fabric.add_argument("action", choices=["probe", "digest"])
+    fabric.add_argument("--principal")
     fabric.add_argument("--pexislink-src", required=True)
+    fabric.add_argument("--pexislink-src-sha256", help="operator's pin of the MCP server source tree")
     fabric.add_argument("--fabric-python")
 
     experiment = sub.add_parser("experiment")
@@ -277,10 +304,24 @@ def main(argv: list[str] | None = None) -> int:
         _print(report.to_dict())
         return 0 if report.ok else 1
     if args.command == "fabric":
-        from .connectors.pexisos import READ_ONLY_TOOLS, ConnectorError, FabricConfig, FabricConnector
+        from .connectors.pexisos import (READ_ONLY_TOOLS, ConnectorError, FabricConfig, FabricConnector,
+                                         digest_source)
+        if args.action == "digest":
+            try:
+                _print({"pexislink_src_sha256": digest_source(Path(args.pexislink_src)),
+                        "note": "pin a digest you obtained from a trusted, reviewed source; pinning one "
+                                "computed here only freezes whatever is on disk now"})
+            except ConnectorError as error:
+                print(f"error: {error.code}", file=sys.stderr)
+                return 1
+            return 0
+        if not args.principal:
+            print("error: fabric probe needs --principal", file=sys.stderr)
+            return 2
         try:
             connector = FabricConnector(FabricConfig(args.principal, Path(args.pexislink_src),
-                                                     args.fabric_python or sys.executable))
+                                                     args.fabric_python or sys.executable,
+                                                     pexislink_src_sha256=args.pexislink_src_sha256))
             outcome = connector.run([("list_entities", {})])
         except ConnectorError as error:
             print(f"error: {error.code}", file=sys.stderr)
@@ -290,13 +331,23 @@ def main(argv: list[str] | None = None) -> int:
     engine = Engine(_home(args), connector_factory=_connector_factory(args) if args.command == "mission" else None)
     try:
         if args.command == "events":
-            ok, bad = engine.store.verify_chain()
-            _print({"chain_ok": ok, "first_bad_seq": bad})
+            if args.action == "head":
+                _print(engine.store.head() or {"seq": 0, "hash": None})
+                return 0
+            expected = None
+            if args.expect_head:
+                seq, _, digest = args.expect_head.partition(":")
+                if not (seq.isdigit() and len(digest) == 64):
+                    print("error: --expect-head must be SEQ:HASH (64 hex)", file=sys.stderr)
+                    return 2
+                expected = {"seq": int(seq), "hash": digest}
+            ok, bad = engine.store.verify_chain(expected_head=expected)
+            _print({"chain_ok": ok, "first_bad_seq": bad, "note": CHAIN_NOTE})
             return 0 if ok else 1
         if args.command == "experiment":
             return _experiment_e002(args, engine) if args.name == "e002" else _experiment_e001(args, engine)
         return _mission(args, engine)
-    except (EngineError, StoreError) as error:
+    except (EngineError, StoreError, WorkspaceError) as error:
         print(f"error: {error.code}", file=sys.stderr)
         return 2
     except (SchemaError, ValueError, OSError) as error:

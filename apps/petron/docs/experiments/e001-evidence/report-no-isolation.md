@@ -4,10 +4,10 @@
 
 - Objective: Synthetic fixture: calc.stats.median() returns the wrong value for even-length input. Make the existing tests pass by fixing calc/stats.py only. Tests are protected.
 - Final state: **failed** (`step_failed:2:isolation_unavailable:no_isolation_backend`)
-- Spec sha256: `1682836538efedd5b9ad2d71a78980c955832565e01774049dca4f1f235de4bf`
+- Spec sha256: `567ddcf3e6741e5c1c81e95593204f70302dce49f836766124d77b1a04b2eef3`
 - Plan sha256: `97df38f807abe869e7bf10f6cf795bf4f20907ca5236cbcd8a02beb3fd8df6d8`
 - Provider: `{"model": null, "provider": "deterministic", "script": "e001_fix_median", "simulated": true}`
-- Event chain: intact (21 mission events)
+- Event chain (unkeyed hash chain; see `petron events verify`): intact (21 mission events)
 
 ## State transitions
 
@@ -18,7 +18,7 @@
 
 ## Approvals
 
-- `97df38f807abe869…` by **e001-harness (Claude Code agent; synthetic fixture)** via `e001-harness`
+- `97df38f807abe869…` by **e001-harness (Claude Code agent under the owner's PETRON V0.1 task authorization; synthetic fixture; not an independent human review)** via `e001-harness`
 
 ## Isolation
 

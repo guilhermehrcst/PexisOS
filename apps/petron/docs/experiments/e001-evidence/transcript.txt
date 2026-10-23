@@ -2,10 +2,12 @@ $ petron sandbox probe
 {
   "backend": "docker",
   "checks": {
+    "cpu_limited": true,
     "daemon_seccomp": true,
     "egress_blocked": true,
     "empty_bounding_set": true,
     "image_present_pinned": true,
+    "intrinsic_deadline_available": true,
     "loopback_only": true,
     "memory_limited": true,
     "no_docker_socket": true,
@@ -31,6 +33,11 @@ $ petron sandbox probe
       "cap_bnd": "0000000000000000",
       "cap_eff": "0000000000000000",
       "cap_prm": "0000000000000000",
+      "cpu_cfs": [
+        "100000",
+        "100000"
+      ],
+      "cpu_max": null,
       "docker_socket": false,
       "egress": "blocked",
       "env_names": [
@@ -44,6 +51,7 @@ $ petron sandbox probe
         "PYTHON_VERSION"
       ],
       "gid": 65534,
+      "has_timeout": true,
       "interfaces": [
         "lo"
       ],
@@ -79,7 +87,7 @@ error: approval_missing
 $ petron mission approve petron-e001 --plan-sha256 0000000000000000000000000000000000000000000000000000000000000000 --approver e001-harness
 error: plan_hash_mismatch
 [exit 2]
-$ petron mission approve petron-e001 --plan-sha256 97df38f807abe869e7bf10f6cf795bf4f20907ca5236cbcd8a02beb3fd8df6d8 --approver e001-harness (Claude Code agent under the owner's PETRON V0.1 task authorization; synthetic fixture; not an independent human review)
+$ petron mission approve petron-e001 --plan-sha256 97df38f807abe869e7bf10f6cf795bf4f20907ca5236cbcd8a02beb3fd8df6d8 --approver 'e001-harness (Claude Code agent under the owner'"'"'s PETRON V0.1 task authorization; synthetic fixture; not an independent human review)'
 {
   "approved": "97df38f807abe869e7bf10f6cf795bf4f20907ca5236cbcd8a02beb3fd8df6d8",
   "mission_id": "petron-e001"
@@ -90,13 +98,23 @@ $ petron mission run petron-e001   (wall time / peak RSS of the petron process m
   "mission_id": "petron-e001",
   "state": "completed"
 }
-[exit 0] wall=1.75s peak_rss_petron=40.5MiB
+[exit 0] wall=1.95s peak_rss_petron=41.2MiB
+$ petron mission report petron-e001
+(written to report.md)
+[exit 0]
+$ petron mission report petron-e001 --format json
+(written to report.json)
+[exit 0]
 $ petron events verify
 {
   "chain_ok": true,
-  "first_bad_seq": null
+  "first_bad_seq": null,
+  "note": "unkeyed hash chain: detects accidental damage, edits and deletions in the middle, and (via the local anchor file, or a head you recorded elsewhere) truncation of the newest events. It is not tamper-proof: whoever can rewrite the database and the anchor can recompute everything. Record `petron events head` somewhere independent and pass it back with --expect-head."
 }
 [exit 0]
 $ petron mission run petron-e001
 error: not_awaiting_approval
 [exit 2]
+$ petron experiment e001 --sandbox none --mission-id petron-e001-noiso --approver 'e001-harness (Claude Code agent under the owner'"'"'s PETRON V0.1 task authorization; synthetic fixture; not an independent human review)'
+(written to report-no-isolation.md)
+[exit 1]

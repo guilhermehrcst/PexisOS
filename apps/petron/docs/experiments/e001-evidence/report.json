@@ -53,10 +53,12 @@
   "sandbox_probe": {
     "backend": "docker",
     "checks": {
+      "cpu_limited": true,
       "daemon_seccomp": true,
       "egress_blocked": true,
       "empty_bounding_set": true,
       "image_present_pinned": true,
+      "intrinsic_deadline_available": true,
       "loopback_only": true,
       "memory_limited": true,
       "no_docker_socket": true,
@@ -82,6 +84,11 @@
         "cap_bnd": "0000000000000000",
         "cap_eff": "0000000000000000",
         "cap_prm": "0000000000000000",
+        "cpu_cfs": [
+          "100000",
+          "100000"
+        ],
+        "cpu_max": null,
         "docker_socket": false,
         "egress": "blocked",
         "env_names": [
@@ -95,6 +102,7 @@
           "PYTHON_VERSION"
         ],
         "gid": 65534,
+        "has_timeout": true,
         "interfaces": [
           "lo"
         ],
@@ -117,7 +125,7 @@
   },
   "schema": "petron.report.v0",
   "simulated_provider": true,
-  "spec_sha256": "742d923c740afd9299dbfb010760cd40962e0f1060808e0bcd60c5675e14a6bf",
+  "spec_sha256": "d9fef326d258cba34ea4a7aad80f14464d3a58575bf505c80d613d253bb1e952",
   "states": [
     [
       "created",
@@ -199,7 +207,7 @@
       "source_tree_unchanged": true,
       "tests_pass_in_sandbox": true
     },
-    "diff_sha256": "6207c089a3eeac4b8fbd10113997be9536d57d464fd57f4e44d36190f11fdc8f",
+    "diff_sha256": "7944c21a8ea7872c4ffec354b698f3526cbc6a25f80929494e9fbade651abeb1",
     "protected_paths": [
       "tests/__init__.py",
       "tests/test_stats.py"

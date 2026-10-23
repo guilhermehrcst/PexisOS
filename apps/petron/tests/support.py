@@ -36,7 +36,7 @@ class FakeSandbox:
     def probe(self) -> ProbeReport:
         return ProbeReport("fake", self.ok, {"fake": self.ok}, reason=None if self.ok else "fake_unavailable")
 
-    def run(self, workspace: Path, argv, timeout_s: int) -> RunResult:
+    def run(self, workspace: Path, argv, timeout_s: int, cancelled=None) -> RunResult:
         if not self.ok:
             raise SandboxUnavailable("fake_unavailable")
         self.runs.append(Path(workspace))
@@ -88,7 +88,7 @@ def e002_spec(source: Path, script: str = "e002_adaptive", **budget) -> dict:
 class E002FakeSandbox(FakeSandbox):
     """Infers the E002 test outcome from file contents (never executes fixture code)."""
 
-    def run(self, workspace: Path, argv, timeout_s: int) -> RunResult:
+    def run(self, workspace: Path, argv, timeout_s: int, cancelled=None) -> RunResult:
         if not self.ok:
             raise SandboxUnavailable("fake_unavailable")
         self.runs.append(Path(workspace))

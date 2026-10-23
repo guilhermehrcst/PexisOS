@@ -22,8 +22,24 @@ _PATTERNS = (
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"),
     re.compile(r"(?i)\b(bearer)\s+[A-Za-z0-9._\-]{16,}"),
 )
-_ASSIGNMENT = re.compile(
-    r"(?i)\b([A-Za-z0-9_]*(?:api[_-]?key|token|secret|password|passwd)[A-Za-z0-9_]*)(\s*[=:]\s*)(['\"]?)[^\s'\"]{4,}\3")
+_NAME = r"[A-Za-z0-9_]*(?:api[_-]?key|token|secret|password|passwd)[A-Za-z0-9_]*"
+# A quoted value may hold spaces, escaped quotes and newlines (bounded, so a missing closing quote
+# cannot make the match run away); an unquoted value stops at whitespace.
+_DQ = r'"(?:[^"\\]|\\.){4,4096}"'
+_SQ = r"'(?:[^'\\]|\\.){4,4096}'"
+_ESCAPED_DQ = r'\\"(?:[^"\\]|\\(?!"))+\\"'       # password=\"two words\" inside a JSON string
+_UNTERMINATED = r"[\"'][^\"'\r\n]{4,}(?=\r?\n|$)"    # quote opened, never closed on this line
+_VALUE = rf"(?:{_ESCAPED_DQ}|{_DQ}|{_SQ}|[^\s'\"]{{4,}}|{_UNTERMINATED})"
+_ASSIGNMENT = re.compile(rf"(?i)\b({_NAME})(\s*[=:]\s*){_VALUE}")
+_JSON_STRING = re.compile(rf'(?i)("{_NAME}"\s*:\s*){_DQ}')
+
+
+def _mask_assignment(match: re.Match) -> str:
+    name, separator = match.group(1), match.group(2)
+    value = match.group(0)[len(name) + len(separator):]
+    if name.lower().endswith("tokens") and value.isdigit():
+        return match.group(0)   # a token *count* (max_tokens, input_tokens...), not a credential
+    return f"{name}{separator}{REDACTED}"
 
 
 def _env_secret_values() -> list[str]:
@@ -37,7 +53,19 @@ def redact_text(text: str) -> str:
         text = text.replace(value, REDACTED)
     for pattern in _PATTERNS:
         text = pattern.sub(REDACTED, text)
-    return _ASSIGNMENT.sub(lambda m: f"{m.group(1)}{m.group(2)}{REDACTED}", text)
+    text = _JSON_STRING.sub(lambda m: f"{m.group(1)}\"{REDACTED}\"", text)
+    return _ASSIGNMENT.sub(_mask_assignment, text)
+
+
+def contains_secret(value: Any) -> bool:
+    """True when redaction would change anything in ``value`` (strings inside JSON-like data)."""
+    if isinstance(value, str):
+        return redact_text(value) != value
+    if isinstance(value, dict):
+        return any(contains_secret(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(contains_secret(item) for item in value)
+    return False
 
 
 def redact(value: Any) -> Any:
