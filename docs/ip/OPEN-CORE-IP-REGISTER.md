@@ -10,6 +10,34 @@
 - `review-required` marks example datasets and generated reports pending source, privacy and license validation. No claims of real-device or customer-data provenance are made.
 - `generated-synthetic` is available only when synthetic origin and reuse rights have been verified. No current file gets that classification automatically.
 
+## PexisOS Console and PETRON inventory additions (2026-10-23)
+
+The provisional inventory now covers the already-public Console V1 tree and the PETRON
+runtime expected from PRs #23 and #24 without classifying every future `apps/`
+directory automatically. `apps/console/` and `apps/petron/` are
+`repository-license` with `ownership_review: pending`; this records their
+presence in a public source tree, **not** an opinion about copyright title.
+
+Exceptions require a separate rights/provenance decision:
+
+- `apps/console/package-lock.json`: `third-party-reference`; inspect actual
+  dependency licenses and notices before redistribution claims.
+- `apps/console/docs/console-v1-1440x900.png`: `review-required`; confirm
+  image/assets ownership and any third-party design/reference content.
+- `apps/petron/fixtures/` and both PETRON E001/E002 evidence directories:
+  `review-required`; verify the claimed synthetic origin and that no real
+  credentials, private paths or client data were included.
+
+All classifications remain provisional. No file was granted
+`ownership_review: reviewed`; `legal_signoff` remains `not_recorded`.
+A clean inventory job is **not** approval to ship or merge the agent.
+
+Before the Open Core D1 merge, run the inventory and boundary checks on the
+actual combined tree including both apps and `.github/workflows/petron.yml`.
+Enforce the PETRON workflow's execution and non-bypass controls, and disposition
+the outstanding P1 source/artifact/CI findings in PR #21. Human licensing and
+source provenance decisions remain a separate gate.
+
 ## Questions requiring human review
 
 | Area | Evidence requested | Signoff |
