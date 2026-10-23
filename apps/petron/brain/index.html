@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+    <meta name="theme-color" content="#000000">
+    <meta name="color-scheme" content="dark">
+    <meta name="description" content="PETRON Brain. Uma única presença visual gerativa, sem controles aparentes.">
+    <title>PETRON</title>
+    <style>
+      :root { color-scheme: dark; background: #000; }
+      * { box-sizing: border-box; }
+      html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: #000; }
+      body { min-height: 100svh; overscroll-behavior: none; }
+      main { position: fixed; inset: 0; background: #000; overflow: hidden; }
+      
+      .brain-reference {
+        display: block; position: absolute; left: 50%; top: 50%;
+        width: min(97vmin, 1050px); height: min(97vmin, 1050px);
+        object-fit: contain; transform: translate(-50%, -50%);
+        opacity: 0.92; pointer-events: none; user-select: none;
+        animation: breathe 19s ease-in-out infinite alternate;
+      }
+      @keyframes breathe {
+        from { transform: translate(-50%, -50%) scale(0.987) rotate(-0.2deg); }
+        to { transform: translate(-50%, -50%) scale(1.025) rotate(0.3deg); }
+      }
+      canvas { display: block; position: absolute; width: 100%; height: 100%; inset: 0; touch-action: none; }
+      @media (prefers-reduced-motion: reduce) { .brain-reference { animation: none; } }
+    </style>
+  </head>
+  <body>
+    <main aria-label="PETRON: cérebro de partículas brancas sobre fundo preto">
+      <img class="brain-reference" src="./brain-texture.webp" alt="" aria-hidden="true">
+      <canvas id="brain" role="img" aria-label="Esfera tridimensional de partículas brancas formando ondas orgânicas, centralizada em um fundo preto"></canvas>
+    </main>
+    <script src="./brain.js" defer></script>
+  </body>
+</html>
