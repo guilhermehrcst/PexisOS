@@ -125,6 +125,42 @@ class Store:
             self._db.execute("ROLLBACK")
             raise
         self._db.execute("COMMIT")
+        self._write_anchor()
+
+    # head anchor --------------------------------------------------------------------------
+    @property
+    def anchor_path(self) -> Path:
+        return self.path.with_name(self.path.name + ".anchor")
+
+    def head(self) -> dict | None:
+        row = self._db.execute("SELECT seq, hash FROM events ORDER BY seq DESC LIMIT 1").fetchone()
+        return {"seq": row["seq"], "hash": row["hash"]} if row else None
+
+    def _read_anchor(self) -> dict | None:
+        try:
+            data = json.loads(self.anchor_path.read_text())
+            return data if isinstance(data.get("seq"), int) and isinstance(data.get("hash"), str) else None
+        except (OSError, ValueError, AttributeError):
+            return None
+
+    def _write_anchor(self) -> None:
+        """Remember the newest committed head beside the database (monotonic, atomic). It is a
+        local convenience that catches truncation by anyone who did not also edit this file; it is
+        not an independent trust anchor."""
+        head = self.head()
+        if head is None:
+            return
+        current = self._read_anchor()
+        if current is not None and current["seq"] >= head["seq"]:
+            return
+        temporary = self.anchor_path.with_name(self.anchor_path.name + f".{os.getpid()}.tmp")
+        try:
+            fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as handle:
+                handle.write(canonical_json(head))
+            os.replace(temporary, self.anchor_path)
+        except OSError:
+            pass   # the anchor is best effort; the chain itself is unaffected
 
     # events -------------------------------------------------------------------------------
     def _append(self, db: sqlite3.Connection, mission_id: str | None, kind: str, payload: dict) -> int:
@@ -146,14 +182,24 @@ class Store:
         rows = self._db.execute(query, (mission_id,) if mission_id else ()).fetchall()
         return [{**dict(row), "payload": json.loads(row["payload_json"])} for row in rows]
 
-    def verify_chain(self) -> tuple[bool, int | None]:
-        """(ok, first bad seq). Detects edits, deletions and reordering of stored events."""
+    def verify_chain(self, expected_head: dict | None = None) -> tuple[bool, int | None]:
+        """(ok, first bad seq). Detects edits, deletions and reordering of stored events.
+
+        An unkeyed chain cannot see removal of the *newest* events: what remains is a valid prefix.
+        So the head is also compared with the local anchor and, when given, ``expected_head``
+        ({"seq", "hash"} recorded somewhere independent): the event at that sequence must still
+        exist with that hash. Neither makes the log tamper-proof against a rewrite of everything."""
         prev_hash, expected_seq = GENESIS, 1
+        hashes: dict[int, str] = {}
         for row in self._db.execute("SELECT * FROM events ORDER BY seq"):
             digest = _event_hash(prev_hash, row["seq"], row["mission_id"], row["at"], row["kind"], row["payload_json"])
             if row["seq"] != expected_seq or row["prev_hash"] != prev_hash or row["hash"] != digest:
                 return False, row["seq"]
+            hashes[row["seq"]] = row["hash"]
             prev_hash, expected_seq = row["hash"], expected_seq + 1
+        for witness in (self._read_anchor(), expected_head):
+            if witness is not None and hashes.get(witness["seq"]) != witness["hash"]:
+                return False, min(witness["seq"], expected_seq)
         return True, None
 
     # missions -----------------------------------------------------------------------------

@@ -24,6 +24,7 @@ import sys
 from pathlib import Path
 
 from .engine import Engine, EngineError
+from .workspace import WorkspaceError
 from .mission import MissionState
 from .redact import redact
 from .report import build_report, render_markdown
@@ -32,7 +33,21 @@ from .store import StoreError
 
 DEFAULT_IMAGE = ("mirror.gcr.io/library/python@sha256:"
                  "cce12316475d7d56d605f76e1d811d0dc4e7227f2d4afd29951521264f504ff8")
-FIXTURES = Path(__file__).resolve().parents[2] / "fixtures"
+
+
+def _fixtures_dir() -> Path:
+    """Installed wheel: ``petron/fixtures`` (package data). Source checkout: ``apps/petron/fixtures``."""
+    packaged = Path(__file__).resolve().parent / "fixtures"
+    return packaged if (packaged / "e001" / "mission.json").is_file() else Path(__file__).resolve().parents[2] / "fixtures"
+
+
+FIXTURES = _fixtures_dir()
+
+
+CHAIN_NOTE = ("unkeyed hash chain: detects accidental damage, edits and deletions in the middle, and (via the "
+              "local anchor file, or a head you recorded elsewhere) truncation of the newest events. It is not "
+              "tamper-proof: whoever can rewrite the database and the anchor can recompute everything. Record "
+              "`petron events head` somewhere independent and pass it back with --expect-head.")
 
 
 def _home(args) -> Path:
@@ -41,10 +56,15 @@ def _home(args) -> Path:
 
 def _load_spec(path: Path, overrides: dict | None = None) -> dict:
     data = json.loads(path.read_text(encoding="utf-8"))
-    workspace = data.get("workspace", {})
-    source = Path(workspace.get("source", ""))
-    if workspace.get("source") and not source.is_absolute():
-        workspace["source"] = str((path.parent / source).resolve())
+    if not isinstance(data, dict):
+        raise SchemaError("", "expected object")
+    workspace = data.get("workspace")
+    # Types are checked before they are used; anything else flows on to MissionSpec.parse, which
+    # reports it with a domain error instead of a traceback.
+    if isinstance(workspace, dict) and isinstance(workspace.get("source"), str) and workspace["source"]:
+        source = Path(workspace["source"])
+        if not source.is_absolute():
+            workspace["source"] = str((path.parent / source).resolve())
     for key, value in (overrides or {}).items():
         data[key] = value
     return data
@@ -134,7 +154,9 @@ def build_parser() -> argparse.ArgumentParser:
     mission.add_argument("--fabric-python")
 
     events = sub.add_parser("events")
-    events.add_argument("action", choices=["verify"])
+    events.add_argument("action", choices=["verify", "head"])
+    events.add_argument("--expect-head", metavar="SEQ:HASH",
+                        help="a head you recorded elsewhere (petron events head); detects truncation or rollback")
 
     sandbox = sub.add_parser("sandbox")
     sandbox.add_argument("action", choices=["probe"])
@@ -198,13 +220,23 @@ def main(argv: list[str] | None = None) -> int:
     engine = Engine(_home(args), connector_factory=_connector_factory(args) if args.command == "mission" else None)
     try:
         if args.command == "events":
-            ok, bad = engine.store.verify_chain()
-            _print({"chain_ok": ok, "first_bad_seq": bad})
+            if args.action == "head":
+                _print(engine.store.head() or {"seq": 0, "hash": None})
+                return 0
+            expected = None
+            if args.expect_head:
+                seq, _, digest = args.expect_head.partition(":")
+                if not (seq.isdigit() and len(digest) == 64):
+                    print("error: --expect-head must be SEQ:HASH (64 hex)", file=sys.stderr)
+                    return 2
+                expected = {"seq": int(seq), "hash": digest}
+            ok, bad = engine.store.verify_chain(expected_head=expected)
+            _print({"chain_ok": ok, "first_bad_seq": bad, "note": CHAIN_NOTE})
             return 0 if ok else 1
         if args.command == "experiment":
             return _experiment_e001(args, engine)
         return _mission(args, engine)
-    except (EngineError, StoreError) as error:
+    except (EngineError, StoreError, WorkspaceError) as error:
         print(f"error: {error.code}", file=sys.stderr)
         return 2
     except (SchemaError, ValueError, OSError) as error:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import unicodedata
 
 from .redact import redact
 from .store import Store
@@ -10,6 +11,28 @@ from .store import Store
 SIMULATED_NOTICE = ("SIMULATED PROVIDER: the plan came from a deterministic script. This run demonstrates "
                     "PETRON's infrastructure (state machine, gates, sandbox, verification, evidence), "
                     "not autonomous problem solving.")
+
+
+def terminal_safe(text: str) -> str:
+    """Make untrusted text safe to print: control characters (ESC, BEL, CR, C1), bidi overrides and
+    other invisible format characters become visible escapes. Newlines and tabs are kept. The raw
+    text stays in the stored artifact; only its rendering is escaped."""
+    out = []
+    for char in str(text):
+        if char in "\n\t":
+            out.append(char)
+        elif unicodedata.category(char) in ("Cc", "Cf", "Cs"):
+            code = ord(char)
+            out.append(f"\\x{code:02x}" if code < 0x100 else f"\\u{code:04x}" if code < 0x10000
+                       else f"\\U{code:08x}")
+        else:
+            out.append(char)
+    return "".join(out)
+
+
+def _line(value) -> str:
+    """One logical line of a report: no embedded newlines, no control characters."""
+    return terminal_safe(str(value)).replace("\n", "\\n").replace("\t", " ")
 
 
 def build_report(store: Store, mission_id: str) -> dict:
@@ -51,46 +74,51 @@ def build_report(store: Store, mission_id: str) -> dict:
 
 
 def render_markdown(report: dict) -> str:
-    lines = [f"# PETRON mission report — `{report['mission_id']}`", ""]
+    lines = [f"# PETRON mission report — `{_line(report['mission_id'])}`", ""]
     if report["notice"]:
-        lines += [f"> **{report['notice']}**", ""]
+        lines += [f"> **{_line(report['notice'])}**", ""]
     lines += [
-        f"- Objective: {report['objective']}",
-        f"- Final state: **{report['final_state']}**" + (f" (`{report['failure_reason']}`)"
-                                                        if report["failure_reason"] else ""),
+        f"- Objective: {_line(report['objective'])}",
+        f"- Final state: **{_line(report['final_state'])}**" + (f" (`{_line(report['failure_reason'])}`)"
+                                                               if report["failure_reason"] else ""),
         f"- Spec sha256: `{report['spec_sha256']}`",
         f"- Plan sha256: `{report['plan_sha256']}`",
-        f"- Provider: `{json.dumps(report['provider'], sort_keys=True)}`",
-        f"- Event chain: {'intact' if report['event_chain']['ok'] else 'BROKEN at ' + str(report['event_chain']['first_bad_seq'])}"
+        f"- Provider: `{_line(json.dumps(report['provider'], sort_keys=True))}`",
+        f"- Event chain (unkeyed hash chain; see `petron events verify`): "
+        f"{'intact' if report['event_chain']['ok'] else 'BROKEN at ' + str(report['event_chain']['first_bad_seq'])}"
         f" ({report['event_count']} mission events)",
         "", "## State transitions", "",
     ]
-    lines += [f"- {a} → {b}" + (f" — `{r}`" if r else "") for a, b, r in report["states"]]
+    lines += [f"- {_line(a)} → {_line(b)}" + (f" — `{_line(r)}`" if r else "") for a, b, r in report["states"]]
     lines += ["", "## Approvals", ""]
-    lines += [f"- `{a['plan_sha256'][:16]}…` by **{a['approver']}** via `{a['channel']}`" for a in report["approvals"]] \
+    lines += [f"- `{_line(a['plan_sha256'][:16])}…` by **{_line(a['approver'])}** via `{_line(a['channel'])}`"
+              for a in report["approvals"]] \
         or ["- none"]
     probe = report["sandbox_probe"]
     lines += ["", "## Isolation", ""]
     if probe:
-        lines.append(f"- Backend `{probe['backend']}`: {'verified' if probe['ok'] else 'NOT verified'}"
-                     + (f" (`{probe['reason']}`)" if probe.get("reason") else ""))
-        lines += [f"  - {'PASS' if ok else 'FAIL'} {name}" for name, ok in sorted(probe["checks"].items())]
+        lines.append(f"- Backend `{_line(probe['backend'])}`: {'verified' if probe['ok'] else 'NOT verified'}"
+                     + (f" (`{_line(probe['reason'])}`)" if probe.get("reason") else ""))
+        lines += [f"  - {'PASS' if ok else 'FAIL'} {_line(name)}" for name, ok in sorted(probe["checks"].items())]
     else:
         lines.append("- not probed (mission did not reach execution)")
     lines += ["", "## Steps", ""]
-    lines += [f"- [{o['index']}] `{o['tool']}`: {'ok' if o['ok'] else 'FAILED ' + str(o['error'])}"
+    lines += [f"- [{_line(o['index'])}] `{_line(o['tool'])}`: {'ok' if o['ok'] else 'FAILED ' + _line(o['error'])}"
               for o in report["step_outcomes"]] or ["- none executed"]
     baseline = report["baseline_tests"]
     lines += ["", "## Verification (runtime-owned)", ""]
     if baseline:
-        lines.append(f"- Baseline tests before change: exit {baseline['exit_code']}"
+        lines.append(f"- Baseline tests before change: exit {_line(baseline['exit_code'])}"
                      + (" (defect reproduced)" if baseline["exit_code"] != 0 else " (no failing test before change)"))
     verification = report["verification"]
     if verification:
-        lines += [f"- {'PASS' if ok else 'FAIL'} {name}" for name, ok in sorted(verification["checks"].items())]
-        lines.append(f"- Changed paths: {', '.join(verification['changed_paths']) or 'none'}")
+        lines += [f"- {'PASS' if ok else 'FAIL'} {_line(name)}" for name, ok in sorted(verification["checks"].items())]
+        lines.append(f"- Changed paths: {_line(', '.join(verification['changed_paths']) or 'none')}")
     else:
         lines.append("- not reached")
     if report["diff"]:
-        lines += ["", "## Diff", "", "```diff", report["diff"].rstrip("\n"), "```"]
+        diff = terminal_safe(report["diff"]).rstrip("\n")
+        longest = max((len(run) for run in __import__("re").findall(r"`+", diff)), default=0)
+        fence = "`" * max(3, longest + 1)   # a diff line of backticks cannot close the block early
+        lines += ["", "## Diff", "", f"{fence}diff", diff, fence]
     return "\n".join(lines) + "\n"
