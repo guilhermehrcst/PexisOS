@@ -232,9 +232,16 @@ class AssetTests(unittest.TestCase):
         brain = (BRAIN_DIR / "brain.js").read_text()
         live = (BRAIN_DIR / "live.js").read_text()
         for source in (brain, live):
-            self.assertNotRegex(source, r"\bfetch\(|XMLHttpRequest|WebSocket|sendBeacon|https?://")
-            self.assertNotRegex(source, r"getUserMedia|SpeechRecognition")   # no capture in this increment
+            self.assertNotRegex(source, r"XMLHttpRequest|WebSocket|sendBeacon|https?://")
+            self.assertNotRegex(source, r"getUserMedia|SpeechRecognition")   # no audio capture in this increment
+        self.assertNotRegex(brain, r"\bfetch\(")
         self.assertIn("new EventSource('/api/events')", live)
+        # The only writes are same-origin POSTs to the three mission commands, carrying the in-memory key.
+        self.assertEqual(live.count("window.fetch("), 1)
+        self.assertIn("method: 'POST', credentials: 'same-origin'", live)
+        self.assertEqual(set(re.findall(r"command\(`?'?(/api/[^`',]+)", live)),
+                         {"/api/missions", "/api/missions/${target.mission_id}/approve",
+                          "/api/missions/${target.mission_id}/discard"})
 
     def test_v01_api_is_preserved(self):
         brain = (BRAIN_DIR / "brain.js").read_text()

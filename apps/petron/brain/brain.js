@@ -6,6 +6,7 @@
  * Integration API (V0.1 calls unchanged; additions marked +):
  *   window.PetronBrain.setState(mode)   idle | thinking | working | success | error
  *                                       + listening | verifying | awaiting_approval | disconnected
+ *                                       + confirming (local press-and-hold feedback only)
  *   window.PetronBrain.setActivity(0..1)
  *   window.PetronBrain.pause(); window.PetronBrain.resume();
  *   window.PetronBrain.getState()
@@ -39,6 +40,8 @@
     verifying: { speed: 0.32, shimmer: 0.07, breathe: 0.012, glow: 1.12, flow: 0.45 },
     awaiting_approval: { speed: 0.08, shimmer: 0.05, breathe: 0.007, glow: 0.94, flow: 0.6 },
     disconnected: { speed: 0.04, shimmer: 0.02, breathe: 0.003, glow: 0.52, flow: 0.3 },
+    // Local gesture feedback (press-and-hold to approve): particles gather and brighten.
+    confirming: { speed: 0.22, shimmer: 0.04, breathe: 0.030, glow: 1.18, flow: 0.3 },
   });
   const KEYS = ['speed', 'shimmer', 'breathe', 'glow', 'flow'];
 
