@@ -3,11 +3,12 @@
     petron [--home DIR] mission create SPEC.json
     petron mission plan ID [--allow-real-model]
     petron mission approve ID --plan-sha256 HEX --approver NAME [--channel cli]
-    petron mission run ID [--pexislink-src DIR --fabric-python PY]
+    petron mission run ID [--pexislink-src DIR --pexislink-src-sha256 HEX --fabric-python PY]
     petron mission cancel ID | show ID | report ID [--format md|json] | discard ID
     petron events verify
     petron sandbox probe --image REF@sha256:...
-    petron fabric probe --principal ID --pexislink-src DIR [--fabric-python PY]
+    petron fabric digest --pexislink-src DIR
+    petron fabric probe --principal ID --pexislink-src DIR --pexislink-src-sha256 HEX [--fabric-python PY]
     petron experiment e001 [--approver NAME] [--sandbox docker|none] [--image REF]
 
 Exit codes: 0 success; 1 the mission or check did not succeed; 2 invalid input or refused.
@@ -56,7 +57,8 @@ def _connector_factory(args):
 
     def factory(spec):
         return FabricConnector(FabricConfig(spec.raw["pexisos"]["principal"], Path(args.pexislink_src),
-                                            args.fabric_python or sys.executable))
+                                            args.fabric_python or sys.executable,
+                                            pexislink_src_sha256=args.pexislink_src_sha256))
     return factory
 
 
@@ -128,6 +130,7 @@ def build_parser() -> argparse.ArgumentParser:
     mission.add_argument("--channel", default="cli")
     mission.add_argument("--format", choices=["md", "json"], default="md")
     mission.add_argument("--pexislink-src")
+    mission.add_argument("--pexislink-src-sha256", help="operator's pin of the MCP server source tree")
     mission.add_argument("--fabric-python")
 
     events = sub.add_parser("events")
@@ -138,9 +141,10 @@ def build_parser() -> argparse.ArgumentParser:
     sandbox.add_argument("--image", default=DEFAULT_IMAGE)
 
     fabric = sub.add_parser("fabric")
-    fabric.add_argument("action", choices=["probe"])
-    fabric.add_argument("--principal", required=True)
+    fabric.add_argument("action", choices=["probe", "digest"])
+    fabric.add_argument("--principal")
     fabric.add_argument("--pexislink-src", required=True)
+    fabric.add_argument("--pexislink-src-sha256", help="operator's pin of the MCP server source tree")
     fabric.add_argument("--fabric-python")
 
     experiment = sub.add_parser("experiment")
@@ -167,10 +171,24 @@ def main(argv: list[str] | None = None) -> int:
         _print(report.to_dict())
         return 0 if report.ok else 1
     if args.command == "fabric":
-        from .connectors.pexisos import READ_ONLY_TOOLS, ConnectorError, FabricConfig, FabricConnector
+        from .connectors.pexisos import (READ_ONLY_TOOLS, ConnectorError, FabricConfig, FabricConnector,
+                                         digest_source)
+        if args.action == "digest":
+            try:
+                _print({"pexislink_src_sha256": digest_source(Path(args.pexislink_src)),
+                        "note": "pin a digest you obtained from a trusted, reviewed source; pinning one "
+                                "computed here only freezes whatever is on disk now"})
+            except ConnectorError as error:
+                print(f"error: {error.code}", file=sys.stderr)
+                return 1
+            return 0
+        if not args.principal:
+            print("error: fabric probe needs --principal", file=sys.stderr)
+            return 2
         try:
             connector = FabricConnector(FabricConfig(args.principal, Path(args.pexislink_src),
-                                                     args.fabric_python or sys.executable))
+                                                     args.fabric_python or sys.executable,
+                                                     pexislink_src_sha256=args.pexislink_src_sha256))
             outcome = connector.run([("list_entities", {})])
         except ConnectorError as error:
             print(f"error: {error.code}", file=sys.stderr)

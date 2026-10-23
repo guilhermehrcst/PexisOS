@@ -14,7 +14,8 @@ import textwrap
 import unittest
 from pathlib import Path
 
-from petron.connectors.pexisos import ConnectorError, FabricConfig, FabricConnector, SimulatedFabricConnector
+from petron.connectors.pexisos import (ConnectorError, FabricConfig, FabricConnector, SimulatedFabricConnector,
+                                       digest_source)
 from petron.mission import MissionState
 from petron.tools import Gateway, MissionContext
 from petron.workspace import Workspace
@@ -86,7 +87,8 @@ class HostileServerTests(unittest.TestCase):
     def refused(self, mode):
         (self.tmp / "pexislink" / "mode.txt").write_text(mode)
         with self.assertRaises(ConnectorError) as caught:
-            FabricConnector(FabricConfig(ANALYST, self.tmp, timeout_s=20)).run([("list_entities", {})])
+            FabricConnector(FabricConfig(ANALYST, self.tmp, timeout_s=20,
+                                         pexislink_src_sha256=digest_source(self.tmp))).run([("list_entities", {})])
         return caught.exception.code
 
     def test_server_advertising_a_write_tool_is_refused(self):
@@ -102,7 +104,8 @@ class HostileServerTests(unittest.TestCase):
 @unittest.skipUnless(HAVE_FABRIC, "PexisOS Agent Fabric or mcp not available")
 class FabricContractTests(unittest.TestCase):
     def connector(self, principal):
-        return FabricConnector(FabricConfig(principal, Path(PEXISLINK_SRC)))
+        return FabricConnector(FabricConfig(principal, Path(PEXISLINK_SRC),
+                                            pexislink_src_sha256=digest_source(Path(PEXISLINK_SRC))))
 
     def test_analyst_sees_three_synthetic_entities(self):
         data = self.connector(ANALYST).call("list_entities", {})
@@ -140,7 +143,8 @@ class FabricThroughGatewayTests(EngineCase):
         self.engine.store.transition(mission_id, MissionState.AWAITING_APPROVAL, MissionState.RUNNING)
         ctx = MissionContext(self.engine.store, self.engine.store.spec(mission_id),
                              Workspace.create(self.source, self.tmp / "area", "work"), self.sandbox, plan_sha,
-                             FabricConnector(FabricConfig(ANALYST, Path(PEXISLINK_SRC))))
+                             FabricConnector(FabricConfig(ANALYST, Path(PEXISLINK_SRC),
+                                                          pexislink_src_sha256=digest_source(Path(PEXISLINK_SRC)))))
         outcome = Gateway().call(ctx, "pexisos.list_entities", {})
         self.assertTrue(outcome["ok"], outcome)
         self.assertEqual(len(outcome["result"]["entities"]), 3)

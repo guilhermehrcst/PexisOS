@@ -35,7 +35,7 @@ Requirements: Python ≥ 3.11. Execution also needs a running Docker daemon and 
 Without them, PETRON still plans and gates, but every mission that needs execution fails closed.
 
 Agent Fabric (optional): `pip install --require-hashes -r requirements/fabric-mcp.txt`, then
-`petron fabric probe --principal demo:principal:analyst --pexislink-src src`.
+`petron fabric probe --principal demo:principal:analyst --pexislink-src src --pexislink-src-sha256 HEX`, where `HEX` is the pinned digest of the server tree (`petron fabric digest --pexislink-src src` prints the current one; pin a digest from a reviewed source, not one computed on the spot). Without a pin the connector refuses to start the server: it is code that would otherwise run with your privileges.
 
 Real model (opt-in, costs money): `pip install -e 'apps/petron[anthropic]'`, set
 `ANTHROPIC_API_KEY`, use a spec with `"provider": {"kind": "anthropic"}` and
