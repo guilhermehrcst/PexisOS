@@ -3,10 +3,10 @@ $ petron experiment e002
   "mission_id": "petron-e002",
   "next": [
     "petron mission show petron-e002",
-    "petron mission approve petron-e002 --scope-sha256 0bd46fa35e28fca5094476970066fa962d9b7e572a3f2b4013c3fc3e19f8282c --approver NAME",
+    "petron mission approve petron-e002 --scope-sha256 f932e88d28254f41dcdd53df8a32ce00a657a84098bf8f643165f8650bb123a4 --approver NAME",
     "petron mission run petron-e002"
   ],
-  "scope_sha256": "0bd46fa35e28fca5094476970066fa962d9b7e572a3f2b4013c3fc3e19f8282c",
+  "scope_sha256": "f932e88d28254f41dcdd53df8a32ce00a657a84098bf8f643165f8650bb123a4",
   "state": "awaiting_approval"
 }
 [exit 0]
@@ -15,7 +15,7 @@ error: approval_missing
 [exit 2]
 $ petron mission show petron-e002
 {
-  "created_at": "2026-10-22T18:10:26.638648Z",
+  "created_at": "2026-10-23T04:39:31.136191Z",
   "failure_reason": null,
   "mission_id": "petron-e002",
   "mode": "agent",
@@ -43,7 +43,7 @@ $ petron mission show petron-e002
       "image": "mirror.gcr.io/library/python@sha256:cce12316475d7d56d605f76e1d811d0dc4e7227f2d4afd29951521264f504ff8"
     },
     "schema": "petron.scope.v0",
-    "spec_sha256": "c55a63e266f0d43c15f7e113b2c87bbf013b970d3ff83fec3933d6eb495676e0",
+    "spec_sha256": "d1338cde2656183c7b6adb9ca18dd0b8fad2ab733547b090c475d28578d2d27d",
     "tools": [
       "list_files",
       "read_file",
@@ -59,13 +59,13 @@ $ petron mission show petron-e002
       "intervals/merge.py"
     ]
   },
-  "scope_sha256": "0bd46fa35e28fca5094476970066fa962d9b7e572a3f2b4013c3fc3e19f8282c",
+  "scope_sha256": "f932e88d28254f41dcdd53df8a32ce00a657a84098bf8f643165f8650bb123a4",
   "state": "awaiting_approval"
 }
 [exit 0]
-$ petron mission approve petron-e002 --scope-sha256 0bd46fa35e28fca5094476970066fa962d9b7e572a3f2b4013c3fc3e19f8282c --approver e002-harness (Claude Code agent; synthetic fixture; not a human review)
+$ petron mission approve petron-e002 --scope-sha256 f932e88d28254f41dcdd53df8a32ce00a657a84098bf8f643165f8650bb123a4 --approver 'e002-harness (Claude Code agent; synthetic fixture; not a human review)'
 {
-  "approved": "0bd46fa35e28fca5094476970066fa962d9b7e572a3f2b4013c3fc3e19f8282c",
+  "approved": "f932e88d28254f41dcdd53df8a32ce00a657a84098bf8f643165f8650bb123a4",
   "mission_id": "petron-e002"
 }
 [exit 0]
@@ -117,6 +117,13 @@ $ petron mission diff petron-e002
 $ petron events verify
 {
   "chain_ok": true,
-  "first_bad_seq": null
+  "first_bad_seq": null,
+  "note": "unkeyed hash chain: detects accidental damage, edits and deletions in the middle, and (via the local anchor file, or a head you recorded elsewhere) truncation of the newest events. It is not tamper-proof: whoever can rewrite the database and the anchor can recompute everything. Record `petron events head` somewhere independent and pass it back with --expect-head."
 }
+[exit 0]
+$ petron mission report petron-e002
+(written to report.md)
+[exit 0]
+$ petron mission report petron-e002 --format json
+(written to report.json)
 [exit 0]

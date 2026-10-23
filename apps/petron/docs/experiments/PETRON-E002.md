@@ -14,7 +14,7 @@
 Objective given to the mission (no solution in it): *"the test suite of this small Python
 project fails. Find the cause and fix the implementation so the existing tests pass. The tests
 are protected and must not be changed."* Scope: 6 tools, writable `intervals/merge.py`,
-protected `tests/`, 24 iterations, 30 tool calls, Docker sandbox (probe 16/16).
+protected `tests/`, 24 iterations, 30 tool calls, Docker sandbox (probe 18/18).
 
 | Turn | Decision | Observation (measured) |
 |---|---|---|
@@ -56,19 +56,34 @@ Reproduce: `petron experiment e002`, then `mission show`, `mission approve --sco
 | crash at turn 7, `resume` | completed, iterations continue without gaps | checkpoint + lease |
 | workspace edited during the crash, `resume` | `resume_refused:workspace_diverged` | checkpoint tree check |
 
+> **Evidence regeneration.** The first E002-A evidence (2026-10-22) predates the review fixes. After
+> them, E002-A was run again through the same CLI sequence on the hardened runtime (real Docker
+> sandbox, deterministic agent policy) and `e002-evidence/` was rewritten from that run: the probe
+> has 18 checks (CPU ceiling and intrinsic container deadline added), the scope and spec hashes
+> differ (the absolute fixture path of the run is part of the spec), `verification.diff_sha256` is
+> the digest of the stored artifact, and the transcript quotes the approver argument as a shell
+> needs it. The turn sequence and the outcome (completed after observe, revert, adapt) are unchanged.
+
 ## E002-B — real model (Claude): **NOT RUN**
 
 Prepared, not executed: no API key in this environment and no authorization for paid calls.
 Same gateway, limits and sandbox as E002-A; spec `fixtures/e002/mission-claude.json`
-(`claude-opus-5-5`, 16 iterations, 16 model calls, 400 000 tokens).
+(`claude-opus-5-5`, 16 iterations, 16 model calls, 400 000 tokens). Model, effort and per-call
+tokens are written into the spec and therefore into the approved scope hash; the aggregate token
+cap is mandatory and is enforced **before** each request: the provider reserves a hard upper bound
+of the input and shortens `max_tokens` to what remains, or refuses the request without sending it.
 
 ```bash
 export ANTHROPIC_API_KEY=...            # operator's own key; never commit it
 petron provider check --model claude-opus-5-5          # Models API, no tokens generated
 petron experiment e002 --provider anthropic            # stops at awaiting_approval
-petron mission approve petron-e002-claude --scope-sha256 <hex> --approver "<name>"
+petron mission show petron-e002-claude                 # copy scope_sha256 from the output
+SCOPE_SHA256=...                                       # paste it here
+petron mission approve petron-e002-claude --scope-sha256 "$SCOPE_SHA256" --approver "operator"
 petron mission run petron-e002-claude --allow-real-model
 ```
 
-A refusal ends the mission as `provider_error:model_refusal`; no fallback model is used. The
+A refusal ends the mission as `provider_error:model_refusal`; no fallback model is used, no SDK
+retry happens (each decision is exactly one HTTP attempt) and the billed usage of a refused or
+truncated reply is still recorded. The
 provider has only been tested against a fake Messages API client.

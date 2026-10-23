@@ -4,10 +4,10 @@
 
 - Objective: Synthetic fixture: the test suite of this small Python project fails. Find the cause and fix the implementation so the existing tests pass. The tests are protected and must not be changed.
 - Final state: **completed**
-- Spec sha256: `c55a63e266f0d43c15f7e113b2c87bbf013b970d3ff83fec3933d6eb495676e0`
-- Scope sha256 (approved): `0bd46fa35e28fca5094476970066fa962d9b7e572a3f2b4013c3fc3e19f8282c`
+- Spec sha256: `d1338cde2656183c7b6adb9ca18dd0b8fad2ab733547b090c475d28578d2d27d`
+- Scope sha256 (approved): `f932e88d28254f41dcdd53df8a32ce00a657a84098bf8f643165f8650bb123a4`
 - Provider: `{"model": null, "policy": "e002_adaptive", "provider": "deterministic", "simulated": true}`
-- Event chain: intact (86 mission events)
+- Event chain (unkeyed hash chain; see `petron events verify`): intact (87 mission events)
 
 ## State transitions
 
@@ -19,15 +19,17 @@
 
 ## Approvals
 
-- `0bd46fa35e28fca5…` by **e002-harness (Claude Code agent; synthetic fixture; not a human review)** via `cli`
+- `f932e88d28254f41…` by **e002-harness (Claude Code agent; synthetic fixture; not a human review)** via `cli`
 
 ## Isolation
 
 - Backend `docker`: verified
+  - PASS cpu_limited
   - PASS daemon_seccomp
   - PASS egress_blocked
   - PASS empty_bounding_set
   - PASS image_present_pinned
+  - PASS intrinsic_deadline_available
   - PASS loopback_only
   - PASS memory_limited
   - PASS no_docker_socket

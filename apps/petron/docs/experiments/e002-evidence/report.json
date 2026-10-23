@@ -207,7 +207,7 @@
     {
       "approver": "e002-harness (Claude Code agent; synthetic fixture; not a human review)",
       "channel": "cli",
-      "plan_sha256": "0bd46fa35e28fca5094476970066fa962d9b7e572a3f2b4013c3fc3e19f8282c"
+      "plan_sha256": "f932e88d28254f41dcdd53df8a32ce00a657a84098bf8f643165f8650bb123a4"
     }
   ],
   "baseline_tests": {
@@ -220,7 +220,7 @@
     "first_bad_seq": null,
     "ok": true
   },
-  "event_count": 86,
+  "event_count": 87,
   "execution_disabled": [],
   "failure_reason": null,
   "final_state": "completed",
@@ -228,7 +228,7 @@
   "mode": "agent",
   "notice": "SIMULATED PROVIDER: decisions came from a deterministic policy that branches on real observations but whose repair hypotheses were written in advance. This run demonstrates the agent loop (decide, act, observe, adapt, verify), not autonomous reasoning.",
   "objective": "Synthetic fixture: the test suite of this small Python project fails. Find the cause and fix the implementation so the existing tests pass. The tests are protected and must not be changed.",
-  "plan_sha256": "0bd46fa35e28fca5094476970066fa962d9b7e572a3f2b4013c3fc3e19f8282c",
+  "plan_sha256": "f932e88d28254f41dcdd53df8a32ce00a657a84098bf8f643165f8650bb123a4",
   "plan_steps": [],
   "provider": {
     "model": null,
@@ -240,10 +240,12 @@
   "sandbox_probe": {
     "backend": "docker",
     "checks": {
+      "cpu_limited": true,
       "daemon_seccomp": true,
       "egress_blocked": true,
       "empty_bounding_set": true,
       "image_present_pinned": true,
+      "intrinsic_deadline_available": true,
       "loopback_only": true,
       "memory_limited": true,
       "no_docker_socket": true,
@@ -269,6 +271,11 @@
         "cap_bnd": "0000000000000000",
         "cap_eff": "0000000000000000",
         "cap_prm": "0000000000000000",
+        "cpu_cfs": [
+          "100000",
+          "100000"
+        ],
+        "cpu_max": null,
         "docker_socket": false,
         "egress": "blocked",
         "env_names": [
@@ -282,6 +289,7 @@
           "PYTHON_VERSION"
         ],
         "gid": 65534,
+        "has_timeout": true,
         "interfaces": [
           "lo"
         ],
@@ -304,7 +312,7 @@
   },
   "schema": "petron.report.v0",
   "simulated_provider": true,
-  "spec_sha256": "c55a63e266f0d43c15f7e113b2c87bbf013b970d3ff83fec3933d6eb495676e0",
+  "spec_sha256": "d1338cde2656183c7b6adb9ca18dd0b8fad2ab733547b090c475d28578d2d27d",
   "states": [
     [
       "created",
@@ -463,7 +471,7 @@
       "source_tree_unchanged": true,
       "tests_pass_in_sandbox": true
     },
-    "diff_sha256": "e54f882f9e1c567d9a90a323dd0ee51b6379f05a6a2f3cb0fc3c4051c8297f35",
+    "diff_sha256": "fcdf3fe8084e08f69e4149d842961a51f02edd6013712b33477741b27a2b6015",
     "protected_paths": [
       "tests/__init__.py",
       "tests/test_merge.py"

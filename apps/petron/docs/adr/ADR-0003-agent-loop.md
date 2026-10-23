@@ -29,14 +29,18 @@ verification must survive the change.
    `verification_failed`, `invalid_decision`).
 5. **Success is the runtime's call.** `conclude` is accepted only right after a passing
    `request_verification` on the unchanged workspace; then the full V0.1 verification runs again.
-6. **Bounded by construction:** iterations, tool calls, model calls and tokens; three invalid
+6. **Bounded by construction:** iterations, tool calls, model calls and tokens (for a real provider
+   the token cap is mandatory and enforced before each request: the output allowance is reserved
+   against a hard upper bound of the input, never checked only afterwards); three invalid
    decisions in a row; any identical decision (tool call, verification request or conclusion;
    free text ignored) on an unchanged workspace is refused after two runs, and two refusals end
    the mission. Every loop therefore has at least two independent bounds.
 7. **Persistence and recovery:** every turn (`agent.turn`) and checkpoint (`agent.checkpoint`)
-   is an event in the hash-chained log. A run lease (`run.lease`) blocks a second live runner.
-   `resume` continues from the last checkpoint only if the workspace tree matches it exactly;
-   otherwise the effect of the interrupted step is unknown and the mission fails closed.
+   is an event in the hash-chained log. A run lease (`run.lease`, identified by a per-run token, not a
+   pid) blocks a second live runner, including one in the same process. `resume` continues only from
+   committed state: an intact event chain, a checkpoint for every recorded turn, and baseline and
+   working trees exactly as recorded; otherwise the effect of the interrupted step is unknown and the
+   mission fails closed. A crash during the final verification is finished idempotently.
    Resume is supported for deterministic providers only: a real model's conversation lives in
    memory in V0.2.
 8. **Providers stay outside the engine.** `next_decision(ctx) -> DecisionProposal`. The Claude

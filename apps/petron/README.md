@@ -39,11 +39,13 @@ Agent mode (V0.2), the adaptive repair experiment:
 ```bash
 petron experiment e002                     # creates the mission and stops for approval
 petron mission show petron-e002            # inspect the scope: tools, paths, limits
-petron mission approve petron-e002 --scope-sha256 <hex> --approver "<your name>"
-petron mission run petron-e002             # prints each turn: decision -> observation
-petron mission log petron-e002 --follow    # from another terminal, while it runs
+petron mission approve petron-e002 --scope-sha256 YOUR_SCOPE_SHA256 --approver "your name"   # sha256 from mission show
+petron mission run petron-e002             # prints each turn: decision -> observation (blocks until it ends)
+# While it runs, from other terminals:
+petron mission log petron-e002 --follow    # waits for the mission to end
+petron mission stop petron-e002            # interrupt: ends the container and the loop
+# Afterwards:
 petron mission diff petron-e002
-petron mission stop petron-e002            # interrupt (cooperative, between turns)
 petron mission list                        # flags interrupted missions
 petron mission resume petron-e002          # continue from the last checkpoint, if safe
 ```
