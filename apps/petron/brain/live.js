@@ -46,6 +46,7 @@
   let draft = null;           // { mission_id, scope_sha256, approved }: the server's pending draft of this bridge
   let submitting = null;      // in-flight draft request (gestures wait for it: no race with the stream)
   let pointerHeld = false;
+  let swallowClick = false;   // the click a browser fires when a hold gesture ends is not a tap
   let spaceHeld = false;
   let holdStart = 0;
   let holdTimer = 0;
@@ -303,17 +304,21 @@
     canvas.addEventListener('focus', () => announce(label));
     canvas.addEventListener('pointerdown', async (e) => {
       pointerHeld = true;
+      swallowClick = false;
       if (!(interactive && connected && session === 'none' && (awaitingDraft() || submitting))) return;
       e.preventDefault();
       canvas.setPointerCapture?.(e.pointerId);
       await settled();
-      if (pointerHeld && awaitingDraft() && session === 'none') startHold();
+      if (pointerHeld && awaitingDraft() && session === 'none') { swallowClick = true; startHold(); }
     });
     const release = () => { pointerHeld = false; if (session === 'holding') abortHold(true); };
     canvas.addEventListener('pointerup', release);
     canvas.addEventListener('pointercancel', release);
     canvas.addEventListener('lostpointercapture', release);
-    canvas.addEventListener('click', () => { if (session === 'none') activate(); });
+    canvas.addEventListener('click', () => {
+      if (swallowClick) { swallowClick = false; return; }   // releasing after a hold: never a new request
+      if (session === 'none') activate();
+    });
     canvas.addEventListener('keydown', async (e) => {
       if (e.key === 'Enter') { activate(); return; }
       if (e.key === ' ' && !e.repeat) {

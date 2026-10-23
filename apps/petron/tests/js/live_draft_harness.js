@@ -99,6 +99,8 @@ function build() {
       await world.tick(2000);
       handlers.canvas.pointerup();
       await flush();
+      handlers.canvas.click();                // a browser fires click when the same pointer is released
+      await flush();
     },
     async tap() { handlers.canvas.click(); await flush(); },
     async escape() { await handlers.canvas.keydown({ key: 'Escape' }); await flush(); },
@@ -183,6 +185,27 @@ scenario('a refusal that is not about the draft keeps it (a wrong scope hash can
   await world.hold();
   assert.equal(await startsANewMission(world), false);
   assert.match(world.status.textContent, /segure/);
+});
+
+scenario('releasing the sphere after an approval hold never opens a typing session', async () => {
+  const world = await drafted();
+  world.responses.push({ ok: true, status: 200, json: { mission_id: MISSION, approved: SCOPE, state: 'approved' } });
+  // The runtime refuses the run at once: the mission fails before the finger is lifted.
+  const approving = world.hold();
+  await world.tick(1900);
+  world.runtime({ mission_id: MISSION, kind: 'mission.state', state: 'error' });
+  await approving;
+  assert.notEqual(world.mode, 'listening', 'the release click was taken for a tap');
+});
+
+scenario('a genuine tap after a hold still starts a request', async () => {
+  const world = await drafted();
+  world.responses.push({ ok: true, status: 200, json: { mission_id: MISSION, approved: SCOPE, state: 'approved' } });
+  await world.hold();
+  world.runtime({ mission_id: MISSION, kind: 'mission.state', state: 'error' });   // the draft is over
+  await world.tick(9000);
+  await world.tap();
+  assert.equal(world.mode, 'listening');
 });
 
 scenario('a snapshot without a draft (cancelled while disconnected) forgets the local draft', async () => {

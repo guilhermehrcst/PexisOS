@@ -37,6 +37,17 @@ def tint(path: Path) -> dict:
     return {"saturation": round(sat, 2), "warm": round(warm, 2)}
 
 
+def provenance() -> dict:
+    """Which code these results describe: the commit under test, and whether the tree had local edits."""
+    def git(*args):
+        return subprocess.run(["git", *args], cwd=PETRON, capture_output=True, text=True, timeout=30).stdout.strip()
+    try:
+        return {"head": git("rev-parse", "HEAD"), "dirty": bool(git("status", "--porcelain", "--", ".")),
+                "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+    except (OSError, subprocess.SubprocessError):
+        return {"head": None, "dirty": None, "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+
+
 def free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
@@ -257,6 +268,7 @@ def main() -> int:
     bridge.wait(timeout=10)
     ok = all(c["ok"] for c in run.results["checks"].values())
     run.results["ok"] = ok
+    run.results["provenance"] = provenance()
     (args.out / "results.json").write_text(json.dumps(run.results, indent=2))
     print(f"\n{'ALL CHECKS PASSED' if ok else 'SOME CHECKS FAILED'}: {len(run.results['checks'])} checks; "
           f"evidence in {args.out}")
