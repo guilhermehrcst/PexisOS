@@ -254,6 +254,9 @@ class AgentLoop:
             if s.no_progress_refusals >= MAX_NO_PROGRESS_REFUSALS:
                 return LoopOutcome(False, "limit:no_progress")
             s.iteration += 1
+            # Recorded before the call: observers (e.g. the Brain) see a real "decision requested".
+            self._record("agent.decision_requested", {"iteration": s.iteration, "provider": self.provider.kind,
+                                                      "simulated": self.provider.simulated})
             try:
                 proposal = self.provider.next_decision(self._context())
             except Exception as error:  # ProviderError or an unexpected provider failure: fail closed
@@ -282,6 +285,7 @@ class AgentLoop:
             elif kind == "tool_call":
                 observation = self._observe_tool(decision, tree_before)
             elif kind == "request_verification":
+                self._record("agent.verification_started", {"iteration": s.iteration})
                 passed, verdict = self.checks_fn()
                 s.verified_tree = tree_before if passed else None
                 observation = {"ok": passed, "error_class": None if passed else "verification_failed",
