@@ -21,6 +21,10 @@ SPEC_SCHEMA_ID = "petron.mission.v0"
 PLAN_SCHEMA_ID = "petron.plan.v0"
 SCOPE_SCHEMA_ID = "petron.scope.v0"
 MODES = ("plan", "agent")
+# Effective settings of a real provider. They are resolved when the spec is parsed, so the stored
+# spec, the approved scope hash and the executed call all carry the same explicit values: a later
+# change of these defaults can never alter what an operator approved.
+PROVIDER_DEFAULTS = {"model": "claude-opus-5-5", "effort": "high", "max_tokens": 16000}
 _ID = r"^[a-z0-9][a-z0-9._-]{2,63}$"
 _REL_PATH = {"type": "string", "minLength": 1, "maxLength": 240, "pattern": r"^[A-Za-z0-9_][A-Za-z0-9_./-]*$"}
 _TOOL_NAME = {"type": "string", "minLength": 1, "maxLength": 64, "pattern": r"^[a-z][a-z0-9_.]*$"}
@@ -146,9 +150,17 @@ class MissionSpec:
             raise SchemaError("budget.max_model_calls", "plan mode allows at most 8 model calls")  # V0.1 bound
         if data.get("mode") == "agent" and "max_iterations" not in data["budget"]:
             raise SchemaError("budget.max_iterations", "agent mode needs an iteration limit")
+        if data.get("mode") == "agent" and provider["kind"] != "deterministic" \
+                and "max_total_tokens" not in data["budget"]:
+            raise SchemaError("budget.max_total_tokens", "a real-provider agent mission needs an explicit aggregate "
+                              "token limit (iterations and per-request tokens do not bound total spend)")
         if data["sandbox"]["backend"] == "docker" and "image" not in data["sandbox"]:
             raise SchemaError("sandbox.image", "docker backend needs an image pinned by digest")
-        return cls(json.loads(canonical_json(data)))
+        raw = json.loads(canonical_json(data))
+        if raw["provider"]["kind"] == "anthropic":
+            for key, value in PROVIDER_DEFAULTS.items():
+                raw["provider"].setdefault(key, value)   # resolved here, before anything is hashed or approved
+        return cls(raw)
 
     @property
     def mission_id(self) -> str:

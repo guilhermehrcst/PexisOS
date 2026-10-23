@@ -26,6 +26,7 @@ from ..mission import PLAN_SCHEMA_ID
 from ..redact import redact_text
 from .base import PlanProposal, PlanRequest, ProviderError
 
+MIN_OUTPUT_TOKENS = 256   # below this a decision cannot be expressed; the request is refused instead
 DEFAULT_BASE_URL = "https://api.anthropic.com"
 API_KEY_ENV = "ANTHROPIC_API_KEY"
 _SYSTEM = (
@@ -118,10 +119,11 @@ class AnthropicProvider:
             raise
         except Exception as error:  # SDK errors: keep the class name only, never the message (may echo input)
             raise ProviderError(f"api_error:{type(error).__name__}") from None
-        if response.stop_reason == "refusal":
-            raise ProviderError("model_refusal")
-        if response.stop_reason == "max_tokens":
-            raise ProviderError("model_truncated")
+        if response.stop_reason in ("refusal", "max_tokens"):
+            usage = getattr(response, "usage", None)
+            spent = {"input_tokens": getattr(usage, "input_tokens", None),
+                     "output_tokens": getattr(usage, "output_tokens", None)}
+            raise ProviderError("model_refusal" if response.stop_reason == "refusal" else "model_truncated", spent)
         calls = [block for block in response.content if getattr(block, "type", None) == "tool_use"
                  and block.name == "submit_plan"]
         if len(calls) != 1 or not isinstance(calls[0].input, dict):
@@ -176,11 +178,36 @@ _CONTROL_TOOLS = {
 }
 
 
+def _plain(value):
+    if hasattr(value, "model_dump"):
+        return value.model_dump()
+    if isinstance(value, dict):
+        return {str(key): _plain(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain(item) for item in value]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if hasattr(value, "__dict__"):
+        return {key: _plain(item) for key, item in vars(value).items() if not key.startswith("_")}
+    return str(value)
+
+
+def request_input_upper_bound(system, tools, messages) -> int:
+    """A *hard* upper bound on the input tokens of a request: a token covers at least one byte, so
+    the UTF-8 size of everything sent cannot be exceeded by the token count. Deliberately
+    pessimistic (typical text is several bytes per token): the aggregate cap is a guarantee, not a
+    forecast, so the output allowance is reserved against this bound before the call is made."""
+    document = {"system": system, "tools": _plain(tools), "messages": _plain(messages)}
+    return len(json.dumps(document, ensure_ascii=False, default=str).encode("utf-8"))
+
+
 def _api_name(name: str) -> str:
     return name.replace(".", "__")  # API tool names allow [a-zA-Z0-9_-] only
 
 
 def _agent_prompt(ctx) -> str:
+    if redact_text(ctx.objective) != ctx.objective:   # same rule as the plan prompt: never send a credential
+        raise ProviderError("secret_in_request")
     return (f"Objective:\n{ctx.objective}\n\n"
             f"Approved scope: {json.dumps(ctx.scope, sort_keys=True)}\n"
             f"Limits remaining: {json.dumps(ctx.remaining, sort_keys=True)}\n\n"
@@ -214,7 +241,7 @@ class AnthropicAgentProvider:
 
     def _feed_back(self, ctx) -> None:
         observation = ctx.history[-1]["observation"] if ctx.history else {}
-        text = json.dumps(observation, sort_keys=True, default=str)
+        text = redact_text(json.dumps(observation, sort_keys=True, default=str))
         remaining = {"type": "text", "text": f"Limits remaining: {json.dumps(ctx.remaining, sort_keys=True)}"}
         if self._pending:
             results = [{"type": "tool_result", "tool_use_id": self._pending[0], "content": text,
@@ -235,19 +262,28 @@ class AnthropicAgentProvider:
         else:
             self._feed_back(ctx)
         tools, names = self._tools(ctx)
+        max_tokens = self.max_tokens
+        if ctx.token_limit is not None:
+            # Hard enforcement before the request exists: reserve the worst-case input, give the output
+            # whatever remains (never more than the approved per-call value), refuse if nothing useful fits.
+            room = ctx.token_limit - request_input_upper_bound(_AGENT_SYSTEM, tools, self._messages)
+            if room < MIN_OUTPUT_TOKENS:
+                raise ProviderError("token_budget_insufficient")
+            max_tokens = min(self.max_tokens, room)
         try:
             response = client.messages.create(
-                model=self.model, max_tokens=self.max_tokens, output_config={"effort": self.effort},
+                model=self.model, max_tokens=max_tokens, output_config={"effort": self.effort},
                 system=_AGENT_SYSTEM, tools=tools, tool_choice={"type": "auto", "disable_parallel_tool_use": True},
                 messages=self._messages)
         except ProviderError:
             raise
         except Exception as error:  # keep the class name only; messages may echo request content
             raise ProviderError(f"api_error:{type(error).__name__}") from None
-        if response.stop_reason == "refusal":
-            raise ProviderError("model_refusal")   # recorded by the loop; no fallback model is tried
-        if response.stop_reason == "max_tokens":
-            raise ProviderError("model_truncated")
+        if response.stop_reason in ("refusal", "max_tokens"):   # billed even though no decision was produced
+            usage = getattr(response, "usage", None)
+            spent = {"input_tokens": getattr(usage, "input_tokens", None),
+                     "output_tokens": getattr(usage, "output_tokens", None)}
+            raise ProviderError("model_refusal" if response.stop_reason == "refusal" else "model_truncated", spent)
         self._messages.append({"role": "assistant", "content": response.content})
         uses = [b for b in response.content if getattr(b, "type", None) == "tool_use"]
         self._pending = [b.id for b in uses]
