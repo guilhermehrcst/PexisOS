@@ -12,6 +12,7 @@
     petron experiment e001 [--approver NAME] [--sandbox docker|none] [--image REF]
     petron experiment e002 [--approver NAME] [--provider deterministic|anthropic --allow-real-model]
     petron provider check --model ID      (Models API; needs ANTHROPIC_API_KEY)
+    petron brain serve [--port 8765]      (local, read-only Brain at http://127.0.0.1:8765/)
 
 Exit codes: 0 success; 1 the mission or check did not succeed; 2 invalid input or refused.
 State lives in ``$PETRON_HOME`` (default ``~/.petron``). Nothing is pushed, published or deployed.
@@ -246,6 +247,11 @@ def build_parser() -> argparse.ArgumentParser:
     experiment.add_argument("--image", default=DEFAULT_IMAGE)
     experiment.add_argument("--mission-id")
 
+    brain = sub.add_parser("brain", help="the Brain interface, connected read-only to this PETRON_HOME")
+    brain.add_argument("action", choices=["serve"])
+    brain.add_argument("--host", default="127.0.0.1", help="loopback only: 127.0.0.1, ::1 or localhost")
+    brain.add_argument("--port", type=int, default=8765)
+
     provider = sub.add_parser("provider")
     provider.add_argument("action", choices=["check"])
     provider.add_argument("--model", default="claude-opus-5-5")
@@ -258,6 +264,23 @@ def main(argv: list[str] | None = None) -> int:
             (args.plan_sha256 or args.scope_sha256) and args.approver):
         print("error: approve needs --plan-sha256 (or --scope-sha256) and --approver", file=sys.stderr)
         return 2
+    if args.command == "brain":
+        from .brain_bridge import serve
+        try:
+            server = serve(_home(args), args.host, args.port)
+        except (ValueError, FileNotFoundError, OSError) as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 2
+        host = f"[{args.host}]" if ":" in args.host else args.host
+        print(f"PETRON Brain (read-only) at http://{host}:{server.port}/  state: {_home(args)}", flush=True)
+        try:
+            server.serve_forever()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            server.stopping.set()
+            server.server_close()
+        return 0
     if args.command == "provider":
         from .providers import ProviderError
         from .providers.anthropic_provider import check_model
