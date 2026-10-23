@@ -89,5 +89,25 @@ class LiveManifestTests(unittest.TestCase):
         self.assertTrue(all(r["ownership_review"] == "pending" for r in manifest["rules"]))
 
 
+    def test_petron_console_paths_are_explicitly_classified_but_not_approved(self):
+        manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+        rules = manifest["rules"]
+        expected = {
+            "apps/console/src/App.tsx": "repository-license",
+            "apps/console/package-lock.json": "third-party-reference",
+            "apps/console/docs/console-v1-1440x900.png": "review-required",
+            "apps/petron/src/petron/engine.py": "repository-license",
+            "apps/petron/docs/experiments/e001-evidence/report.json": "review-required",
+            "apps/petron/docs/experiments/e002-evidence/report.json": "review-required",
+            "apps/petron/fixtures/e002/mission.json": "review-required",
+        }
+        for path, classification in expected.items():
+            with self.subTest(path=path):
+                self.assertEqual(classify_path(path, rules), classification)
+        self.assertIsNone(classify_path("apps/unknown/private.py", rules))
+        self.assertEqual(manifest["legal_signoff"], "not_recorded")
+        self.assertTrue(all(rule["ownership_review"] == "pending" for rule in rules))
+
+
 if __name__ == "__main__":
     unittest.main()
