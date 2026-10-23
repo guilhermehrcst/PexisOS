@@ -6,7 +6,8 @@ Enabled only by ``petron brain serve --interactive --template SPEC``. Authority 
   provider and sandbox. The browser can contribute only the objective text;
 * a draft is an ordinary agent mission that stops at ``awaiting_approval`` (scope hash recorded);
 * approval is a separate, explicit act bound to that scope hash; through the Brain it is allowed
-  only for missions the Brain itself drafted (CLI missions keep CLI approval);
+  only for drafts *this bridge* created (each bridge run has its own identity, recorded with the
+  draft); CLI missions, and drafts of another bridge or of an earlier run, keep CLI approval;
 * execution uses the same engine, gateway, sandbox and verification as the CLI;
 * a real (paid) provider in the template is refused unless the operator also passed
   ``--allow-real-model``.
@@ -56,18 +57,50 @@ class BrainCommands:
         if spec.raw["provider"]["kind"] != "deterministic" and not allow_real_model:
             raise ValueError("template uses a real model provider; pass --allow-real-model to permit it")
         self.template = json.loads(json.dumps(template))
+        self.bridge_id = secrets.token_hex(8)       # who may approve what: bound to each draft it creates
+        self.template_sha256 = hashlib.sha256(json.dumps(self.template, sort_keys=True).encode()).hexdigest()
 
     def _engine(self) -> Engine:
         return self.engine_factory(self.home)  # one engine (SQLite connection) per call/thread
 
     def _is_brain_draft(self, engine: Engine, mission_id: str) -> bool:
-        return any(e["kind"] == "brain.draft" for e in engine.store.events(mission_id))
+        """True only for a draft created by this bridge run (the recorded identity must match)."""
+        return any(e["kind"] == "brain.draft" and e["payload"].get("bridge") == self.bridge_id
+                   for e in engine.store.events(mission_id))
 
     def _active_draft(self, engine: Engine) -> str | None:
         for row in engine.store.missions():
-            if row["mission_id"].startswith("brain-") and MissionState(row["state"]) not in _TERMINAL:
+            if row["mission_id"].startswith("brain-") and MissionState(row["state"]) not in _TERMINAL \
+                    and self._is_brain_draft(engine, row["mission_id"]):
                 return row["mission_id"]
         return None
+
+    def _abandon(self, engine: Engine, mission_id: str, error: Exception) -> CommandRefused:
+        """Setup failed after (or while) the mission was persisted: end it, say so, and never pretend.
+
+        Nothing persisted -> the request was rejected. Persisted -> cancelled with an auditable reason, so
+        no active orphan blocks the next draft. If the cancellation itself cannot be persisted (the store is
+        unavailable) the refusal says exactly that and the mission is left as it is for the operator."""
+        try:
+            engine.store.state(mission_id)
+        except StoreError as missing:
+            if missing.code == "unknown_mission":
+                if isinstance(error, (SchemaError, EngineError, StoreError)):
+                    return CommandRefused(400, "draft_rejected")
+                return CommandRefused(500, "draft_failed")
+            return CommandRefused(503, "draft_failed_not_cancelled")
+        except Exception:
+            return CommandRefused(503, "draft_failed_not_cancelled")
+        try:
+            engine.cancel(mission_id, reason="draft_setup_failed")
+        except Exception:
+            return CommandRefused(503, "draft_failed_not_cancelled")
+        try:   # the cancellation (with its reason) is already persisted; this adds the cause, class name only
+            engine.store.append_event(mission_id, "brain.draft_failed",
+                                      {"cancelled": True, "error": type(error).__name__})
+        except Exception:
+            pass
+        return CommandRefused(500, "draft_failed")
 
     def create_draft(self, objective: object) -> dict:
         if not isinstance(objective, str):
@@ -84,13 +117,15 @@ class BrainCommands:
                 spec = copy.deepcopy(self.template)
                 spec["mission_id"] = f"brain-{stamp}-{secrets.token_hex(3)}"
                 spec["objective"] = objective
+                mission_id = spec["mission_id"]
                 try:
-                    mission_id = engine.create(spec)
-                except (SchemaError, EngineError, StoreError):
-                    raise CommandRefused(400, "draft_rejected") from None
-                engine.store.append_event(mission_id, "brain.draft", {
-                    "channel": "brain", "objective_sha256": hashlib.sha256(objective.encode()).hexdigest()})
-                scope_sha256 = engine.plan(mission_id)
+                    engine.create(spec)
+                    engine.store.append_event(mission_id, "brain.draft", {
+                        "channel": "brain", "bridge": self.bridge_id, "template_sha256": self.template_sha256,
+                        "objective_sha256": hashlib.sha256(objective.encode()).hexdigest()})
+                    scope_sha256 = engine.plan(mission_id)
+                except Exception as error:
+                    raise self._abandon(engine, mission_id, error) from None
                 return {"mission_id": mission_id, "scope_sha256": scope_sha256, "state": "awaiting_approval"}
             finally:
                 engine.close()
@@ -121,16 +156,37 @@ class BrainCommands:
                                       daemon=True)
             self._runs[mission_id] = thread
             thread.start()
-        return {"mission_id": mission_id, "approved": scope_sha256, "state": "running"}
+        # Approval is recorded; whether the runtime accepts the run is only known once it starts. The Brain
+        # learns the outcome from the mission's own events, so this is not reported as "running".
+        return {"mission_id": mission_id, "approved": scope_sha256, "state": "approved"}
 
     def _run(self, mission_id: str) -> None:
         engine = self._engine()
         try:
             engine.run(mission_id, allow_real_model=self.allow_real_model)
-        except EngineError:
-            pass  # recorded by the engine (or refused before running); the Brain sees the events
+        except Exception as error:   # the runtime refused or could not start: end the mission, truthfully
+            self._run_refused(engine, mission_id, error)
         finally:
             engine.close()
+
+    def _run_refused(self, engine: Engine, mission_id: str, error: Exception) -> None:
+        """The run never started although it was approved (provider setup refused, unexpected error).
+
+        An approved scope that cannot run is ended as a terminal failure with an auditable event; the
+        approval is neither rolled back nor reusable, and the Brain never shows it as running. A mission
+        that already moved elsewhere (an operator cancel, a run that did start) is left as it is. If the
+        store cannot record this, nothing is claimed: the mission stays awaiting approval for the CLI."""
+        code = error.code if isinstance(error, EngineError) else f"internal_error:{type(error).__name__}"
+        try:
+            row = engine.store.mission(mission_id)
+            if row["state"] != MissionState.AWAITING_APPROVAL.value:
+                return
+            engine.store.transition(mission_id, MissionState.AWAITING_APPROVAL, MissionState.FAILED,
+                                    reason=f"run_refused:{code}")
+            engine.store.append_event(mission_id, "brain.run_refused",
+                                      {"code": code, "scope_sha256": row["plan_sha256"]})
+        except Exception:
+            return
 
     def discard(self, mission_id: str) -> dict:
         if not MISSION_ID.fullmatch(mission_id or ""):

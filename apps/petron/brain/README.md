@@ -41,9 +41,13 @@ and watch the Brain respond.
 `activity` is a fixed heuristic per event type (e.g. executing a tool animates more than reading
 a file). It is not a measurement: no CPU, token or progress figure is invented.
 
-A running mission whose runner process has died (its lease is dead) is shown as calm `idle`, not
-as work. Reconnection replays missed events (old completions map to `idle`) and then applies the
-authoritative snapshot, so an old success is never celebrated again.
+A mission that is `running` **or `verifying`** whose runner has died is shown as calm `idle` with
+the label "missão interrompida; retome pela CLI", never as work and never as success. The V0.2 lease
+rules decide: a dead holder, or a released lease on a mission that has not ended, means interrupted.
+An agent mission that never took a lease is judged only after its start-up window (its own
+`exec_timeout_s` plus 120 s); plan-mode missions never take one and are not judged. Reconnection
+replays missed events (old completions map to `idle`) and then applies the authoritative snapshot
+(`interrupted` included), so an old success is never celebrated again.
 
 ## Bridge security (`apps/petron/src/petron/brain_bridge.py`)
 
@@ -82,12 +86,22 @@ Still nothing but the sphere on screen. The gestures:
   control characters stripped). The template must be an agent-mode spec. A real (paid) provider
   is refused at startup unless the operator also passes `--allow-real-model`.
 - A **draft** is an ordinary agent mission stopped at `awaiting_approval`, with its scope hash
-  recorded and a `brain.draft` event (it stores the objective's SHA-256, not a second copy).
-  Only one Brain draft or run may be active at a time.
+  recorded and a `brain.draft` event (it stores the objective's SHA-256, not a second copy, and
+  the identity of the bridge run that created it). Only one Brain draft or run of *this bridge*
+  may be active at a time. If preparing the draft fails after the mission was stored, the
+  mission is cancelled (`draft_setup_failed`, with a `brain.draft_failed` event) and the request
+  is refused with `500 draft_failed`; if even that cancellation cannot be stored the refusal is
+  `503 draft_failed_not_cancelled` and the mission is left for the operator (`petron mission stop`).
 - **Approval** is a separate, deliberate act bound to the scope hash, recorded as
   `plan.approved` with channel `brain-hold-gesture`. The server re-checks state and hash on
-  every command. Through the Brain it applies only to missions the Brain drafted. Missions
-  created with the CLI keep CLI approval (`403 not_a_brain_draft`).
+  every command. Through the Brain it applies only to drafts **this bridge run** created: a
+  draft made by another bridge sharing the same `PETRON_HOME`, by an earlier run, or with the
+  CLI keeps CLI approval (`403 not_a_brain_draft`) and is never offered by this bridge's
+  snapshot. The approve answer is `approved`, not `running`: approval is not execution.
+- If the runtime **refuses the run after approval** (for example the provider cannot be
+  built), the mission ends as `failed` with reason `run_refused:<code>` and a `brain.run_refused`
+  event. The approval record is kept, it cannot be reused, and the Brain never shows the mission
+  as running or restores it as a pending draft; a new mission is then possible.
 - **Execution** goes through the same engine, Tool Gateway, Docker sandbox and verification as
   the CLI. The Brain shows `success` only from the runtime's own `completed` transition. The
   browser never executes anything, never reads SQLite and never names a tool or path.
@@ -101,7 +115,12 @@ Still nothing but the sphere on screen. The gestures:
 - per-run key in `X-Petron-Key`, compared in constant time;
 - body ≤ 2 KiB;
 - exact JSON key set per action;
-- fixed paths: `POST /api/missions`, `…/{id}/approve`, `…/{id}/discard`.
+- fixed paths: `POST /api/missions`, `…/{id}/approve`, `…/{id}/discard`;
+- every refusal closes the HTTP connection (`Connection: close`), so unread body bytes are never
+  parsed as another request; a client that stops sending is dropped after 30 s; an unexpected
+  failure answers `500 internal_error` without detail.
+
+`localhost` is accepted as a name but the loopback literal `127.0.0.1` is what gets bound.
 
 The key is generated per run (`secrets.token_urlsafe(32)`), printed only in the operator's
 terminal, carried in the URL fragment (never sent in a request line, never in a static file),

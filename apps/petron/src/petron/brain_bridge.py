@@ -47,6 +47,8 @@ LOOPBACK = ("127.0.0.1", "::1", "localhost")
 FRESH_S = 15.0                 # a completion/failure older than this is shown as calm, never replayed
 POLL_S = 0.25
 HEARTBEAT_S = 10.0
+STARTUP_GRACE_S = 120.0        # on top of the mission's own exec timeout, before "never took a lease" counts as dead
+CONNECTION_TIMEOUT_S = 30.0    # a client that stops sending cannot hold a handler thread indefinitely
 MAX_STREAMS = 8
 _ASSETS = {
     "/": ("index.html", "text/html; charset=utf-8"),
@@ -167,9 +169,32 @@ class EventReader:
 
     def latest_mission(self) -> dict | None:
         db = self._conn()
-        row = db.execute("SELECT mission_id, state, plan_sha256 FROM missions ORDER BY updated_at DESC LIMIT 1").fetchone() \
-            if db else None
+        row = db.execute("SELECT mission_id, state, plan_sha256, spec_json, updated_at FROM missions "
+                         "ORDER BY updated_at DESC LIMIT 1").fetchone() if db else None
         return dict(row) if row else None
+
+    def active_brain_draft(self, bridge_id: str | None) -> dict | None:
+        """The one non-terminal Brain mission this bridge created, or None.
+
+        Ownership is the ``bridge`` recorded in the mission's ``brain.draft`` event: a draft made by
+        another bridge (or by an older run without that field) is never reported, so it is never offered
+        for approval here.
+        """
+        db = self._conn()
+        if not bridge_id or db is None:
+            return None
+        rows = db.execute("SELECT mission_id, state, plan_sha256 FROM missions WHERE mission_id LIKE 'brain-%' "
+                          "AND state NOT IN ('completed', 'failed', 'cancelled') ORDER BY created_at DESC").fetchall()
+        for row in rows:
+            kinds = {e["kind"]: e["payload"] for e in self.mission_events(row["mission_id"])
+                     if e["kind"] in ("brain.draft", "plan.approved")}
+            if kinds.get("brain.draft", {}).get("bridge") != bridge_id:
+                continue
+            draft = {"mission_id": row["mission_id"], "state": row["state"], "approved": "plan.approved" in kinds}
+            if row["state"] == "awaiting_approval" and row["plan_sha256"]:
+                draft["scope_sha256"] = row["plan_sha256"]
+            return draft
+        return None
 
     def mission_events(self, mission_id: str) -> list[dict]:
         db = self._conn()
@@ -194,13 +219,43 @@ class EventReader:
         return Store._holder_alive(mission_id, holder)
 
 
-def snapshot(reader: EventReader, now: _dt.datetime | None = None) -> dict:
-    """Current visual state from authoritative state. Never yields an old success or error."""
+def _never_took_a_lease_and_start_expired(mission: dict, now: _dt.datetime) -> bool:
+    """An agent run takes its lease after its start-up work (probe, copies, baseline run). Plan-mode runs
+    never take one, so only an agent mission is judged, and only after that start-up work could have ended."""
+    try:
+        spec = json.loads(mission["spec_json"])
+        timeout = float(spec["budget"]["exec_timeout_s"])
+        agent = spec.get("mode") == "agent"
+    except (KeyError, TypeError, ValueError):
+        return False
+    since = _parse_at(mission.get("updated_at", ""))
+    return bool(agent and since is not None and (now - since).total_seconds() > timeout + STARTUP_GRACE_S)
+
+
+def runner_interrupted(reader: EventReader, mission: dict, now: _dt.datetime) -> bool:
+    """True when a mission that should have a live runner (running or verifying) has none.
+
+    Uses the V0.2 lease semantics: a dead holder or a released lease on a non-terminal mission means the
+    runner is gone; no lease at all is judged only for agent missions, after their start-up window."""
+    if mission["state"] not in ("running", "verifying"):
+        return False
+    alive = reader.lease_alive(mission["mission_id"])
+    if alive is None:
+        return _never_took_a_lease_and_start_expired(mission, now)
+    return alive is False
+
+
+def snapshot(reader: EventReader, now: _dt.datetime | None = None, bridge_id: str | None = None) -> dict:
+    """Current visual state from authoritative state. Never yields an old success or error.
+
+    ``draft`` is the pending Brain draft that *this bridge* created (``bridge_id``), or None; the page
+    reconciles its local draft against it, so a draft that ended elsewhere cannot linger."""
     now = now or _dt.datetime.now(_dt.timezone.utc)
     seq = reader.max_seq()
     mission = reader.latest_mission()
+    draft = reader.active_brain_draft(bridge_id)
     if mission is None:
-        return {"type": "snapshot", "seq": seq, "mission_id": None, "mission_state": None,
+        return {"type": "snapshot", "seq": seq, "mission_id": None, "mission_state": None, "draft": draft,
                 "interrupted": False, **_state("idle", 0.25, "em repouso; nenhuma missão registrada")}
     events = reader.mission_events(mission["mission_id"])
     state = mission["state"]
@@ -209,7 +264,7 @@ def snapshot(reader: EventReader, now: _dt.datetime | None = None) -> dict:
     if state in _TERMINAL:
         last = next((e for e in reversed(events) if e["kind"] == "mission.state"), None)
         visual = brain_state_for(last, now) if last else None
-    elif state == "running" and reader.lease_alive(mission["mission_id"]) is False:
+    elif runner_interrupted(reader, mission, now):
         interrupted = True
         visual = _state("idle", 0.2, "missão interrompida; retome pela CLI")
     else:
@@ -218,13 +273,8 @@ def snapshot(reader: EventReader, now: _dt.datetime | None = None) -> dict:
             if mapped and mapped["state"] not in ("success", "error"):
                 visual = mapped
     visual = visual or _state("idle", 0.25, "em repouso")
-    result = {"type": "snapshot", "seq": seq, "mission_id": mission["mission_id"], "mission_state": state,
-              "interrupted": interrupted, **visual}
-    if state == "awaiting_approval":
-        # Lets a reloaded Brain page approve the exact pending Brain draft (the server re-checks it).
-        result["scope_sha256"] = mission.get("plan_sha256")
-        result["brain_draft"] = any(e["kind"] == "brain.draft" for e in events)
-    return result
+    return {"type": "snapshot", "seq": seq, "mission_id": mission["mission_id"], "mission_state": state,
+            "interrupted": interrupted, "draft": draft, **visual}
 
 
 def runtime_message(event: dict, now: _dt.datetime) -> dict:
@@ -268,7 +318,10 @@ class BrainServer(ThreadingHTTPServer):
         self.db_path = Path(home) / "petron.sqlite3"
         self.stopping = threading.Event()
         self.streams = threading.Semaphore(MAX_STREAMS)
-        super().__init__((host, port), BrainHandler)
+        self.bridge_id = commands.bridge_id if commands is not None else None
+        # The name `localhost` is never handed to the resolver: a hosts/NSS override could point it at an
+        # external interface. The loopback literal is bound instead; the Host guard still accepts the name.
+        super().__init__(("127.0.0.1" if host == "localhost" else host, port), BrainHandler)
         self.port = self.server_address[1]
         self.allowed_hosts = {f"127.0.0.1:{self.port}", f"localhost:{self.port}", f"[::1]:{self.port}"}
         self.allowed_origins = {f"http://{h}" for h in self.allowed_hosts}
@@ -283,6 +336,7 @@ class BrainHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "petron-brain"
     sys_version = ""
+    timeout = CONNECTION_TIMEOUT_S
 
     def log_message(self, format, *args) -> None:  # noqa: A002 - keep local logs quiet and bounded
         return
@@ -298,9 +352,14 @@ class BrainHandler(BaseHTTPRequestHandler):
         self.send_header("Cross-Origin-Resource-Policy", "same-origin")
         if length is not None:
             self.send_header("Content-Length", str(length))
+        if self.close_connection:
+            self.send_header("Connection", "close")
         self.end_headers()
 
     def _refuse(self, status: int) -> None:
+        # A refusal may leave the request body unread. On a persistent HTTP/1.1 connection those bytes would
+        # be parsed as the next request, so every refusal ends the connection.
+        self.close_connection = True
         body = status.phrase.encode() if isinstance(status, HTTPStatus) else b"refused"
         self._headers(int(status), "text/plain; charset=utf-8", len(body))
         if self.command != "HEAD":
@@ -333,7 +392,8 @@ class BrainHandler(BaseHTTPRequestHandler):
         if url.path == "/api/snapshot":
             reader = EventReader(self.server.db_path)
             try:
-                body = json.dumps({**snapshot(reader), "interactive": self.server.commands is not None}).encode()
+                body = json.dumps({**snapshot(reader, bridge_id=self.server.bridge_id),
+                                   "interactive": self.server.commands is not None}).encode()
             finally:
                 reader.close()
             self._headers(200, "application/json", len(body))
@@ -396,6 +456,9 @@ class BrainHandler(BaseHTTPRequestHandler):
                 result = commands.discard(mission_id)
         except CommandRefused as refused:
             return self._json(refused.status, {"error": refused.code})
+        except Exception:   # a controlled answer, never a dropped connection; nothing about the failure is echoed
+            self.close_connection = True
+            return self._json(500, {"error": "internal_error"})
         self._json(200, result)
 
     def _asset(self, path: str) -> None:
@@ -433,7 +496,8 @@ class BrainHandler(BaseHTTPRequestHandler):
             if last is not None:  # reconnect: catch up (freshness-guarded), then the authoritative snapshot
                 for event in reader.events_after(last, limit=1000):
                     self._send("runtime", runtime_message(event, now), event["seq"])
-            current = {**snapshot(reader, now), "interactive": self.server.commands is not None}
+            current = {**snapshot(reader, now, self.server.bridge_id),
+                       "interactive": self.server.commands is not None}
             self._send("snapshot", current, current["seq"])
             last = current["seq"]
             watched = current.get("mission_id")

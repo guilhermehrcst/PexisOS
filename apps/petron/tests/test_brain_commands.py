@@ -117,9 +117,9 @@ class ApprovalTests(CommandCase):
         draft = self.commands.create_draft("pending")
         reader = EventReader(self.home / "petron.sqlite3")
         self.addCleanup(reader.close)
-        current = snapshot(reader)
-        self.assertEqual((current["state"], current["brain_draft"], current["scope_sha256"]),
-                         ("awaiting_approval", True, draft["scope_sha256"]))
+        current = snapshot(reader, bridge_id=self.commands.bridge_id)
+        self.assertEqual((current["state"], current["draft"]["mission_id"], current["draft"]["scope_sha256"]),
+                         ("awaiting_approval", draft["mission_id"], draft["scope_sha256"]))
 
 
 class EndpointTests(CommandCase):
@@ -176,7 +176,7 @@ class EndpointTests(CommandCase):
         self.assertEqual(status, 409)
         status, result = self.post(f"/api/missions/{draft['mission_id']}/approve",
                                    {"scope_sha256": draft["scope_sha256"]})
-        self.assertEqual((status, result["state"]), (200, "running"))
+        self.assertEqual((status, result["state"]), (200, "approved"))
         self.commands.wait()
         self.assertEqual(self.engine.store.state(draft["mission_id"]), S.COMPLETED)
 
