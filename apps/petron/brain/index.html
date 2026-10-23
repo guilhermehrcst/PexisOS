@@ -25,14 +25,18 @@
         from { transform: translate(-50%, -50%) scale(0.987) rotate(-0.2deg); }
         to { transform: translate(-50%, -50%) scale(1.025) rotate(0.3deg); }
       }
-      canvas { display: block; position: absolute; width: 100%; height: 100%; inset: 0; touch-action: none; }
+      canvas { display: block; position: absolute; width: 100%; height: 100%; inset: 0; touch-action: none; outline: none; }
+      /* Screen-reader-only status: never visible, always announced. */
+      .petron-status { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; border: 0;
+        overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; }
       @media (prefers-reduced-motion: reduce) { .brain-reference { animation: none; } }
     </style>
   </head>
   <body>
     <main aria-label="PETRON: cérebro de partículas brancas sobre fundo preto">
       <img class="brain-reference" src="./brain-texture.webp" alt="" aria-hidden="true">
-      <canvas id="brain" role="img" aria-label="Esfera tridimensional de partículas brancas formando ondas orgânicas, centralizada em um fundo preto"></canvas>
+      <canvas id="brain" role="img" tabindex="0" aria-label="Esfera tridimensional de partículas brancas formando ondas orgânicas, centralizada em um fundo preto"></canvas>
+      <div id="petron-status" class="petron-status" role="status" aria-live="polite">PETRON em modo visual autônomo, sem conexão com o runtime.</div>
     </main>
     <script src="./brain.js" defer></script>
   </body>

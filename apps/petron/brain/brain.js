@@ -1,31 +1,46 @@
 /**
- * PETRON Brain V0.1
+ * PETRON Brain V0.1 (runtime-ready)
  * A self-contained, CPU-friendly monochrome particle sculpture.
  * No dependencies, remote requests, sensors, model calls or visible controls.
  *
- * Integration API:
- *   window.PetronBrain.setState('idle'|'thinking'|'working'|'success'|'error')
+ * Integration API (V0.1 calls unchanged; additions marked +):
+ *   window.PetronBrain.setState(mode)   idle | thinking | working | success | error
+ *                                       + listening | verifying | awaiting_approval | disconnected
  *   window.PetronBrain.setActivity(0..1)
  *   window.PetronBrain.pause(); window.PetronBrain.resume();
  *   window.PetronBrain.getState()
+ * + window.PetronBrain.pulse()          one discreet ring, as on touch
+ * + window.PetronBrain.modes            the accepted mode names
+ *
+ * The Brain only draws what a host tells it. It never infers mission status by itself.
  */
 (() => {
   'use strict';
 
   const canvas = document.getElementById('brain');
   if (!canvas) return;
+  // The approved texture layer follows the state's luminosity too (idle keeps its 0.92).
+  const reference = document.querySelector('.brain-reference');
+  let referenceOpacity = -1;
   const context = canvas.getContext('2d', { alpha: true, desynchronized: true });
   if (!context) return;
 
   const motionQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
   const TAU = Math.PI * 2;
+  // The five approved modes keep their exact values. `flow` scales surface turbulence
+  // (1 = approved behaviour); lower is more coherent, higher more disturbed.
   const MODES = Object.freeze({
-    idle: { speed: 0.18, shimmer: 0.10, breathe: 0.010, glow: 1 },
-    thinking: { speed: 0.43, shimmer: 0.23, breathe: 0.017, glow: 1.13 },
-    working: { speed: 0.58, shimmer: 0.32, breathe: 0.025, glow: 1.16 },
-    success: { speed: 0.27, shimmer: 0.14, breathe: 0.020, glow: 1.24 },
-    error: { speed: 0.12, shimmer: 0.06, breathe: 0.006, glow: 0.78 },
+    idle: { speed: 0.18, shimmer: 0.10, breathe: 0.010, glow: 1, flow: 1 },
+    thinking: { speed: 0.43, shimmer: 0.23, breathe: 0.017, glow: 1.13, flow: 1 },
+    working: { speed: 0.58, shimmer: 0.32, breathe: 0.025, glow: 1.16, flow: 1 },
+    success: { speed: 0.27, shimmer: 0.14, breathe: 0.020, glow: 1.24, flow: 1 },
+    error: { speed: 0.12, shimmer: 0.06, breathe: 0.006, glow: 0.78, flow: 1 },
+    listening: { speed: 0.30, shimmer: 0.16, breathe: 0.022, glow: 1.08, flow: 1.2 },
+    verifying: { speed: 0.32, shimmer: 0.07, breathe: 0.012, glow: 1.12, flow: 0.45 },
+    awaiting_approval: { speed: 0.08, shimmer: 0.05, breathe: 0.007, glow: 0.94, flow: 0.6 },
+    disconnected: { speed: 0.04, shimmer: 0.02, breathe: 0.003, glow: 0.52, flow: 0.3 },
   });
+  const KEYS = ['speed', 'shimmer', 'breathe', 'glow', 'flow'];
 
   let width = 1;
   let height = 1;
@@ -45,6 +60,11 @@
   let smoothY = 0;
   let pulseTime = -100;
   let tick = 0;
+  // Smoothly interpolated parameters and an integrated phase: changing mode changes the rate
+  // of motion, never jumps the current position.
+  const cur = { ...MODES.idle };
+  let phase = 0;
+  let lastDrawMs = null;
 
   // Reproducible procedural composition. No Math.random() means consistent identity.
   function makeRandom(seed) {
@@ -124,10 +144,23 @@
     now = ms;
     tick++;
     const seconds = ms * 0.001;
-    const cfg = MODES[mode];
     const energy = clamp(activity, 0, 1);
     const reduced = motionQuery.matches;
-    const t = reduced ? 0 : seconds * cfg.speed;
+    const target = MODES[mode];
+    const dt = lastDrawMs === null ? 0 : clamp((ms - lastDrawMs) * 0.001, 0, 0.1);
+    lastDrawMs = ms;
+    const k = reduced ? 1 : 1 - Math.exp(-dt / 0.6);  // ~0.6 s time constant
+    for (const key of KEYS) cur[key] += (target[key] - cur[key]) * k;
+    const cfg = cur;
+    phase += dt * cfg.speed * (1 + 0.4 * (energy - 0.25));
+    const t = reduced ? 0 : phase;
+    if (reference) {
+      const opacity = clamp(0.92 * cfg.glow, 0.3, 1);
+      if (Math.abs(opacity - referenceOpacity) > 0.004) {
+        reference.style.opacity = opacity.toFixed(3);
+        referenceOpacity = opacity;
+      }
+    }
     const breath = reduced ? 1 : 1 + cfg.breathe * Math.sin(seconds * 1.05 + energy);
     const cx = width / 2;
     const cy = height / 2;
@@ -162,7 +195,7 @@
     const spinS = Math.sin(spin), spinC = Math.cos(spin);
     for (let i = 0; i < cloud.length; i++) {
       const p = cloud[i];
-      const flow = (reduced ? 0 : 0.012 * Math.sin(frame * 0.9 + p.theta * 9 + p.phi * 7));
+      const flow = (reduced ? 0 : 0.012 * cfg.flow * Math.sin(frame * 0.9 + p.theta * 9 + p.phi * 7));
       const r = 1 + flow + (reduced ? 0 : 0.003 * Math.sin(frame * 1.3 + p.phi * 19));
       let x = p.x * r;
       let y = p.y * r;
@@ -294,8 +327,15 @@
     return true;
   }
 
+  function pulse() {
+    pulseTime = now * 0.001;
+    if (motionQuery.matches || stopped) draw(now);
+    return true;
+  }
+
   window.PetronBrain = Object.freeze({
-    setState, setActivity,
+    setState, setActivity, pulse,
+    modes: Object.freeze(Object.keys(MODES)),
     getState: () => Object.freeze({ mode, activity, reducedMotion: motionQuery.matches }),
     pause: () => { stopped = true; window.cancelAnimationFrame(raf); raf = 0; },
     resume: () => { stopped = false; request(); },
@@ -308,6 +348,10 @@
   }, { passive: true });
   window.addEventListener('pointerleave', () => { pointerX = 0; pointerY = 0; }, { passive: true });
   window.addEventListener('pointerdown', () => { pulseTime = now * 0.001; }, { passive: true });
+  // Keyboard parity with touch: Enter/Space on the focused Brain gives the same discreet pulse.
+  canvas.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pulse(); }
+  });
   if (motionQuery.addEventListener) motionQuery.addEventListener('change', updateMotion);
   resize();
   request();
