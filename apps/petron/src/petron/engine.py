@@ -68,6 +68,18 @@ class Engine:
     def close(self) -> None:
         self.store.close()
 
+    @staticmethod
+    def _assert_provider_bound(spec: MissionSpec, provider: Any) -> None:
+        """The provider about to be used must carry exactly the settings the operator approved (they
+        are part of the scope hash). A mismatch is refused, never silently substituted."""
+        config = spec.raw["provider"]
+        if config["kind"] != "anthropic":
+            return
+        have = (getattr(provider, "model", None), getattr(provider, "effort", None),
+                getattr(provider, "max_tokens", None))
+        if have != (config.get("model"), config.get("effort"), config.get("max_tokens")):
+            raise EngineError("provider_settings_changed")
+
     # create / plan ------------------------------------------------------------------------
     def create(self, data: Any) -> str:
         spec = MissionSpec.parse(data)
@@ -119,6 +131,7 @@ class Engine:
             return scope_sha256
         try:
             provider = self.provider_factory(spec.raw["provider"], allow_real_model=allow_real_model)
+            self._assert_provider_bound(spec, provider)
             if not provider.simulated:
                 used = sum(1 for e in self.store.events(mission_id) if e["kind"] == "provider.call")
                 if used >= spec.budget["max_model_calls"]:
@@ -128,6 +141,8 @@ class Engine:
             proposal = provider.propose_plan(self._plan_request(spec))
             plan = validate_plan(proposal.plan, spec, tool_schemas())
         except ProviderError as error:
+            if error.usage:   # a refused or truncated reply was still billed
+                self.store.append_event(mission_id, "provider.error", {"code": error.code, "usage": error.usage})
             self.store.transition(mission_id, S.PLANNING, S.FAILED, reason=f"provider_error:{error.code}")
             raise EngineError(f"provider_error:{error.code}") from None
         except PlanRejected as rejected:
@@ -189,6 +204,7 @@ class Engine:
                 agent_provider = self.agent_provider_factory(spec.raw["provider"], allow_real_model=allow_real_model)
             except ProviderError as error:
                 raise EngineError(f"provider_error:{error.code}") from None
+            self._assert_provider_bound(spec, agent_provider)
         try:
             self.store.transition(mission_id, S.AWAITING_APPROVAL, S.RUNNING, payload={"plan_sha256": plan_sha256})
         except StoreError as error:
@@ -245,6 +261,8 @@ class Engine:
     def _checks(self, mission_id: str, spec: MissionSpec, base: Workspace, work: Workspace, sandbox: Any,
                 isolation_ok: bool, argv: tuple[str, ...]) -> dict:
         """Runtime-owned checks of the current workspace. Records nothing (the loop may call it)."""
+        if self.store.state(mission_id) not in (S.RUNNING, S.VERIFYING):   # never start work for a stopped mission
+            raise EngineError("mission_not_active")
         before, after = snapshot(base.root), snapshot(work.root)
         changed = changed_paths(before, after)
         protected = sorted(p for p in set(before) | set(after) if is_protected(spec, p))
@@ -277,9 +295,11 @@ class Engine:
                 isolation_ok: bool, argv: tuple[str, ...]) -> MissionState:
         result = self._checks(mission_id, spec, base, work, sandbox, isolation_ok, argv)
         checks = result["checks"]
-        diff_sha256 = self.store.put_artifact(mission_id, "diff.patch", result["diff"])
+        # Idempotent writes: after a crash a second attempt reuses identical artifacts and keeps any
+        # different (partial) one as evidence under a new name.
+        _, diff_sha256 = self.store.put_artifact_recovering(mission_id, "diff.patch", result["diff"])
         if result["tests"]["ran"]:
-            self.store.put_artifact(mission_id, "tests.after.txt", result["output"])
+            self.store.put_artifact_recovering(mission_id, "tests.after.txt", result["output"])
         chain_ok, _ = self.store.verify_chain()
         checks["event_chain_intact"] = chain_ok
         verdict = {"checks": checks, "changed_paths": result["changed_paths"],
@@ -294,81 +314,156 @@ class Engine:
         return self.store.state(mission_id)
 
     # agent mode ------------------------------------------------------------------------------
-    def _run_agent(self, mission_id: str, spec: MissionSpec, ctx: MissionContext, base: Workspace,
-                   work: Workspace, sandbox: Any, isolation_ok: bool, argv: tuple[str, ...], provider: Any,
-                   state: LoopState | None = None) -> MissionState:
+    def _acquire(self, mission_id: str) -> dict:
         try:
-            self.store.acquire_lease(mission_id)
+            return self.store.acquire_lease(mission_id)
         except StoreError as error:
             raise EngineError(error.code) from None
 
-        def precheck() -> tuple[bool, dict]:
-            result = self._checks(mission_id, spec, base, work, sandbox, isolation_ok, argv)
-            passed = all(result["checks"].values())
-            return passed, {"checks": result["checks"], "changed_paths": result["changed_paths"],
-                            "tests": result["tests"], "test_output_tail": result["output"][-4000:]}
+    def _run_agent(self, mission_id: str, spec: MissionSpec, ctx: MissionContext, base: Workspace,
+                   work: Workspace, sandbox: Any, isolation_ok: bool, argv: tuple[str, ...], provider: Any,
+                   state: LoopState | None = None, lease: dict | None = None) -> MissionState:
+        lease = lease or self._acquire(mission_id)
+        try:
+            def precheck() -> tuple[bool, dict]:
+                result = self._checks(mission_id, spec, base, work, sandbox, isolation_ok, argv)
+                passed = all(result["checks"].values())
+                return passed, {"checks": result["checks"], "changed_paths": result["changed_paths"],
+                                "tests": result["tests"], "test_output_tail": result["output"][-4000:]}
 
-        outcome = AgentLoop(self, spec, ctx, provider, precheck, state).run()
-        self.store.append_event(mission_id, "agent.outcome", {"verify": outcome.verify, "reason": outcome.reason})
-        if not outcome.verify:
-            if outcome.reason != "interrupted":
-                self._fail(mission_id, S.RUNNING, outcome.reason)
-            return self.store.state(mission_id)
-        self.store.transition(mission_id, S.RUNNING, S.VERIFYING)
-        return self._verify(mission_id, spec, base, work, sandbox, isolation_ok, argv)
+            outcome = AgentLoop(self, spec, ctx, provider, precheck, state, lease_token=lease["token"]).run()
+            self.store.append_event(mission_id, "agent.outcome", {"verify": outcome.verify, "reason": outcome.reason})
+            if not outcome.verify:
+                # An interrupted run was stopped by the operator; a lost lease means another live runner
+                # owns the mission now. Neither is a failure of the mission: failing it would kill that run.
+                if outcome.reason not in ("interrupted", "lease_lost"):
+                    self._fail(mission_id, S.RUNNING, outcome.reason)
+                return self.store.state(mission_id)
+            try:
+                self.store.transition(mission_id, S.RUNNING, S.VERIFYING)
+            except StoreError:   # cancelled between the conclusion and the verification
+                return self.store.state(mission_id)
+            try:
+                return self._verify(mission_id, spec, base, work, sandbox, isolation_ok, argv)
+            except Exception as error:  # never leave a mission stranded in `verifying`
+                self._fail(mission_id, S.VERIFYING, f"internal_error:{type(error).__name__}")
+                return self.store.state(mission_id)
+        finally:
+            self.store.release_lease(mission_id, lease["token"])
 
     def resume(self, mission_id: str, *, allow_real_model: bool = False) -> MissionState:
-        """Continue an interrupted agent mission from its last checkpoint, only if the workspace is
-        exactly as recorded there (otherwise the effect of the interrupted step is unknown)."""
+        """Continue an interrupted agent mission, or finish a verification that crashed, but only from
+        state that was fully committed and still verifies: an intact event chain, a checkpoint for
+        every recorded turn, and baseline and working trees exactly as recorded. Anything else is
+        refused (the effect of the interrupted step would be unknown)."""
         row = self.store.mission(mission_id)
         spec = self.store.spec(mission_id)
-        if row["state"] != S.RUNNING.value:
+        if row["state"] not in (S.RUNNING.value, S.VERIFYING.value):
             raise EngineError("not_running")
         if spec.mode != "agent":
             raise EngineError("resume_supported_for_agent_mode_only")
         if self.store.lease_alive(mission_id):
             raise EngineError("lease_held")
+        verifying = row["state"] == S.VERIFYING.value
+        provider = None
+        if not verifying:   # a crashed verification needs no model at all
+            try:
+                provider = self.agent_provider_factory(spec.raw["provider"], allow_real_model=allow_real_model)
+            except ProviderError as error:
+                raise EngineError(f"provider_error:{error.code}") from None
+            self._assert_provider_bound(spec, provider)
+            if not provider.simulated:
+                raise EngineError("resume_unsupported_for_real_provider")  # its conversation lives in memory
+        lease = self._acquire(mission_id)       # exclusion first: a second resumer stops here
+        handed_over = False
         try:
-            provider = self.agent_provider_factory(spec.raw["provider"], allow_real_model=allow_real_model)
-        except ProviderError as error:
-            raise EngineError(f"provider_error:{error.code}") from None
-        if not provider.simulated:
-            raise EngineError("resume_unsupported_for_real_provider")  # its conversation lives in memory
+            current = self.store.state(mission_id)
+            refusal = self._resume_refusal(mission_id)
+            if refusal is not None:
+                self._fail(mission_id, current, f"resume_refused:{refusal[0]}")
+                return self.store.state(mission_id)
+            turns, checkpoints, created, base, work = self._resume_evidence(mission_id)
+            expected = checkpoints[-1]["workspace_tree_sha256"] if checkpoints else created[-1]["tree_sha256"]
+            sandbox = self.sandbox_factory(spec)
+            probe = sandbox.probe()
+            self.store.append_event(mission_id, "sandbox.probe", probe.to_dict())
+            argv = VERIFICATION_COMMANDS[spec.raw["verification"]["command"]]
+            if verifying:
+                return self._recover_verification(mission_id, spec, base, work, sandbox, probe.ok, argv, expected)
+            last = checkpoints[-1] if checkpoints else {}
+            state = LoopState(iteration=last.get("iteration", 0), model_calls=last.get("model_calls", 0),
+                              tokens=last.get("tokens", 0), consecutive_invalid=last.get("consecutive_invalid", 0),
+                              no_progress_refusals=last.get("no_progress_refusals", 0),
+                              action_counts=dict(last.get("action_counts", {})),
+                              history=[{k: t[k] for k in ("iteration", "decision", "observation")} for t in turns],
+                              verified_tree=last.get("verified_tree"))
+            connector = self.connector_factory(spec) if (self.connector_factory and "pexisos" in spec.raw) else None
+            ctx = MissionContext(self.store, spec, work, sandbox, row["plan_sha256"], connector, base=base,
+                                 tool_calls=last.get("tool_calls", 0))
+            self.store.append_event(mission_id, "agent.resumed", {"from_iteration": state.iteration,
+                                                                  "workspace_tree_sha256": expected})
+            handed_over = True
+            try:
+                return self._run_agent(mission_id, spec, ctx, base, work, sandbox, probe.ok, argv, provider, state,
+                                       lease)
+            except EngineError:
+                raise
+            except Exception as error:
+                self._fail(mission_id, self.store.state(mission_id), f"internal_error:{type(error).__name__}")
+                return self.store.state(mission_id)
+        finally:
+            if not handed_over:
+                self.store.release_lease(mission_id, lease["token"])
+
+    def _resume_evidence(self, mission_id: str):
         events = self.store.events(mission_id)
         turns = [e["payload"] for e in events if e["kind"] == "agent.turn"]
         checkpoints = [e["payload"] for e in events if e["kind"] == "agent.checkpoint"]
         created = [e["payload"] for e in events if e["kind"] == "workspace.created"]
         area = self.home / "workspaces" / mission_id
-        base, work = Workspace(area / "base"), Workspace(area / "work")
+        return turns, checkpoints, created, Workspace(area / "base"), Workspace(area / "work")
+
+    def _resume_refusal(self, mission_id: str) -> tuple[str] | None:
+        """Why this mission cannot be resumed safely, or None. Each check is independent of the others."""
+        chain_ok, _ = self.store.verify_chain()
+        if not chain_ok:   # a checkpoint is only trustworthy if the log that holds it is intact
+            return ("event_chain_broken",)
+        turns, checkpoints, created, base, work = self._resume_evidence(mission_id)
         if not created or not (base.root.is_dir() and work.root.is_dir()):
-            self._fail(mission_id, S.RUNNING, "resume_refused:workspace_missing")
-            return self.store.state(mission_id)
-        expected = checkpoints[-1]["workspace_tree_sha256"] if checkpoints else created[-1]["tree_sha256"]
-        if tree_sha256(snapshot(work.root)) != expected:
-            self._fail(mission_id, S.RUNNING, "resume_refused:workspace_diverged")
-            return self.store.state(mission_id)
-        sandbox = self.sandbox_factory(spec)
-        probe = sandbox.probe()
-        self.store.append_event(mission_id, "sandbox.probe", probe.to_dict())
-        last = checkpoints[-1] if checkpoints else {}
-        state = LoopState(iteration=last.get("iteration", 0), model_calls=last.get("model_calls", 0),
-                          tokens=last.get("tokens", 0), consecutive_invalid=last.get("consecutive_invalid", 0),
-                          no_progress_refusals=last.get("no_progress_refusals", 0),
-                          action_counts=dict(last.get("action_counts", {})),
-                          history=[{k: t[k] for k in ("iteration", "decision", "observation")} for t in turns],
-                          verified_tree=last.get("verified_tree"))
-        connector = self.connector_factory(spec) if (self.connector_factory and "pexisos" in spec.raw) else None
-        ctx = MissionContext(self.store, spec, work, sandbox, row["plan_sha256"], connector, base=base,
-                             tool_calls=last.get("tool_calls", 0))
-        self.store.append_event(mission_id, "agent.resumed", {"from_iteration": state.iteration,
-                                                              "workspace_tree_sha256": expected})
-        argv = VERIFICATION_COMMANDS[spec.raw["verification"]["command"]]
+            return ("workspace_missing",)
+        last_iteration = checkpoints[-1]["iteration"] if checkpoints else 0
+        if any(t["iteration"] > last_iteration for t in turns):
+            # The process died between a committed turn and its checkpoint: counters and history
+            # cannot be reconstructed without guessing, so the tail is not restored.
+            return ("uncheckpointed_turn",)
         try:
-            return self._run_agent(mission_id, spec, ctx, base, work, sandbox, probe.ok, argv, provider, state)
-        except EngineError:
-            raise
+            if tree_sha256(snapshot(base.root)) != created[-1]["tree_sha256"]:
+                return ("baseline_diverged",)   # the diff is computed against it: it must be what was recorded
+            expected = checkpoints[-1]["workspace_tree_sha256"] if checkpoints else created[-1]["tree_sha256"]
+            if tree_sha256(snapshot(work.root)) != expected:
+                return ("workspace_diverged",)
+        except WorkspaceError:
+            return ("workspace_invalid",)
+        return None
+
+    def _recover_verification(self, mission_id: str, spec: MissionSpec, base: Workspace, work: Workspace,
+                              sandbox: Any, isolation_ok: bool, argv: tuple[str, ...], expected: str) -> MissionState:
+        """Finish a final verification that crashed. Idempotent: an existing verdict is honored, not
+        recomputed; otherwise it is recomputed on the (re-verified) workspace and artifacts are reused or
+        kept side by side."""
+        self.store.append_event(mission_id, "verification.recovered", {"workspace_tree_sha256": expected})
+        verdicts = [e["payload"] for e in self.store.events(mission_id) if e["kind"] == "verification.result"]
+        try:
+            if verdicts:
+                failed = sorted(name for name, ok in verdicts[-1]["checks"].items() if not ok)
+                if failed:
+                    self._fail(mission_id, S.VERIFYING, "verification_failed:" + ",".join(failed))
+                else:
+                    self.store.transition(mission_id, S.VERIFYING, S.COMPLETED)
+                return self.store.state(mission_id)
+            return self._verify(mission_id, spec, base, work, sandbox, isolation_ok, argv)
         except Exception as error:
-            self._fail(mission_id, self.store.state(mission_id), f"internal_error:{type(error).__name__}")
+            self._fail(mission_id, S.VERIFYING, f"internal_error:{type(error).__name__}")
             return self.store.state(mission_id)
 
     def discard_workspaces(self, mission_id: str) -> None:

@@ -21,6 +21,7 @@ import os
 import secrets
 import socket
 import sqlite3
+import threading
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
@@ -28,6 +29,8 @@ from .mission import TRANSITIONS, MissionSpec, MissionState, canonical_json, che
 from .redact import contains_secret, redact
 
 GENESIS = "0" * 64
+_LEASE_LOCK = threading.Lock()
+_LOCAL_LEASES: set[tuple[str, str]] = set()   # (mission_id, token) of runs alive in this process
 
 
 def utc_now() -> str:
@@ -272,32 +275,61 @@ class Store:
             self._append(db, mission_id, "scope.proposed", {"scope_sha256": scope_sha256, "scope": scope})
 
     # leases ---------------------------------------------------------------------------------
+    # One live runner per mission. Identity is a per-run token, never a pid: two runners in one
+    # process share a pid and must still exclude each other. SQLite serializes the check-and-insert
+    # (BEGIN IMMEDIATE); the in-process registry says which tokens of *this* process are still running.
+    def _latest_lease_event(self, mission_id: str, db=None):
+        row = (db or self._db).execute(
+            "SELECT kind, payload_json FROM events WHERE mission_id = ? AND kind IN ('run.lease', 'run.lease_released') "
+            "ORDER BY seq DESC LIMIT 1", (mission_id,)).fetchone()
+        return (row["kind"], json.loads(row["payload_json"])) if row else (None, None)
+
+    @staticmethod
+    def _holder_alive(mission_id: str, holder: dict) -> bool:
+        if holder.get("host") != socket.gethostname():
+            return True   # liveness cannot be checked: assume alive
+        pid = holder.get("pid")
+        if pid == os.getpid():
+            return (mission_id, holder.get("token")) in _LOCAL_LEASES
+        if not _pid_alive(pid):
+            return False
+        started = holder.get("started")
+        return started is None or _proc_start(pid) in (None, started)   # a reused pid is not the holder
+
     def acquire_lease(self, mission_id: str) -> dict:
-        """One live runner per mission. A previous holder blocks only while its process is alive
-        on this host; a holder on another host always blocks (liveness cannot be checked)."""
-        holder = {"pid": os.getpid(), "host": socket.gethostname(), "token": secrets.token_hex(8)}
-        with self._tx() as db:
-            row = db.execute("SELECT payload_json FROM events WHERE mission_id = ? AND kind = 'run.lease' "
-                             "ORDER BY seq DESC LIMIT 1", (mission_id,)).fetchone()
-            if row:
-                previous = json.loads(row["payload_json"])
-                if previous.get("host") != holder["host"]:
-                    raise StoreError("lease_held_elsewhere")
-                if previous.get("pid") != holder["pid"] and _pid_alive(previous.get("pid")):
-                    raise StoreError("lease_held")
-            self._append(db, mission_id, "run.lease", holder)
+        holder = {"pid": os.getpid(), "host": socket.gethostname(), "token": secrets.token_hex(16),
+                  "started": _proc_start(os.getpid())}
+        with _LEASE_LOCK:
+            with self._tx() as db:
+                kind, previous = self._latest_lease_event(mission_id, db)
+                if kind == "run.lease":
+                    if previous.get("host") != holder["host"]:
+                        raise StoreError("lease_held_elsewhere")
+                    if self._holder_alive(mission_id, previous):
+                        raise StoreError("lease_held")
+                self._append(db, mission_id, "run.lease", holder)
+            _LOCAL_LEASES.add((mission_id, holder["token"]))
         return holder
 
+    def release_lease(self, mission_id: str, token: str) -> None:
+        with _LEASE_LOCK:
+            _LOCAL_LEASES.discard((mission_id, token))
+            with self._tx() as db:
+                kind, previous = self._latest_lease_event(mission_id, db)
+                if kind == "run.lease" and previous.get("token") == token:
+                    self._append(db, mission_id, "run.lease_released", {"token": token})
+
+    def lease_owned(self, mission_id: str, token: str) -> bool:
+        kind, previous = self._latest_lease_event(mission_id)
+        return kind == "run.lease" and previous.get("token") == token
+
     def lease_alive(self, mission_id: str) -> bool | None:
-        row = self._db.execute("SELECT payload_json FROM events WHERE mission_id = ? AND kind = 'run.lease' "
-                               "ORDER BY seq DESC LIMIT 1", (mission_id,)).fetchone()
-        if row is None:
+        kind, previous = self._latest_lease_event(mission_id)
+        if kind is None:
             return None
-        previous = json.loads(row["payload_json"])
-        if previous.get("host") != socket.gethostname():
-            return True
-        # A lease held by this very process belongs to a run that already unwound (crashed).
-        return previous.get("pid") != os.getpid() and _pid_alive(previous.get("pid"))
+        if kind == "run.lease_released":
+            return False
+        return self._holder_alive(mission_id, previous)
 
     def missions(self) -> list[dict]:
         return [dict(r) for r in self._db.execute(
@@ -335,6 +367,20 @@ class Store:
             self._append(db, mission_id, "artifact.recorded", {"name": name, "sha256": digest})
         return digest
 
+    def put_artifact_recovering(self, mission_id: str, name: str, content: str) -> tuple[str, str]:
+        """Idempotent artifact write for a verification that may be re-run after a crash: an
+        identical earlier artifact is reused; a different one (partial or from another attempt)
+        stays as evidence and the new content is stored as ``name.rN``. Returns (stored name, sha256)."""
+        digest = hashlib.sha256(redact(content).encode()).hexdigest()
+        for attempt in range(0, 50):
+            stored = name if attempt == 0 else f"{name}.r{attempt}"
+            existing = self.artifact(mission_id, stored)
+            if existing is None:
+                return stored, self.put_artifact(mission_id, stored, content)
+            if existing["sha256"] == digest:
+                return stored, digest
+        raise StoreError("artifact_conflict")
+
     def artifact(self, mission_id: str, name: str) -> dict | None:
         row = self._db.execute("SELECT * FROM artifacts WHERE mission_id = ? AND name = ?", (mission_id, name)).fetchone()
         return dict(row) if row else None
@@ -342,6 +388,15 @@ class Store:
     def raw(self) -> sqlite3.Connection:
         """Direct connection, for tests that prove the SQL-level guards hold."""
         return self._db
+
+
+def _proc_start(pid) -> str | None:
+    """Start time of a process (Linux /proc), to tell a live holder from a reused pid."""
+    try:
+        with open(f"/proc/{int(pid)}/stat") as handle:
+            return handle.read().rsplit(")", 1)[1].split()[19]
+    except (OSError, ValueError, IndexError):
+        return None
 
 
 def _pid_alive(pid) -> bool:

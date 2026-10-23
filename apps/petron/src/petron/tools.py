@@ -98,12 +98,22 @@ _FAILED_TEST = re.compile(r"(?m)^(FAIL|ERROR): (\w+) \(([\w.]+)\)")
 
 
 def summarize_unittest(output: str) -> dict:
-    """Parse unittest's summary from untrusted output. The exit code stays authoritative."""
-    ran = _RAN.search(output)
-    counts = dict(item.split("=", 1) for item in _FAILED.search(output).group(1).split(", ")) \
-        if _FAILED.search(output) else {}
-    return {"source": "parsed_from_untrusted_test_output", "tests_run": int(ran.group(1)) if ran else None,
-            "failures": int(counts.get("failures", 0)), "errors": int(counts.get("errors", 0)),
+    """Parse unittest's summary from untrusted output. The exit code stays authoritative.
+
+    Total over any input: a malformed or hostile line yields zeros, never an exception. unittest
+    prints its real summary last, so the *last* ``Ran``/``FAILED`` lines are used; a test that
+    printed an earlier fake one cannot change the counts. Counts are clamped to stay sane."""
+    runs = _RAN.findall(output)
+    summaries = _FAILED.findall(output)
+    counts: dict[str, int] = {}
+    if summaries:
+        for item in summaries[-1].split(","):
+            key, separator, value = item.strip().partition("=")
+            if separator and key and value.isdigit() and len(value) <= 9:
+                counts[key] = int(value)
+    return {"source": "parsed_from_untrusted_test_output",
+            "tests_run": int(runs[-1]) if runs and len(runs[-1]) <= 9 else None,
+            "failures": counts.get("failures", 0), "errors": counts.get("errors", 0),
             "failed_tests": [{"kind": kind, "test": name, "id": ident}
                              for kind, name, ident in _FAILED_TEST.findall(output)][:50]}
 

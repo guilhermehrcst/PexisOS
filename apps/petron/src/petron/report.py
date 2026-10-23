@@ -65,6 +65,16 @@ def build_report(store: Store, mission_id: str) -> dict:
     notice = (SIMULATED_AGENT_NOTICE if mode == "agent" else SIMULATED_NOTICE) if simulated else None
     chain_ok, bad_seq = store.verify_chain()
     diff = store.artifact(mission_id, "diff.patch")
+    verdict = (by_kind.get("verification.result") or [None])[-1]
+    if diff and verdict and diff["sha256"] != verdict.get("diff_sha256"):
+        # A recovered verification keeps an earlier (partial) artifact; show the one the verdict names.
+        for attempt in range(1, 50):
+            candidate = store.artifact(mission_id, f"diff.patch.r{attempt}")
+            if candidate is None:
+                break
+            if candidate["sha256"] == verdict.get("diff_sha256"):
+                diff = candidate
+                break
     return redact({
         "schema": "petron.report.v0",
         "mission_id": mission_id,
@@ -88,7 +98,7 @@ def build_report(store: Store, mission_id: str) -> dict:
         "agent_turns": [_turn_line(t) for t in turns],
         "agent_outcome": (by_kind.get("agent.outcome") or [None])[-1],
         "resumed": by_kind.get("agent.resumed", []),
-        "usage": _usage(turns),
+        "usage": _usage(turns, by_kind.get("agent.provider_error", [])),
         "verification": (by_kind.get("verification.result") or [None])[-1],
         "diff_sha256": diff["sha256"] if diff else None,
         "diff": diff["content"] if diff else None,
@@ -108,8 +118,14 @@ def _turn_line(turn: dict) -> dict:
             "rationale": (decision.get("rationale") or "")[:160]}
 
 
-def _usage(turns: list[dict]) -> dict:
+def _usage(turns: list[dict], failed_attempts: list[dict] | None = None) -> dict:
     totals = {"input_tokens": 0, "output_tokens": 0, "model_calls": 0}
+    for failure in failed_attempts or []:   # a failed or refused call happened and may have been billed
+        if failure.get("attempt"):
+            usage = failure.get("usage") or {}
+            totals["model_calls"] += 1
+            totals["input_tokens"] += int(usage.get("input_tokens") or 0)
+            totals["output_tokens"] += int(usage.get("output_tokens") or 0)
     for turn in turns:
         usage = (turn.get("provider") or {}).get("usage") or {}
         if not (turn.get("provider") or {}).get("simulated", True):

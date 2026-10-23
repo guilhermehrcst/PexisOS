@@ -18,14 +18,20 @@ FAKE_ANTHROPIC = "sk-ant-api03-SYNTHETICKEY0123456789"
 FAKE_GITHUB = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4"
 
 
+_DEFAULTS = getattr(__import__("petron.mission", fromlist=["x"]), "PROVIDER_DEFAULTS",
+                    {"model": "claude-opus-5-5", "effort": "high", "max_tokens": 16000})
+
+
 class CapturingProvider:
-    """Stands in for a real provider: records exactly what PETRON would have sent, never networks."""
+    """Stands in for a real provider: records exactly what PETRON would have sent, never networks.
+    It carries the settings the mission spec resolves, as the real provider would."""
 
     kind = "anthropic"
     simulated = False
 
     def __init__(self):
         self.requests = []
+        self.model, self.effort, self.max_tokens = _DEFAULTS["model"], _DEFAULTS["effort"], _DEFAULTS["max_tokens"]
 
     def propose_plan(self, request):
         self.requests.append(request)

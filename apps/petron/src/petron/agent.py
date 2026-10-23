@@ -154,6 +154,7 @@ class AgentTurnContext:
     iteration: int
     remaining: dict                 # iterations, tool_calls, model_calls, tokens
     history: tuple[dict, ...]       # [{iteration, decision, observation}], oldest first
+    token_limit: int | None = None  # HARD ceiling for input+output of the next request (None: uncapped)
 
 
 @dataclass
@@ -183,9 +184,11 @@ class LoopOutcome:
 class AgentLoop:
     """Runs inside the engine while the mission is ``running``. Persists every turn."""
 
-    def __init__(self, engine, spec, ctx, provider, checks_fn, state: LoopState | None = None):
+    def __init__(self, engine, spec, ctx, provider, checks_fn, state: LoopState | None = None,
+                 lease_token: str | None = None):
         self.engine, self.store, self.spec, self.ctx = engine, engine.store, spec, ctx
         self.provider = provider
+        self.lease_token = lease_token
         self.checks_fn = checks_fn           # () -> (all_passed: bool, verdict: dict); runtime-owned
         self.state = state or LoopState()
         self.budget = spec.budget
@@ -209,8 +212,11 @@ class AgentLoop:
                 remaining["tokens"] = self.budget["max_total_tokens"] - s.tokens
         scope = {"writable": list(self.spec.writable), "protected": list(self.spec.protected),
                  "verification": self.spec.raw["verification"]["command"]}
+        token_limit = None
+        if not self.provider.simulated and "max_total_tokens" in self.budget:
+            token_limit = max(0, self.budget["max_total_tokens"] - s.tokens)
         return AgentTurnContext(self.spec.mission_id, self.spec.raw["objective"], self.tool_specs, scope,
-                                s.iteration, remaining, tuple(s.history))
+                                s.iteration, remaining, tuple(s.history), token_limit)
 
     def _budget_exhausted(self) -> str | None:
         s = self.state
@@ -242,12 +248,17 @@ class AgentLoop:
         return {"ok": outcome["ok"] and classify(outcome) is None, "error_class": classify(outcome),
                 "error": outcome.get("error"), "result": bound(outcome.get("result"))}
 
-    def run(self) -> LoopOutcome:
+    def _still_running(self) -> bool:
         from .mission import MissionState
+        return self.store.state(self.spec.mission_id) is MissionState.RUNNING
+
+    def run(self) -> LoopOutcome:
         s = self.state
         while True:
-            if self.store.state(self.spec.mission_id) is not MissionState.RUNNING:
+            if not self._still_running():
                 return LoopOutcome(False, "interrupted")
+            if self.lease_token is not None and not self.store.lease_owned(self.spec.mission_id, self.lease_token):
+                return LoopOutcome(False, "lease_lost")   # another runner took over: spend nothing more
             exhausted = self._budget_exhausted()
             if exhausted:
                 return LoopOutcome(False, exhausted)
@@ -258,12 +269,31 @@ class AgentLoop:
                 proposal = self.provider.next_decision(self._context())
             except Exception as error:  # ProviderError or an unexpected provider failure: fail closed
                 code = getattr(error, "code", type(error).__name__)
-                self._record("agent.provider_error", {"iteration": s.iteration, "code": str(code)[:120]})
+                spent = getattr(error, "usage", None) or {}
+                if not self.provider.simulated and code != "token_budget_insufficient":
+                    # The attempt happened (and a refused/truncated reply is billed): count it. A request
+                    # refused before it was sent (token_budget_insufficient) is not an attempt.
+                    s.model_calls += 1
+                    s.tokens += int(spent.get("input_tokens") or 0) + int(spent.get("output_tokens") or 0)
+                attempted = not self.provider.simulated and code != "token_budget_insufficient"
+                self._record("agent.provider_error", {"iteration": s.iteration, "code": str(code)[:120],
+                                                      "attempt": attempted, "model_calls": s.model_calls,
+                                                      "tokens": s.tokens, "usage": spent})
                 return LoopOutcome(False, f"provider_error:{code}")
             usage = (proposal.info or {}).get("usage") or {}
             if not self.provider.simulated:
                 s.model_calls += 1
                 s.tokens += int(usage.get("input_tokens") or 0) + int(usage.get("output_tokens") or 0)
+                cap = self.budget.get("max_total_tokens")
+                if cap is not None and s.tokens > cap:   # cannot happen when the request was capped; never ignore it
+                    self._record("agent.budget_exceeded", {"iteration": s.iteration, "tokens": s.tokens, "cap": cap})
+                    return LoopOutcome(False, "limit:max_total_tokens")
+            if not self._still_running():
+                # A slow answer that arrives after the operator cancelled: it is recorded as discarded,
+                # and nothing it asks for (a tool, a verification, a conclusion) is started.
+                self._record("agent.decision_discarded", {"iteration": s.iteration, "reason": "mission_not_running",
+                                                          "model_calls": s.model_calls, "tokens": s.tokens})
+                return LoopOutcome(False, "interrupted")
             tree_before = self._tree()
             try:
                 decision = validate_decision(proposal.decision)
@@ -282,11 +312,15 @@ class AgentLoop:
             elif kind == "tool_call":
                 observation = self._observe_tool(decision, tree_before)
             elif kind == "request_verification":
+                if not self._still_running():   # authoritative state, immediately before the sandbox is used
+                    return LoopOutcome(False, "interrupted")
                 passed, verdict = self.checks_fn()
                 s.verified_tree = tree_before if passed else None
                 observation = {"ok": passed, "error_class": None if passed else "verification_failed",
                                "result": bound(verdict)}
             elif kind == "conclude":
+                if not self._still_running():
+                    return LoopOutcome(False, "interrupted")
                 if s.verified_tree is not None and s.verified_tree == tree_before:
                     self._finish_turn(decision, {"ok": True, "error_class": None, "result": "accepted"},
                                       proposal.info, tree_before)
