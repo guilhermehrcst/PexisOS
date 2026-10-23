@@ -26,6 +26,7 @@
   const canvas = document.getElementById('brain');
   const input = document.getElementById('petron-input');
   const SUCCESS_HOLD_MS = 4500;
+  const ERROR_HOLD_MS = 8000;       // a terminal failure is shown, then calm: it is never an endless alarm
   const DISCONNECT_GRACE_MS = 1500;
   const HOLD_MS = 1800;
   const IDLE_INPUT_MS = 45000;
@@ -42,7 +43,7 @@
   let interactive = false;
   let view = null;            // last authoritative message from the runtime
   let session = 'none';       // none | typing | holding
-  let draft = null;           // { mission_id, scope_sha256, approved } created from this page
+  let draft = null;           // { mission_id, scope_sha256, approved }: the server's pending draft of this bridge
   let submitting = null;      // in-flight draft request (gestures wait for it: no race with the stream)
   let pointerHeld = false;
   let spaceHeld = false;
@@ -60,10 +61,14 @@
     window.clearTimeout(successTimer);
     brain.setState(message.state);
     if (Number.isFinite(message.activity)) brain.setActivity(message.activity);
-    if (message.state === 'success') {
+    // Success, and a terminal failure, are held briefly and then settle to calm idle. Other errors (a denied
+    // action) are followed by further events and need no timer.
+    const hold = message.state === 'success' ? SUCCESS_HOLD_MS
+      : (message.state === 'error' && message.kind === 'mission.state' ? ERROR_HOLD_MS : 0);
+    if (hold) {
       successTimer = window.setTimeout(() => {
-        if (brain.getState().mode === 'success') { brain.setState('idle'); brain.setActivity(0.25); }
-      }, SUCCESS_HOLD_MS);
+        if (brain.getState().mode === message.state) { brain.setState('idle'); brain.setActivity(0.25); }
+      }, hold);
     }
   }
 
@@ -88,6 +93,25 @@
     try { return JSON.parse(event.data); } catch { return null; }
   }
 
+  // The snapshot is the server's account of the one draft this bridge has pending or running. The local
+  // draft is made to match it on every (re)connection: a draft that ended or was cancelled elsewhere while
+  // this page was away is forgotten, a pending or running one is kept (or recovered after a reload). Runtime
+  // events never create a draft, so an old event cannot bring back one that has ended.
+  function reconcileDraft(owned) {
+    if (!owned || typeof owned.mission_id !== 'string') {
+      if (!submitting) draft = null;
+      return;
+    }
+    const scope = /^[0-9a-f]{64}$/.test(owned.scope_sha256 || '') ? owned.scope_sha256 : null;
+    const approved = Boolean(owned.approved) || !scope;   // no pending scope: nothing left to approve here
+    if (draft && draft.mission_id === owned.mission_id) {
+      draft.approved = draft.approved || approved;
+      if (scope) draft.scope_sha256 = scope;
+    } else {
+      draft = { mission_id: owned.mission_id, scope_sha256: scope, approved };
+    }
+  }
+
   // ---------------------------------------------------------------- read side
   const source = new EventSource('/api/events');
   source.addEventListener('snapshot', (event) => {
@@ -96,9 +120,7 @@
     connected = true;
     interactive = Boolean(message.interactive) && key.length >= 32 && Boolean(input);
     lastSeq = Math.max(lastSeq, Number(message.seq) || 0);
-    if (message.brain_draft && message.state === 'awaiting_approval' && /^[0-9a-f]{64}$/.test(message.scope_sha256 || '')) {
-      draft = { mission_id: message.mission_id, scope_sha256: message.scope_sha256 };  // recovered after reload
-    }
+    reconcileDraft(message.draft);
     show(message);
   });
   source.addEventListener('runtime', (event) => {
@@ -142,6 +164,13 @@
     brain.setState('error');
     announce(`pedido recusado (${reason})`);
     window.setTimeout(restore, 1600);
+  }
+
+  // The server answered that this draft is not (or no longer) pending: it ended elsewhere (a CLI cancel, a
+  // restart, another run). Keeping it would block every new mission until a reload.
+  const STALE_DRAFT = new Set(['not_awaiting_approval', 'unknown_mission', 'not_a_brain_draft']);
+  function forgetIfStale(error, target) {
+    if (STALE_DRAFT.has(error.message) && draft === target) draft = null;
   }
 
   const busy = () => view && ['thinking', 'working', 'verifying'].includes(view.state);
@@ -242,8 +271,9 @@
     try {
       await command(`/api/missions/${target.mission_id}/approve`, { scope_sha256: target.scope_sha256 });
       target.approved = true;
-      announce('autorizado; o runtime está executando a missão');
+      announce('autorização registrada; aguardando o runtime iniciar a missão');
     } catch (error) {
+      forgetIfStale(error, target);
       refusal(error.message);
     }
   }
@@ -256,6 +286,7 @@
       draft = null;
       announce('rascunho descartado; nada foi executado');
     } catch (error) {
+      forgetIfStale(error, target);
       refusal(error.message);
     }
   }

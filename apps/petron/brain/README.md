@@ -206,6 +206,10 @@ the phase fix are unchanged, as that prototype's own notes ask.
 
 ## Tests
 
+- `apps/petron/tests/test_brain_live_js.py` + `tests/js/live_draft_harness.js`: how the page keeps, forgets
+  and recovers its draft (stale refusals, reconnection snapshots, ended drafts), run in Node against stubs;
+- `apps/petron/tests/test_brain_hardening.py`: interrupted runners, refusal handling, draft lifecycle,
+  bridge ownership;
 - `apps/petron/tests/test_brain_bridge.py`: mapping, freshness, snapshots, reconnection,
   server refusals (part of the normal suite).
 - `apps/petron/tests/test_brain_commands.py`: drafts, hold approval bound to the scope hash,
