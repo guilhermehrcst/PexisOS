@@ -50,13 +50,17 @@ petron mission resume petron-e002          # continue from the last checkpoint, 
 
 Real model (opt-in, costs money): see `docs/experiments/PETRON-E002.md` (E002-B).
 
-The Brain (the visual interface), connected read-only to the same `PETRON_HOME`:
+The Brain (the visual interface), connected to the same `PETRON_HOME`:
 
 ```bash
-petron brain serve                         # then open http://127.0.0.1:8765/
+petron brain serve                         # read-only: open http://127.0.0.1:8765/
+petron brain serve --interactive --template apps/petron/fixtures/e002/mission.json
+                                           # mission entry: open the URL printed with #k=…
 ```
 
-Missions are still run with the CLI; the Brain only shows their real state. See `brain/README.md`.
+Read-only, the Brain only shows the real state of missions run with the CLI. Interactive, it also
+accepts a request typed on the sphere, turns it into a draft scoped by the operator's template and
+runs it only after a deliberate hold on the sphere. See `brain/README.md`.
 
 Without installing: `PYTHONPATH=apps/petron/src python -m petron …`.
 

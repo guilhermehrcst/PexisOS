@@ -9,6 +9,7 @@ through a visually hidden live region.
 | Mode | How | What it shows |
 |---|---|---|
 | **Live** (runtime-connected) | `petron brain serve` → open `http://127.0.0.1:8765/` | the real state of PETRON missions in `$PETRON_HOME`, read-only |
+| **Live, interactive** (opt-in) | `petron brain serve --interactive --template SPEC` → open the URL the terminal prints (`…/#k=…`) | the same, plus mission entry on the sphere (see [Mission entry](#mission-entry-interactive-opt-in)) |
 | **Visual only** (standalone demo) | open `index.html` directly | the animation; driven only by `window.PetronBrain` calls, never by runtime data |
 
 Live mode exists only behind the bridge: the bridge serves `index.html` with `live.js` added.
@@ -30,11 +31,12 @@ and watch the Brain respond.
 | `thinking` | `agent.decision_requested` (the runtime is waiting for a provider decision); mission planning |
 | `working` | mission running; tool authorized (`tool.authorization` allow); tool result observed; resumed |
 | `verifying` | `agent.verification_started`, mission `verifying`, `verification.result` |
-| `awaiting_approval` | mission `awaiting_approval` (nothing is approved until the CLI records it) |
+| `awaiting_approval` | mission `awaiting_approval` (nothing is approved until the CLI, or a completed hold on a Brain draft, records it) |
 | `success` | mission `completed`, only if the transition is fresher than 15 s; held 4.5 s, then idle |
 | `error` | mission `failed` (fresh), tool denied, provider error, execution disabled |
 | `disconnected` | the bridge stream is lost (after a 1.5 s grace); never shown as activity |
-| `listening` | reserved: only while a real input-capture session is active (none exists yet) |
+| `listening` | interactive only: while a typing session on the sphere is actually open (no microphone) |
+| `confirming` | interactive only: while the approval hold is in progress; released early, nothing happens |
 
 `activity` is a fixed heuristic per event type (e.g. executing a tool animates more than reading
 a file). It is not a measurement: no CPU, token or progress figure is invented.
@@ -47,30 +49,84 @@ authoritative snapshot, so an old success is never celebrated again.
 
 Loopback bind only; fixed asset allowlist (no URL path reaches the filesystem); `Host` must name
 the loopback server (DNS-rebinding guard); a present `Origin` must be this server; cross-site
-fetches refused; no CORS headers; GET/HEAD only (no mutation endpoint exists); strict CSP
-(`default-src 'none'`, self-only scripts); SQLite opened read-only; event payload contents are
-never forwarded.
+fetches refused; no CORS headers; strict CSP (`default-src 'none'`, self-only scripts); SQLite
+opened read-only by the bridge; event payload contents are never forwarded. Without
+`--interactive` the bridge is GET/HEAD only: every `POST` is 405 and the page has no input
+element at all. There, pointer and keyboard only give parallax and a pulse: no interaction
+starts, approves or changes a mission.
 
-## Interaction
+## Mission entry (interactive, opt-in)
 
-Pointer/touch: parallax and a discreet pulse. Keyboard: the Brain is focusable (Tab); Enter or
-Space gives the same pulse and re-announces the status. **No interaction starts, approves or
-changes a mission.**
+```bash
+# from the repository root
+PYTHONPATH=apps/petron/src python -m petron brain serve --interactive \
+  --template apps/petron/fixtures/e002/mission.json
+# prints: PETRON Brain (interactive) at http://127.0.0.1:8765/#k=<per-run key>
+```
 
-## Voice: interface contract (not implemented in this increment)
+Still nothing but the sphere on screen. The gestures:
+
+| Gesture | Effect |
+|---|---|
+| tap/click the sphere, or Tab then Enter | opens an invisible typing session (`listening`); keys pulse the sphere |
+| Enter | sends the request: it becomes a **draft** that waits (`awaiting_approval`) |
+| Escape / leaving / 45 s idle | cancels the typing session; nothing is sent |
+| press and **hold ~1.8 s** (or hold Space) | approves *that exact draft* (`confirming` while holding); the runtime runs it |
+| release early, or a plain tap | nothing is approved |
+| Escape on a pending draft | discards it (mission `cancelled`); nothing ran |
+
+**Who decides what** (`apps/petron/src/petron/brain_commands.py`):
+
+- The **operator** chooses the template at the terminal: workspace, tools, writable paths,
+  limits, sandbox and provider. The browser contributes only the objective text (≤ 500 chars,
+  control characters stripped). The template must be an agent-mode spec. A real (paid) provider
+  is refused at startup unless the operator also passes `--allow-real-model`.
+- A **draft** is an ordinary agent mission stopped at `awaiting_approval`, with its scope hash
+  recorded and a `brain.draft` event (it stores the objective's SHA-256, not a second copy).
+  Only one Brain draft or run may be active at a time.
+- **Approval** is a separate, deliberate act bound to the scope hash, recorded as
+  `plan.approved` with channel `brain-hold-gesture`. The server re-checks state and hash on
+  every command. Through the Brain it applies only to missions the Brain drafted. Missions
+  created with the CLI keep CLI approval (`403 not_a_brain_draft`).
+- **Execution** goes through the same engine, Tool Gateway, Docker sandbox and verification as
+  the CLI. The Brain shows `success` only from the runtime's own `completed` transition. The
+  browser never executes anything, never reads SQLite and never names a tool or path.
+
+**Command channel guards** (all must pass; nothing is created otherwise):
+
+- loopback bind and the `Host` guard;
+- `Origin` required and equal to this server;
+- `Sec-Fetch-Site: same-origin`;
+- `Content-Type: application/json`;
+- per-run key in `X-Petron-Key`, compared in constant time;
+- body ≤ 2 KiB;
+- exact JSON key set per action;
+- fixed paths: `POST /api/missions`, `…/{id}/approve`, `…/{id}/discard`.
+
+The key is generated per run (`secrets.token_urlsafe(32)`), printed only in the operator's
+terminal, carried in the URL fragment (never sent in a request line, never in a static file),
+kept in page memory and removed from the address bar on load. A page opened without it can only
+watch.
+
+Limits, stated plainly:
+
+- The key is the only credential. Anyone who can read the operator's terminal or browser memory
+  on that machine can act as the operator.
+- The gesture proves deliberate intent, not identity.
+- No voice. Typing is the only input.
+
+## Voice: interface contract (not implemented)
 
 Not shipped, on purpose: browser speech recognition is not reliably local (Chromium's Web
-Speech API sends audio to a remote service), and creating missions from the browser needs an
-authenticated command channel that does not exist yet. The contract for the next increment:
+Speech API sends audio to a remote service). The command channel above is the path a transcript
+would take. The contract:
 
 1. **Capture** only after an explicit gesture on the Brain and the browser's microphone
    permission; the Brain shows `listening` only while capture is actually running.
 2. **Transcription** by a local engine by default; any remote engine needs explicit opt-in.
-3. **Draft, never execute**: the transcript becomes a mission *draft* via a future
-   `POST /api/drafts`, protected by a per-run secret printed in the operator's terminal (never
-   embedded in static files), same-origin checks and a strict schema. A draft is a `created`
-   mission; approval stays a separate operator act bound to the scope hash (`mission approve`).
-4. **No paid model** sees a transcript unless the operator runs the mission with
+3. **Draft, never execute**: the transcript becomes the same draft as typed text
+   (`POST /api/missions`), and approval stays the separate hold gesture bound to the scope hash.
+4. **No paid model** sees a transcript unless the operator started the bridge with
    `--allow-real-model`.
 
 ## Notes on the approved visual
@@ -85,5 +141,9 @@ palette contains very faint cool tints (halo `rgb(150,160,185)` at ≤2.3 % alph
 
 - `apps/petron/tests/test_brain_bridge.py`: mapping, freshness, snapshots, reconnection,
   server refusals (part of the normal suite).
+- `apps/petron/tests/test_brain_commands.py`: drafts, hold approval bound to the scope hash,
+  CLI missions refused, discard, every command-channel guard (part of the normal suite).
+- `apps/petron/tests/e2e/brain_interaction_e2e.py`: real browser, real interactive bridge, real
+  E002 in Docker; tap, type, hold, short hold, Escape, Space, no-key page, read-only bridge.
 - `apps/petron/tests/e2e/brain_e2e.py`: real browser, real bridge, real E002 + failing mission
   + bridge kill/restart (needs Playwright, Chromium and Docker).
