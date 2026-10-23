@@ -4,7 +4,8 @@
       "ok": true,
       "detail": {
         "children": [
-          "img",
+          "img.brain-reference",
+          "div.brain-chroma",
           "canvas#brain",
           "div#petron-status"
         ],
@@ -19,9 +20,12 @@
     },
     "brain_rendered_and_animating": {
       "ok": true,
-      "detail": 14.59
+      "detail": 13.65
     },
     "initial_state_idle": {
+      "ok": true
+    },
+    "default_palette_adaptive": {
       "ok": true
     },
     "awaiting_approval_shown": {
@@ -67,7 +71,7 @@
     },
     "events_in_order_no_duplicates": {
       "ok": true,
-      "detail": 99
+      "detail": 100
     },
     "success_returns_to_calm": {
       "ok": true
@@ -92,6 +96,23 @@
       "ok": true,
       "detail": []
     },
+    "adaptive_color_follows_real_states": {
+      "ok": true,
+      "detail": {
+        "idle": {
+          "saturation": 20.06,
+          "warm": -13.26
+        },
+        "error": {
+          "saturation": 28.2,
+          "warm": 2.49
+        },
+        "disconnected": {
+          "saturation": 6.52,
+          "warm": -1.99
+        }
+      }
+    },
     "reconnect_recovers_state_without_replaying_success": {
       "ok": true,
       "detail": {
@@ -111,11 +132,12 @@
     "only_local_requests": {
       "ok": true,
       "detail": [
-        "http://127.0.0.1:58075/",
-        "http://127.0.0.1:58075/api/events",
-        "http://127.0.0.1:58075/brain-texture.webp",
-        "http://127.0.0.1:58075/brain.js",
-        "http://127.0.0.1:58075/live.js"
+        "http://127.0.0.1:35943/",
+        "http://127.0.0.1:35943/api/events",
+        "http://127.0.0.1:35943/brain-mask.webp",
+        "http://127.0.0.1:35943/brain-texture.webp",
+        "http://127.0.0.1:35943/brain.js",
+        "http://127.0.0.1:35943/live.js"
       ]
     },
     "mobile_layout": {
@@ -131,11 +153,23 @@
     "reduced_motion_respected": {
       "ok": true
     },
+    "mono_palette_stays_monochrome": {
+      "ok": true,
+      "detail": {
+        "saturation": 8.0,
+        "warm": -1.54
+      }
+    },
     "keyboard_focus_and_status": {
       "ok": true,
       "detail": "PETRON: miss\u00e3o falhou."
     }
   },
   "notes": [],
-  "ok": true
+  "ok": true,
+  "provenance": {
+    "head": "0bf2015670647cfe8bec6b733c95f9ec057e1d30",
+    "dirty": false,
+    "generated_at": "2026-10-23T23:43:38Z"
+  }
 }
