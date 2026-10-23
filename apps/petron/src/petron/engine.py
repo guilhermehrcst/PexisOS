@@ -27,7 +27,8 @@ from .redact import redact_text
 from .sandbox import DisabledSandbox, DockerSandbox, SandboxUnavailable
 from .store import Store, StoreError, utc_now
 from .tools import BUILTIN_TOOLS, Gateway, MissionContext, tool_schemas
-from .workspace import Workspace, WorkspaceError, changed_paths, snapshot, tree_sha256, unified_diff
+from .workspace import (Workspace, WorkspaceError, changed_paths, hash_files, read_tree, snapshot, tree_sha256,
+                        unified_diff)
 
 S = MissionState
 _SNAPSHOT_FILE_LIMIT = 64 * 1024
@@ -84,9 +85,14 @@ class Engine:
 
     def _plan_request(self, spec: MissionSpec) -> PlanRequest:
         source = Path(spec.raw["workspace"]["source"])
+        # One descriptor-based read produces both the hash that is checked and the text that is sent,
+        # so a file swapped (or replaced by a symlink) after validation cannot reach the provider.
+        contents = read_tree(source)
+        if tree_sha256(hash_files(contents)) != self._source_tree(spec.mission_id):
+            raise WorkspaceError("source_changed")
         files, total = {}, 0
-        for rel in sorted(snapshot(source)):
-            text = (source / rel).read_text(encoding="utf-8", errors="replace")
+        for rel in sorted(contents):
+            text = contents[rel].decode("utf-8", errors="replace")
             if len(text) > _SNAPSHOT_FILE_LIMIT or total + len(text) > _SNAPSHOT_TOTAL_LIMIT:
                 continue
             files[rel] = redact_text(text)
@@ -116,9 +122,20 @@ class Engine:
             self.store.append_event(mission_id, "plan.rejected", {"reason": rejected.reason})
             self.store.transition(mission_id, S.PLANNING, S.FAILED, reason=f"plan_rejected:{rejected.reason}")
             raise EngineError(f"plan_rejected:{rejected.reason}") from None
+        except Exception as error:  # fail closed: never strand a mission in `planning`
+            code = getattr(error, "code", None)
+            reason = f"internal_error:{code if isinstance(code, str) else type(error).__name__}"
+            self._fail(mission_id, S.PLANNING, reason)
+            raise EngineError(reason) from None
         plan_sha256 = sha256_json(plan)
-        self.store.set_plan(mission_id, plan, plan_sha256, proposal.info)
-        self.store.transition(mission_id, S.PLANNING, S.AWAITING_APPROVAL, payload={"plan_sha256": plan_sha256})
+        try:
+            self.store.set_plan(mission_id, plan, plan_sha256, proposal.info)
+            self.store.transition(mission_id, S.PLANNING, S.AWAITING_APPROVAL, payload={"plan_sha256": plan_sha256})
+        except Exception as error:
+            code = getattr(error, "code", None)
+            reason = f"internal_error:{code if isinstance(code, str) else type(error).__name__}"
+            self._fail(mission_id, S.PLANNING, reason)
+            raise EngineError(reason) from None
         return plan_sha256
 
     def approve(self, mission_id: str, plan_sha256: str, approver: str, channel: str) -> None:
@@ -168,10 +185,16 @@ class Engine:
                 self.store.append_event(mission_id, "execution.disabled", {"reason": probe.reason})
             area = self.home / "workspaces" / mission_id
             source = Path(spec.raw["workspace"]["source"])
-            base = Workspace.create(source, area, "base")
-            work = Workspace.create(source, area, "work")
-            self.store.append_event(mission_id, "workspace.created",
-                                    {"tree_sha256": tree_sha256(snapshot(work.root))})
+            # Both copies are built from bytes whose hash equals the one recorded at creation; if the
+            # source changed since, nothing is copied and nothing runs.
+            approved_tree = self._source_tree(mission_id)
+            try:
+                base = Workspace.create(source, area, "base", expect_tree_sha256=approved_tree)
+                work = Workspace.create(source, area, "work", expect_tree_sha256=approved_tree)
+            except WorkspaceError as error:
+                self._fail(mission_id, current, f"workspace:{error.code}")
+                return self.store.state(mission_id)
+            self.store.append_event(mission_id, "workspace.created", {"tree_sha256": approved_tree})
             argv = VERIFICATION_COMMANDS[spec.raw["verification"]["command"]]
             if probe.ok:
                 baseline = sandbox.run(base.root, argv, spec.budget["exec_timeout_s"])
@@ -207,7 +230,7 @@ class Engine:
                                      == self._source_tree(mission_id),
         }
         diff = unified_diff(base.root, work.root, changed)
-        self.store.put_artifact(mission_id, "diff.patch", diff)
+        diff_sha256 = self.store.put_artifact(mission_id, "diff.patch", diff)
         tests: dict[str, Any] = {"ran": False}
         if isolation_ok:
             try:
@@ -224,7 +247,7 @@ class Engine:
         chain_ok, _ = self.store.verify_chain()
         checks["event_chain_intact"] = chain_ok
         verdict = {"checks": checks, "changed_paths": changed, "protected_paths": protected, "tests": tests,
-                   "diff_sha256": sha256_json(diff)}
+                   "diff_sha256": diff_sha256}
         self.store.append_event(mission_id, "verification.result", verdict)
         failed = sorted(name for name, ok in checks.items() if not ok)
         if failed:
