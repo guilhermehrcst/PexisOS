@@ -19,6 +19,12 @@ from .schema import SchemaError, closed_object, validate
 
 SPEC_SCHEMA_ID = "petron.mission.v0"
 PLAN_SCHEMA_ID = "petron.plan.v0"
+SCOPE_SCHEMA_ID = "petron.scope.v0"
+MODES = ("plan", "agent")
+# Effective settings of a real provider. They are resolved when the spec is parsed, so the stored
+# spec, the approved scope hash and the executed call all carry the same explicit values: a later
+# change of these defaults can never alter what an operator approved.
+PROVIDER_DEFAULTS = {"model": "claude-opus-5-5", "effort": "high", "max_tokens": 16000}
 _ID = r"^[a-z0-9][a-z0-9._-]{2,63}$"
 _REL_PATH = {"type": "string", "minLength": 1, "maxLength": 240, "pattern": r"^[A-Za-z0-9_][A-Za-z0-9_./-]*$"}
 _TOOL_NAME = {"type": "string", "minLength": 1, "maxLength": 64, "pattern": r"^[a-z][a-z0-9_.]*$"}
@@ -30,6 +36,9 @@ VERIFICATION_COMMANDS: dict[str, tuple[str, ...]] = {
 SPEC_SCHEMA = closed_object({
     "schema": {"type": "string", "const": SPEC_SCHEMA_ID},
     "mission_id": {"type": "string", "pattern": _ID},
+    # "plan" (V0.1, default when absent): one static plan, approved by its hash.
+    # "agent" (V0.2): an iterative loop inside an approved, immutable scope.
+    "mode": {"type": "string", "enum": list(MODES)},
     "objective": {"type": "string", "minLength": 1, "maxLength": 2000},
     "workspace": closed_object({
         "source": {"type": "string", "minLength": 1, "maxLength": 1024},
@@ -45,8 +54,10 @@ SPEC_SCHEMA = closed_object({
     "budget": closed_object({
         "max_steps": {"type": "integer", "minimum": 1, "maximum": 64},
         "max_tool_calls": {"type": "integer", "minimum": 1, "maximum": 256},
-        "max_model_calls": {"type": "integer", "minimum": 0, "maximum": 8},
+        "max_model_calls": {"type": "integer", "minimum": 0, "maximum": 64},
         "exec_timeout_s": {"type": "integer", "minimum": 1, "maximum": 600},
+        "max_iterations": {"type": "integer", "minimum": 1, "maximum": 64},
+        "max_total_tokens": {"type": "integer", "minimum": 1000, "maximum": 2000000},
     }, ["max_steps", "max_tool_calls", "max_model_calls", "exec_timeout_s"]),
     "provider": closed_object({
         "kind": {"type": "string", "enum": ["deterministic", "anthropic"]},
@@ -135,13 +146,29 @@ class MissionSpec:
             raise SchemaError("provider.script", "deterministic provider needs a script")
         if provider["kind"] == "anthropic" and data["budget"]["max_model_calls"] < 1:
             raise SchemaError("budget.max_model_calls", "a real provider needs a model-call budget")
+        if data.get("mode", "plan") == "plan" and data["budget"]["max_model_calls"] > 8:
+            raise SchemaError("budget.max_model_calls", "plan mode allows at most 8 model calls")  # V0.1 bound
+        if data.get("mode") == "agent" and "max_iterations" not in data["budget"]:
+            raise SchemaError("budget.max_iterations", "agent mode needs an iteration limit")
+        if data.get("mode") == "agent" and provider["kind"] != "deterministic" \
+                and "max_total_tokens" not in data["budget"]:
+            raise SchemaError("budget.max_total_tokens", "a real-provider agent mission needs an explicit aggregate "
+                              "token limit (iterations and per-request tokens do not bound total spend)")
         if data["sandbox"]["backend"] == "docker" and "image" not in data["sandbox"]:
             raise SchemaError("sandbox.image", "docker backend needs an image pinned by digest")
-        return cls(json.loads(canonical_json(data)))
+        raw = json.loads(canonical_json(data))
+        if raw["provider"]["kind"] == "anthropic":
+            for key, value in PROVIDER_DEFAULTS.items():
+                raw["provider"].setdefault(key, value)   # resolved here, before anything is hashed or approved
+        return cls(raw)
 
     @property
     def mission_id(self) -> str:
         return self.raw["mission_id"]
+
+    @property
+    def mode(self) -> str:
+        return self.raw.get("mode", "plan")
 
     @property
     def tools(self) -> frozenset[str]:
@@ -209,3 +236,17 @@ def validate_plan(plan: Any, spec: MissionSpec, tool_schemas: dict[str, dict]) -
     if contains_secret(plan):   # plan_json is stored verbatim (its hash is approved), so refuse, not redact
         raise PlanRejected("plan_contains_secret")
     return json.loads(canonical_json(plan))
+
+
+def scope_document(spec: MissionSpec) -> dict:
+    """What an operator approves for an agent mission: the whole authority the loop may use.
+
+    Derived only from the immutable spec, so its hash changes if any capability, path, limit,
+    budget, provider or sandbox setting changes. The loop never receives more than this.
+    """
+    raw = spec.raw
+    return {"schema": SCOPE_SCHEMA_ID, "mission_id": spec.mission_id, "spec_sha256": spec.sha256,
+            "mode": "agent", "objective": raw["objective"], "tools": sorted(spec.tools),
+            "writable": list(spec.writable), "protected": list(spec.protected),
+            "verification": raw["verification"], "budget": raw["budget"], "provider": raw["provider"],
+            "sandbox": raw["sandbox"], "pexisos": raw.get("pexisos")}

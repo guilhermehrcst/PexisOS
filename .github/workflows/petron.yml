@@ -85,3 +85,11 @@ jobs:
         run: |
           python -m petron experiment e001 --approver "ci-harness (GitHub Actions; synthetic fixture; not a human review)"
           python -m petron events verify
+      - name: Reproduce PETRON-E002-A through the CLI (deterministic agent policy; loop mechanics, not cognition)
+        env:
+          PYTHONPATH: apps/petron/src
+          PETRON_HOME: ${{ runner.temp }}/petron-home-e002
+        run: |
+          python -m petron experiment e002 --approver "ci-harness (GitHub Actions; synthetic fixture; not a human review)"
+          python -m petron mission log petron-e002
+          python -m petron events verify

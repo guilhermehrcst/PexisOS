@@ -13,9 +13,13 @@ from typing import Protocol
 
 
 class ProviderError(Exception):
-    def __init__(self, code: str):
+    """A provider failure. ``usage`` carries tokens the failed call is known to have consumed (a
+    refused or truncated response is still billed), so accounting never loses them."""
+
+    def __init__(self, code: str, usage: dict | None = None):
         super().__init__(code)
         self.code = code
+        self.usage = usage
 
 
 @dataclass(frozen=True)

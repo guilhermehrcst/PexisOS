@@ -136,6 +136,21 @@ class DockerEngineTests(unittest.TestCase):
         self.assertTrue(report["sandbox_probe"]["ok"])
         self.assertEqual(report["verification"]["tests"]["exit_code"], 0)
 
+    def test_e002_agent_loop_completes_in_real_sandbox(self):
+        from support import E002, e002_spec
+        source = self.tmp / "e002"
+        shutil.copytree(E002 / "project", source)
+        spec = e002_spec(source)
+        spec["sandbox"] = {"backend": "docker", "image": IMAGE}
+        mission_id = self.engine.create(spec)
+        self.engine.approve(mission_id, self.engine.plan(mission_id), "tester", "unit-test")
+        state = self.engine.run(mission_id)
+        report = build_report(self.engine.store, mission_id)
+        self.assertEqual(state, MissionState.COMPLETED, report["failure_reason"])
+        failures = [t["failures"] for t in report["agent_turns"] if t["tool"] == "run_tests"]
+        self.assertEqual((failures[0], failures[1], failures[-1]), (2, 3, 0))   # measured in the container
+        self.assertEqual(report["verification"]["changed_paths"], ["intervals/merge.py"])
+
     def test_wrong_fix_fails_in_real_sandbox(self):
         mission_id, state = self.mission("e001_wrong_fix")
         self.assertEqual(state, MissionState.FAILED)

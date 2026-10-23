@@ -1,15 +1,21 @@
-# PETRON V0.1 (experimental)
+# PETRON V0.2 (experimental)
 
-Supervised engineering runtime: a provider proposes a plan, a human approves that exact plan,
-a gateway authorizes every step, code runs only in a measured sandbox, and the runtime — not
-the model — verifies the result and records the evidence.
+Supervised engineering runtime. Two mission modes:
+
+- **plan** (V0.1): a provider proposes a static plan; a human approves that exact plan.
+- **agent** (V0.2): a human approves a *scope* (tools, writable paths, limits, budget); inside it
+  the agent decides one action at a time, observes the real result and adapts.
+
+In both, a gateway authorizes every action, code runs only in a measured sandbox, and the
+runtime — not the model — verifies the result and records the evidence.
 
 PETRON is a component of the PexisOS monorepo (`apps/petron/`), operationally independent of
 the PexisOS core (`src/pexislink`): neither imports the other, neither depends on the other.
 The only link is an optional, read-only MCP client of the PexisOS Agent Fabric (synthetic demo
 data). See `docs/adr/ADR-0002-monorepo.md`.
 
-> With the deterministic provider PETRON demonstrates infrastructure, not autonomy.
+> With the deterministic providers PETRON demonstrates infrastructure and loop mechanics, not
+> autonomy. No real-model run has been performed.
 
 ## Quick start (from the repository root)
 
@@ -27,6 +33,24 @@ petron mission run petron-e001
 petron mission report petron-e001
 petron events verify
 ```
+
+Agent mode (V0.2), the adaptive repair experiment:
+
+```bash
+petron experiment e002                     # creates the mission and stops for approval
+petron mission show petron-e002            # inspect the scope: tools, paths, limits
+petron mission approve petron-e002 --scope-sha256 YOUR_SCOPE_SHA256 --approver "your name"   # sha256 from mission show
+petron mission run petron-e002             # prints each turn: decision -> observation (blocks until it ends)
+# While it runs, from other terminals:
+petron mission log petron-e002 --follow    # waits for the mission to end
+petron mission stop petron-e002            # interrupt: ends the container and the loop
+# Afterwards:
+petron mission diff petron-e002
+petron mission list                        # flags interrupted missions
+petron mission resume petron-e002          # continue from the last checkpoint, if safe
+```
+
+Real model (opt-in, costs money): see `docs/experiments/PETRON-E002.md` (E002-B).
 
 Without installing: `PYTHONPATH=apps/petron/src python -m petron …`.
 
@@ -59,4 +83,5 @@ Third-party components and notices: `docs/LICENSING.md`.
 
 Docs: `docs/ARCHITECTURE.md`, `docs/THREAT-MODEL.md`, `docs/adr/`, `docs/PREFLIGHT-2026-10-21.md`
 (historical: written when PETRON was a separate local repository), `docs/MONOREPO-MIGRATION.md`,
-`docs/experiments/PETRON-E001.md`, `docs/LICENSING.md`.
+`docs/experiments/PETRON-E001.md`, `docs/experiments/PETRON-E002.md`, `docs/adr/ADR-0003-agent-loop.md`,
+`docs/LICENSING.md`.

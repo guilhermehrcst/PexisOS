@@ -1,0 +1,485 @@
+{
+  "agent_outcome": {
+    "reason": null,
+    "verify": true
+  },
+  "agent_turns": [
+    {
+      "error": null,
+      "error_class": null,
+      "failures": null,
+      "iteration": 1,
+      "kind": "tool_call",
+      "ok": true,
+      "rationale": "Survey the workspace before acting.",
+      "tool": "list_files",
+      "workspace_changed": false
+    },
+    {
+      "error": null,
+      "error_class": "test_failure",
+      "failures": 2,
+      "iteration": 2,
+      "kind": "tool_call",
+      "ok": false,
+      "rationale": "Reproduce the failure before changing anything.",
+      "tool": "run_tests",
+      "workspace_changed": false
+    },
+    {
+      "error": null,
+      "error_class": null,
+      "failures": null,
+      "iteration": 3,
+      "kind": "tool_call",
+      "ok": true,
+      "rationale": "Read the failing test to see what it exercises.",
+      "tool": "read_file",
+      "workspace_changed": false
+    },
+    {
+      "error": null,
+      "error_class": null,
+      "failures": null,
+      "iteration": 4,
+      "kind": "tool_call",
+      "ok": true,
+      "rationale": "Locate the function under test.",
+      "tool": "search_code",
+      "workspace_changed": false
+    },
+    {
+      "error": null,
+      "error_class": null,
+      "failures": null,
+      "iteration": 5,
+      "kind": "tool_call",
+      "ok": true,
+      "rationale": "Re-read the target before editing it.",
+      "tool": "read_file",
+      "workspace_changed": false
+    },
+    {
+      "error": null,
+      "error_class": null,
+      "failures": null,
+      "iteration": 6,
+      "kind": "tool_call",
+      "ok": true,
+      "rationale": "Hypothesis: decoy: drop the max() (failures now: 2).",
+      "tool": "replace_in_file",
+      "workspace_changed": true
+    },
+    {
+      "error": null,
+      "error_class": "test_failure",
+      "failures": 3,
+      "iteration": 7,
+      "kind": "tool_call",
+      "ok": false,
+      "rationale": "Measure the effect of: decoy: drop the max().",
+      "tool": "run_tests",
+      "workspace_changed": false
+    },
+    {
+      "error": null,
+      "error_class": null,
+      "failures": null,
+      "iteration": 8,
+      "kind": "tool_call",
+      "ok": true,
+      "rationale": "Re-read the target before editing it.",
+      "tool": "read_file",
+      "workspace_changed": false
+    },
+    {
+      "error": null,
+      "error_class": null,
+      "failures": null,
+      "iteration": 9,
+      "kind": "tool_call",
+      "ok": true,
+      "rationale": "'decoy: drop the max()' did not reduce failures (2 -> 3); revert it.",
+      "tool": "replace_in_file",
+      "workspace_changed": true
+    },
+    {
+      "error": null,
+      "error_class": "test_failure",
+      "failures": 2,
+      "iteration": 10,
+      "kind": "tool_call",
+      "ok": false,
+      "rationale": "Re-measure the baseline after the revert.",
+      "tool": "run_tests",
+      "workspace_changed": false
+    },
+    {
+      "error": null,
+      "error_class": null,
+      "failures": null,
+      "iteration": 11,
+      "kind": "tool_call",
+      "ok": true,
+      "rationale": "Re-read the target before editing it.",
+      "tool": "read_file",
+      "workspace_changed": false
+    },
+    {
+      "error": null,
+      "error_class": null,
+      "failures": null,
+      "iteration": 12,
+      "kind": "tool_call",
+      "ok": true,
+      "rationale": "Hypothesis: sort the input first (failures now: 2).",
+      "tool": "replace_in_file",
+      "workspace_changed": true
+    },
+    {
+      "error": null,
+      "error_class": "test_failure",
+      "failures": 1,
+      "iteration": 13,
+      "kind": "tool_call",
+      "ok": false,
+      "rationale": "Measure the effect of: sort the input first.",
+      "tool": "run_tests",
+      "workspace_changed": false
+    },
+    {
+      "error": null,
+      "error_class": null,
+      "failures": null,
+      "iteration": 14,
+      "kind": "tool_call",
+      "ok": true,
+      "rationale": "Re-read the target before editing it.",
+      "tool": "read_file",
+      "workspace_changed": false
+    },
+    {
+      "error": null,
+      "error_class": null,
+      "failures": null,
+      "iteration": 15,
+      "kind": "tool_call",
+      "ok": true,
+      "rationale": "Hypothesis: closed intervals touch (failures now: 1).",
+      "tool": "replace_in_file",
+      "workspace_changed": true
+    },
+    {
+      "error": null,
+      "error_class": null,
+      "failures": 0,
+      "iteration": 16,
+      "kind": "tool_call",
+      "ok": true,
+      "rationale": "Measure the effect of: closed intervals touch.",
+      "tool": "run_tests",
+      "workspace_changed": false
+    },
+    {
+      "error": null,
+      "error_class": null,
+      "failures": null,
+      "iteration": 17,
+      "kind": "request_verification",
+      "ok": true,
+      "rationale": "Tests pass; ask the runtime to verify.",
+      "tool": null,
+      "workspace_changed": false
+    },
+    {
+      "error": null,
+      "error_class": null,
+      "failures": null,
+      "iteration": 18,
+      "kind": "conclude",
+      "ok": true,
+      "rationale": "Runtime verification passed on this state.",
+      "tool": null,
+      "workspace_changed": false
+    }
+  ],
+  "approvals": [
+    {
+      "approver": "e002-harness (Claude Code agent; synthetic fixture; not a human review)",
+      "channel": "cli",
+      "plan_sha256": "f932e88d28254f41dcdd53df8a32ce00a657a84098bf8f643165f8650bb123a4"
+    }
+  ],
+  "baseline_tests": {
+    "exit_code": 1,
+    "timed_out": false
+  },
+  "diff": "--- a/intervals/merge.py\n+++ b/intervals/merge.py\n@@ -4,8 +4,8 @@\n def merge(intervals):\n     \"\"\"Merge overlapping or touching closed intervals given as (start, end) pairs.\"\"\"\n     result = []\n-    for start, end in intervals:\n-        if result and start < result[-1][1]:\n+    for start, end in sorted(intervals):\n+        if result and start <= result[-1][1]:\n             result[-1][1] = max(result[-1][1], end)\n         else:\n             result.append([start, end])\n",
+  "diff_sha256": "fcdf3fe8084e08f69e4149d842961a51f02edd6013712b33477741b27a2b6015",
+  "event_chain": {
+    "first_bad_seq": null,
+    "ok": true
+  },
+  "event_count": 87,
+  "execution_disabled": [],
+  "failure_reason": null,
+  "final_state": "completed",
+  "mission_id": "petron-e002",
+  "mode": "agent",
+  "notice": "SIMULATED PROVIDER: decisions came from a deterministic policy that branches on real observations but whose repair hypotheses were written in advance. This run demonstrates the agent loop (decide, act, observe, adapt, verify), not autonomous reasoning.",
+  "objective": "Synthetic fixture: the test suite of this small Python project fails. Find the cause and fix the implementation so the existing tests pass. The tests are protected and must not be changed.",
+  "plan_sha256": "f932e88d28254f41dcdd53df8a32ce00a657a84098bf8f643165f8650bb123a4",
+  "plan_steps": [],
+  "provider": {
+    "model": null,
+    "policy": "e002_adaptive",
+    "provider": "deterministic",
+    "simulated": true
+  },
+  "resumed": [],
+  "sandbox_probe": {
+    "backend": "docker",
+    "checks": {
+      "cpu_limited": true,
+      "daemon_seccomp": true,
+      "egress_blocked": true,
+      "empty_bounding_set": true,
+      "image_present_pinned": true,
+      "intrinsic_deadline_available": true,
+      "loopback_only": true,
+      "memory_limited": true,
+      "no_docker_socket": true,
+      "no_effective_capabilities": true,
+      "no_new_privileges": true,
+      "no_permitted_capabilities": true,
+      "non_root_uid": true,
+      "only_expected_env": true,
+      "pids_limited": true,
+      "root_fs_read_only": true,
+      "seccomp_filter_active": true,
+      "workspace_read_only": true
+    },
+    "info": {
+      "image_env_names": [
+        "GPG_KEY",
+        "LANG",
+        "PATH",
+        "PYTHON_SHA256",
+        "PYTHON_VERSION"
+      ],
+      "inside": {
+        "cap_bnd": "0000000000000000",
+        "cap_eff": "0000000000000000",
+        "cap_prm": "0000000000000000",
+        "cpu_cfs": [
+          "100000",
+          "100000"
+        ],
+        "cpu_max": null,
+        "docker_socket": false,
+        "egress": "blocked",
+        "env_names": [
+          "GPG_KEY",
+          "HOME",
+          "HOSTNAME",
+          "LANG",
+          "PATH",
+          "PYTHONDONTWRITEBYTECODE",
+          "PYTHON_SHA256",
+          "PYTHON_VERSION"
+        ],
+        "gid": 65534,
+        "has_timeout": true,
+        "interfaces": [
+          "lo"
+        ],
+        "memory_max": "268435456",
+        "no_new_privs": "1",
+        "pids_max": "64",
+        "root_writable": false,
+        "seccomp": "2",
+        "uid": 65534,
+        "work_writable": false
+      },
+      "rootless": false,
+      "security_options": [
+        "name=seccomp,profile=builtin"
+      ],
+      "server_version": "29.8.2"
+    },
+    "ok": true,
+    "reason": null
+  },
+  "schema": "petron.report.v0",
+  "simulated_provider": true,
+  "spec_sha256": "d1338cde2656183c7b6adb9ca18dd0b8fad2ab733547b090c475d28578d2d27d",
+  "states": [
+    [
+      "created",
+      "planning",
+      null
+    ],
+    [
+      "planning",
+      "awaiting_approval",
+      null
+    ],
+    [
+      "awaiting_approval",
+      "running",
+      null
+    ],
+    [
+      "running",
+      "verifying",
+      null
+    ],
+    [
+      "verifying",
+      "completed",
+      null
+    ]
+  ],
+  "step_outcomes": [],
+  "tool_decisions": [
+    {
+      "args_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+      "call": 1,
+      "decision": "allow",
+      "effect": "read",
+      "tool": "list_files"
+    },
+    {
+      "args_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+      "call": 2,
+      "decision": "allow",
+      "effect": "execute",
+      "tool": "run_tests"
+    },
+    {
+      "args_sha256": "be52ade5b1b4ab3e1ac2130f384d3d0d7b00738c656fe14c28dc93de9069097c",
+      "call": 3,
+      "decision": "allow",
+      "effect": "read",
+      "tool": "read_file"
+    },
+    {
+      "args_sha256": "94810330244ac47be08224df891dd8e55069f2ac35efa87d2d59b8c153399eed",
+      "call": 4,
+      "decision": "allow",
+      "effect": "read",
+      "tool": "search_code"
+    },
+    {
+      "args_sha256": "b9795d4b59f6c845b8833830eda36fc6eb5ad3b74e6c1ba089e7cc463167029f",
+      "call": 5,
+      "decision": "allow",
+      "effect": "read",
+      "tool": "read_file"
+    },
+    {
+      "args_sha256": "f513b517de57c39f7509aa9dbaf025e9d753ae69ace364049e133d6ddea50a5a",
+      "call": 6,
+      "decision": "allow",
+      "effect": "write_workspace",
+      "tool": "replace_in_file"
+    },
+    {
+      "args_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+      "call": 7,
+      "decision": "allow",
+      "effect": "execute",
+      "tool": "run_tests"
+    },
+    {
+      "args_sha256": "b9795d4b59f6c845b8833830eda36fc6eb5ad3b74e6c1ba089e7cc463167029f",
+      "call": 8,
+      "decision": "allow",
+      "effect": "read",
+      "tool": "read_file"
+    },
+    {
+      "args_sha256": "a8c073ff5e1bbd83d939550f6ff82997c77f096115d0ce5acfc5752c3e5bb1c0",
+      "call": 9,
+      "decision": "allow",
+      "effect": "write_workspace",
+      "tool": "replace_in_file"
+    },
+    {
+      "args_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+      "call": 10,
+      "decision": "allow",
+      "effect": "execute",
+      "tool": "run_tests"
+    },
+    {
+      "args_sha256": "b9795d4b59f6c845b8833830eda36fc6eb5ad3b74e6c1ba089e7cc463167029f",
+      "call": 11,
+      "decision": "allow",
+      "effect": "read",
+      "tool": "read_file"
+    },
+    {
+      "args_sha256": "3d71dea4bb4056ccddef4ef6c3637a80e438d757779b88f586847fd756f784bf",
+      "call": 12,
+      "decision": "allow",
+      "effect": "write_workspace",
+      "tool": "replace_in_file"
+    },
+    {
+      "args_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+      "call": 13,
+      "decision": "allow",
+      "effect": "execute",
+      "tool": "run_tests"
+    },
+    {
+      "args_sha256": "b9795d4b59f6c845b8833830eda36fc6eb5ad3b74e6c1ba089e7cc463167029f",
+      "call": 14,
+      "decision": "allow",
+      "effect": "read",
+      "tool": "read_file"
+    },
+    {
+      "args_sha256": "af109774adec9b847f5b81cf085b4982f4f8efd243ec3ec797204d3b4e9c6296",
+      "call": 15,
+      "decision": "allow",
+      "effect": "write_workspace",
+      "tool": "replace_in_file"
+    },
+    {
+      "args_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+      "call": 16,
+      "decision": "allow",
+      "effect": "execute",
+      "tool": "run_tests"
+    }
+  ],
+  "usage": {
+    "input_tokens": 0,
+    "model_calls": 0,
+    "output_tokens": 0
+  },
+  "verification": {
+    "changed_paths": [
+      "intervals/merge.py"
+    ],
+    "checks": {
+      "changes_within_writable_paths": true,
+      "event_chain_intact": true,
+      "protected_paths_unchanged": true,
+      "source_tree_unchanged": true,
+      "tests_pass_in_sandbox": true
+    },
+    "diff_sha256": "fcdf3fe8084e08f69e4149d842961a51f02edd6013712b33477741b27a2b6015",
+    "protected_paths": [
+      "tests/__init__.py",
+      "tests/test_merge.py"
+    ],
+    "tests": {
+      "exit_code": 0,
+      "ran": true,
+      "timed_out": false
+    }
+  }
+}

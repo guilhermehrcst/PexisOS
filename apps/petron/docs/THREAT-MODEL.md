@@ -39,6 +39,21 @@ with an optional real model provider and an optional read-only PexisOS connector
 | Terminal injection through reports | Untrusted text (diff, objective, reasons) is rendered with control, C1 and bidi characters escaped; the diff fence outgrows any backtick run | The stored artifact keeps the raw text | Visible escapes instead of effects |
 | Real model used without consent or credit | Needs `--allow-real-model`, `ANTHROPIC_API_KEY`, and a model-call budget; explicit `base_url` | `provider.call` events counted against the budget | `provider_error:*` |
 
+### V0.2 agent loop
+
+| Hazard | Prevention | Detection / containment | Safe state |
+|---|---|---|---|
+| Model claims success | `conclude` accepted only after a passing runtime verification on the same workspace state | final V0.1 verification runs again | `verification_required` observation; mission cannot complete |
+| Model fabricates tool results or grants itself permissions | closed decision schema (no result/permission fields) | invalid decisions counted | `limit:invalid_decisions` |
+| Endless or repetitive loop | iteration, tool-call, model-call and token limits | any identical decision on an unchanged workspace refused after two runs | `limit:*` |
+| Real model spends beyond the approved budget | a real-provider agent mission must carry `max_total_tokens`; before each request the provider reserves a hard upper bound of the input (UTF-8 bytes, so it cannot be under-counted) and caps `max_tokens` to what remains; SDK retries are disabled so one decision is one HTTP attempt | a request that cannot fit is refused without being sent; failed, refused and truncated attempts are counted with their billed usage | `provider_error:token_budget_insufficient` / `limit:max_total_tokens` |
+| Approved settings drift (defaults change after approval) | model, effort and `max_tokens` are resolved into the spec before the scope hash; factories refuse an unresolved block | the provider about to be used must equal the approved scope's settings | `provider_settings_changed` / `spec_integrity` |
+| Cancel loses to a slow model answer | the operator's cancel is checked right after every provider answer and before any verification, conclusion or tool | the sandbox polls the cancel state and kills its container | `agent.decision_discarded`; nothing starts |
+| Widened scope after approval | scope stored write-once, approval bound to its hash | scope recomputed from the spec at run time | `approval_missing` / `plan_integrity` |
+| Two runners on one mission | compare-and-set transitions; a per-run lease token (not the pid) taken atomically, so two runners in one process exclude each other; a reused pid is told apart by process start time | each loop turn re-checks that it still owns the lease | `lease_held` / the superseded runner stops (`lease_lost`) without failing the new owner's mission |
+| Resume repeats an unknown effect or trusts damaged state | resume only from committed state: an intact event chain, a checkpoint for every recorded turn, baseline and working trees as recorded | a crash during final verification is finished idempotently (artifacts reused or kept side by side) | `resume_refused:event_chain_broken` / `uncheckpointed_turn` / `baseline_diverged` / `workspace_diverged` |
+| Silent model substitution | plain Messages API, no fallback option | refusal recorded | `provider_error:model_refusal` |
+
 ### Independence of barriers
 
 - Plan validation and gateway authorization share one premise (the spec's tool list), so they

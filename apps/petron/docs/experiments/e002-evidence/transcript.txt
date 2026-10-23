@@ -1,0 +1,129 @@
+$ petron experiment e002
+{
+  "mission_id": "petron-e002",
+  "next": [
+    "petron mission show petron-e002",
+    "petron mission approve petron-e002 --scope-sha256 f932e88d28254f41dcdd53df8a32ce00a657a84098bf8f643165f8650bb123a4 --approver NAME",
+    "petron mission run petron-e002"
+  ],
+  "scope_sha256": "f932e88d28254f41dcdd53df8a32ce00a657a84098bf8f643165f8650bb123a4",
+  "state": "awaiting_approval"
+}
+[exit 0]
+$ petron mission run petron-e002
+error: approval_missing
+[exit 2]
+$ petron mission show petron-e002
+{
+  "created_at": "2026-10-23T04:39:31.136191Z",
+  "failure_reason": null,
+  "mission_id": "petron-e002",
+  "mode": "agent",
+  "scope": {
+    "budget": {
+      "exec_timeout_s": 60,
+      "max_iterations": 24,
+      "max_model_calls": 0,
+      "max_steps": 1,
+      "max_tool_calls": 30
+    },
+    "mission_id": "petron-e002",
+    "mode": "agent",
+    "objective": "Synthetic fixture: the test suite of this small Python project fails. Find the cause and fix the implementation so the existing tests pass. The tests are protected and must not be changed.",
+    "pexisos": null,
+    "protected": [
+      "tests"
+    ],
+    "provider": {
+      "kind": "deterministic",
+      "script": "e002_adaptive"
+    },
+    "sandbox": {
+      "backend": "docker",
+      "image": "mirror.gcr.io/library/python@sha256:cce12316475d7d56d605f76e1d811d0dc4e7227f2d4afd29951521264f504ff8"
+    },
+    "schema": "petron.scope.v0",
+    "spec_sha256": "d1338cde2656183c7b6adb9ca18dd0b8fad2ab733547b090c475d28578d2d27d",
+    "tools": [
+      "list_files",
+      "read_file",
+      "replace_in_file",
+      "run_tests",
+      "search_code",
+      "show_diff"
+    ],
+    "verification": {
+      "command": "python-unittest"
+    },
+    "writable": [
+      "intervals/merge.py"
+    ]
+  },
+  "scope_sha256": "f932e88d28254f41dcdd53df8a32ce00a657a84098bf8f643165f8650bb123a4",
+  "state": "awaiting_approval"
+}
+[exit 0]
+$ petron mission approve petron-e002 --scope-sha256 f932e88d28254f41dcdd53df8a32ce00a657a84098bf8f643165f8650bb123a4 --approver 'e002-harness (Claude Code agent; synthetic fixture; not a human review)'
+{
+  "approved": "f932e88d28254f41dcdd53df8a32ce00a657a84098bf8f643165f8650bb123a4",
+  "mission_id": "petron-e002"
+}
+[exit 0]
+$ petron mission run petron-e002
+     state created -> planning
+     state planning -> awaiting_approval
+     state awaiting_approval -> running
+[01] tool_call list_files         -> ok  | Survey the workspace before acting.
+[02] tool_call run_tests          -> test_failure [tests 6, failures 2]  | Reproduce the failure before changing anything.
+[03] tool_call read_file          -> ok  | Read the failing test to see what it exercises.
+[04] tool_call search_code        -> ok  | Locate the function under test.
+[05] tool_call read_file          -> ok  | Re-read the target before editing it.
+[06] tool_call replace_in_file    -> ok [workspace changed]  | Hypothesis: decoy: drop the max() (failures now: 2).
+[07] tool_call run_tests          -> test_failure [tests 6, failures 3]  | Measure the effect of: decoy: drop the max().
+[08] tool_call read_file          -> ok  | Re-read the target before editing it.
+[09] tool_call replace_in_file    -> ok [workspace changed]  | 'decoy: drop the max()' did not reduce failures (2 -> 3); revert it.
+[10] tool_call run_tests          -> test_failure [tests 6, failures 2]  | Re-measure the baseline after the revert.
+[11] tool_call read_file          -> ok  | Re-read the target before editing it.
+[12] tool_call replace_in_file    -> ok [workspace changed]  | Hypothesis: sort the input first (failures now: 2).
+[13] tool_call run_tests          -> test_failure [tests 6, failures 1]  | Measure the effect of: sort the input first.
+[14] tool_call read_file          -> ok  | Re-read the target before editing it.
+[15] tool_call replace_in_file    -> ok [workspace changed]  | Hypothesis: closed intervals touch (failures now: 1).
+[16] tool_call run_tests          -> ok [tests 6, failures 0]  | Measure the effect of: closed intervals touch.
+[17] request_verification         -> ok  | Tests pass; ask the runtime to verify.
+[18] conclude                     -> ok  | Runtime verification passed on this state.
+     state running -> verifying
+     state verifying -> completed
+{
+  "failure_reason": null,
+  "mission_id": "petron-e002",
+  "state": "completed"
+}
+[exit 0]
+$ petron mission diff petron-e002
+--- a/intervals/merge.py
++++ b/intervals/merge.py
+@@ -4,8 +4,8 @@
+ def merge(intervals):
+     """Merge overlapping or touching closed intervals given as (start, end) pairs."""
+     result = []
+-    for start, end in intervals:
+-        if result and start < result[-1][1]:
++    for start, end in sorted(intervals):
++        if result and start <= result[-1][1]:
+             result[-1][1] = max(result[-1][1], end)
+         else:
+             result.append([start, end])
+[exit 0]
+$ petron events verify
+{
+  "chain_ok": true,
+  "first_bad_seq": null,
+  "note": "unkeyed hash chain: detects accidental damage, edits and deletions in the middle, and (via the local anchor file, or a head you recorded elsewhere) truncation of the newest events. It is not tamper-proof: whoever can rewrite the database and the anchor can recompute everything. Record `petron events head` somewhere independent and pass it back with --expect-head."
+}
+[exit 0]
+$ petron mission report petron-e002
+(written to report.md)
+[exit 0]
+$ petron mission report petron-e002 --format json
+(written to report.json)
+[exit 0]

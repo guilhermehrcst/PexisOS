@@ -206,31 +206,71 @@ class Workspace:
     def read_text(self, rel: str, limit: int = 64 * 1024) -> str:
         return _read_regular(self.resolve(rel), limit).decode("utf-8", errors="replace")
 
-    def replace_once(self, rel: str, old: str, new: str) -> None:
+    def file_sha256(self, rel: str) -> str:
+        return hashlib.sha256(self.read_text(rel, limit=MAX_FILE_BYTES).encode()).hexdigest()
+
+    def read_lines(self, rel: str, start: int | None = None, end: int | None = None,
+                   limit: int = 64 * 1024) -> dict:
+        """A file (or a 1-based inclusive line range) plus the whole file's sha256 for atomic edits."""
+        text = self.read_text(rel, limit=MAX_FILE_BYTES)
+        lines = text.splitlines(keepends=True)
+        first = max(1, start or 1)
+        last = min(len(lines), end or len(lines))
+        if first > max(last, 1) and lines:
+            raise WorkspaceError("invalid_line_range")
+        content = "".join(lines[first - 1:last])
+        truncated = len(content) > limit
+        return {"path": rel, "content": content[:limit], "truncated": truncated, "start_line": first,
+                "end_line": last, "total_lines": len(lines), "sha256": hashlib.sha256(text.encode()).hexdigest()}
+
+    def search(self, pattern: str, prefix: str | None = None, max_results: int = 20) -> dict:
+        """Literal (non-regex) substring search over UTF-8 files; bounded output."""
+        if prefix:
+            self.resolve(prefix.rstrip("/"))  # same confinement rules as every other path
+        matches, files_scanned, truncated = [], 0, False
+        for rel in self.list_files():
+            if prefix and not (rel == prefix.rstrip("/") or rel.startswith(prefix.rstrip("/") + "/")):
+                continue
+            files_scanned += 1
+            try:
+                text = _read_regular(self.root / rel).decode("utf-8")
+            except (UnicodeDecodeError, WorkspaceError):
+                continue
+            for number, line in enumerate(text.splitlines(), 1):
+                if pattern in line:
+                    if len(matches) >= max_results:
+                        truncated = True
+                        break
+                    matches.append({"path": rel, "line": number, "text": line[:300]})
+            if truncated:
+                break
+        return {"pattern": pattern, "matches": matches, "truncated": truncated, "files_scanned": files_scanned}
+
+    def replace_once(self, rel: str, old: str, new: str, expected_sha256: str | None = None) -> str:
+        """Replace exactly one occurrence; refuse if the file changed since ``expected_sha256``.
+        Returns the new file sha256."""
         path = self.resolve(rel)
         try:
-            text = _read_regular(path).decode("utf-8")
+            text = _read_regular(path).decode("utf-8")   # no-follow open; the type is checked on the descriptor
         except UnicodeDecodeError:
             raise WorkspaceError("not_utf8") from None
+        if expected_sha256 is not None and hashlib.sha256(text.encode()).hexdigest() != expected_sha256:
+            raise WorkspaceError("stale_file_version")
         count = text.count(old)
         if count != 1:
             raise WorkspaceError("old_text_not_unique" if count else "old_text_not_found")
         updated = text.replace(old, new, 1).encode()
         if len(updated) > MAX_FILE_BYTES:
             raise WorkspaceError("file_too_large")
+        temporary = path.with_name(f".{path.name}.petron-tmp")
         try:
-            fd = os.open(path, os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW | _O_CLOEXEC)
-        except OSError:
-            raise WorkspaceError("symlink_path") from None
-        try:
-            if not stat.S_ISREG(os.fstat(fd).st_mode):
-                raise WorkspaceError("not_a_file")
-            view = memoryview(updated)
-            while view:
-                view = view[os.write(fd, view):]
-        finally:
-            os.close(fd)
-        os.chmod(path, 0o644)
+            temporary.unlink()           # a leftover from an interrupted edit (never followed: it is unlinked)
+        except FileNotFoundError:
+            pass
+        _write_new(temporary, updated)   # O_EXCL | O_NOFOLLOW: cannot be pre-planted as a symlink
+        os.chmod(temporary, 0o644)
+        os.replace(temporary, path)      # atomic; replaces a symlink at ``path`` rather than following it
+        return hashlib.sha256(updated).hexdigest()
 
 
 def _lines(root: Path, rel: str) -> list[str]:

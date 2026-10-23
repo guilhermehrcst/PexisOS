@@ -1,0 +1,16 @@
+{
+  "schema": "petron.mission.v0",
+  "mission_id": "petron-e002",
+  "mode": "agent",
+  "objective": "Synthetic fixture: the test suite of this small Python project fails. Find the cause and fix the implementation so the existing tests pass. The tests are protected and must not be changed.",
+  "workspace": {
+    "source": "project",
+    "writable": ["intervals/merge.py"],
+    "protected": ["tests"]
+  },
+  "permissions": {"tools": ["list_files", "search_code", "read_file", "replace_in_file", "run_tests", "show_diff"]},
+  "verification": {"command": "python-unittest"},
+  "budget": {"max_steps": 1, "max_tool_calls": 30, "max_model_calls": 0, "exec_timeout_s": 60, "max_iterations": 24},
+  "provider": {"kind": "deterministic", "script": "e002_adaptive"},
+  "sandbox": {"backend": "docker", "image": "mirror.gcr.io/library/python@sha256:cce12316475d7d56d605f76e1d811d0dc4e7227f2d4afd29951521264f504ff8"}
+}

@@ -128,7 +128,9 @@ class ProviderRequestTests(HardeningCase):
     class FakeClient:
         def __init__(self):
             self.calls = []
-            self.beta = types.SimpleNamespace(messages=types.SimpleNamespace(create=self._create))
+            namespace = types.SimpleNamespace(create=self._create)
+            self.messages = namespace                       # plan provider (V0.2: client.messages)
+            self.beta = types.SimpleNamespace(messages=namespace)  # and the beta namespace (V0.1)
 
         def _create(self, **kwargs):
             self.calls.append(kwargs)

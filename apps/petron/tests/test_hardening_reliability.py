@@ -119,8 +119,9 @@ class RetryAccountingTests(unittest.TestCase):
         calls = []
 
         class Client:
-            beta = types.SimpleNamespace(messages=types.SimpleNamespace(
-                create=lambda **kw: (calls.append(kw), (_ for _ in ()).throw(TimeoutError("slow")))[1]))
+            messages = types.SimpleNamespace(
+                create=lambda **kw: (calls.append(kw), (_ for _ in ()).throw(TimeoutError("slow")))[1])
+            beta = types.SimpleNamespace(messages=messages)
         from petron.providers.base import PlanRequest, ProviderError
         request = PlanRequest("m", "Fix it", {"run_tests": {"effect": "execute", "description": "d",
                                                             "input_schema": {}}}, {}, (), (), 2)
