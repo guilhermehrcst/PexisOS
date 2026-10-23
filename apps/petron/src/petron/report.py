@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 
+from .redact import redact
 from .store import Store
 
 SIMULATED_NOTICE = ("SIMULATED PROVIDER: the plan came from a deterministic script. This run demonstrates "
@@ -22,7 +23,7 @@ def build_report(store: Store, mission_id: str) -> dict:
     simulated = bool(provider and provider.get("simulated"))
     chain_ok, bad_seq = store.verify_chain()
     diff = store.artifact(mission_id, "diff.patch")
-    return {
+    return redact({
         "schema": "petron.report.v0",
         "mission_id": mission_id,
         "objective": json.loads(mission["spec_json"])["objective"],
@@ -46,7 +47,7 @@ def build_report(store: Store, mission_id: str) -> dict:
         "diff": diff["content"] if diff else None,
         "event_count": len(events),
         "event_chain": {"ok": chain_ok, "first_bad_seq": bad_seq},
-    }
+    })   # redacted again on the way out: rows written by older versions may hold plaintext
 
 
 def render_markdown(report: dict) -> str:

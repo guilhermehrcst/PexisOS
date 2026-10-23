@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Any
 
+from .redact import contains_secret
 from .schema import SchemaError, closed_object, validate
 
 SPEC_SCHEMA_ID = "petron.mission.v0"
@@ -205,4 +206,6 @@ def validate_plan(plan: Any, spec: MissionSpec, tool_schemas: dict[str, dict]) -
             validate(tool_schemas[tool], step["args"])
         except SchemaError as error:
             raise PlanRejected(f"invalid_arguments:{index}:{error.path}") from None
+    if contains_secret(plan):   # plan_json is stored verbatim (its hash is approved), so refuse, not redact
+        raise PlanRejected("plan_contains_secret")
     return json.loads(canonical_json(plan))

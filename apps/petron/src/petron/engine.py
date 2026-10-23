@@ -23,7 +23,7 @@ from .mission import (VERIFICATION_COMMANDS, MissionSpec, MissionState, PlanReje
                       sha256_json, validate_plan)
 from .providers import ProviderError, build_provider
 from .providers.base import PlanRequest
-from .redact import redact_text
+from .redact import contains_secret, redact_text
 from .sandbox import DisabledSandbox, DockerSandbox, SandboxUnavailable
 from .store import Store, StoreError, utc_now
 from .tools import BUILTIN_TOOLS, Gateway, MissionContext, tool_schemas
@@ -68,6 +68,8 @@ class Engine:
     # create / plan ------------------------------------------------------------------------
     def create(self, data: Any) -> str:
         spec = MissionSpec.parse(data)
+        if contains_secret(spec.raw):   # reject before persistence; the message never echoes the value
+            raise EngineError("secret_in_spec")
         source = Path(spec.raw["workspace"]["source"])
         if not source.is_absolute() or not source.is_dir():
             raise EngineError("workspace_source_invalid")

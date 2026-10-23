@@ -23,7 +23,7 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 
 from .mission import TRANSITIONS, MissionSpec, MissionState, canonical_json, check_transition
-from .redact import redact
+from .redact import contains_secret, redact
 
 GENESIS = "0" * 64
 
@@ -158,6 +158,10 @@ class Store:
 
     # missions -----------------------------------------------------------------------------
     def create_mission(self, spec: MissionSpec) -> None:
+        # Second barrier (the engine checks first): a recognizable credential is never written to
+        # missions.spec_json, which every report and `mission show` reads back.
+        if contains_secret(spec.raw):
+            raise StoreError("secret_in_spec")
         now = self.clock()
         with self._tx() as db:
             if db.execute("SELECT 1 FROM missions WHERE mission_id = ?", (spec.mission_id,)).fetchone():
@@ -210,6 +214,8 @@ class Store:
 
     # approvals ----------------------------------------------------------------------------
     def record_approval(self, mission_id: str, plan_sha256: str, approver: str, channel: str) -> None:
+        if contains_secret([approver, channel]):
+            raise StoreError("secret_in_approval")
         with self._tx() as db:
             row = db.execute("SELECT state, plan_sha256 FROM missions WHERE mission_id = ?", (mission_id,)).fetchone()
             if row is None:

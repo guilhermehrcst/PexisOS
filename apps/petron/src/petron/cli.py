@@ -24,6 +24,7 @@ from pathlib import Path
 
 from .engine import Engine, EngineError
 from .mission import MissionState
+from .redact import redact
 from .report import build_report, render_markdown
 from .schema import SchemaError
 from .store import StoreError
@@ -83,7 +84,7 @@ def _mission(args, engine: Engine) -> int:
     elif args.action == "show":
         row = engine.store.mission(args.target)
         _print({**{k: row[k] for k in ("mission_id", "state", "plan_sha256", "failure_reason", "created_at")},
-                "plan": json.loads(row["plan_json"]) if row["plan_json"] else None})
+                "plan": redact(json.loads(row["plan_json"])) if row["plan_json"] else None})
     elif args.action == "report":
         report = build_report(engine.store, args.target)
         print(render_markdown(report) if args.format == "md" else json.dumps(report, indent=2, sort_keys=True))
