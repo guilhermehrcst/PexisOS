@@ -162,6 +162,9 @@ class Engine:
         except StoreError:
             pass  # someone else (e.g. a cancel) moved the mission first; their state stands
 
+    def _cancelled(self, mission_id: str) -> Callable[[], bool]:
+        return lambda: self.store.state(mission_id) is S.CANCELLED
+
     def run(self, mission_id: str) -> MissionState:
         row = self.store.mission(mission_id)
         spec = self.store.spec(mission_id)
@@ -199,7 +202,8 @@ class Engine:
             self.store.append_event(mission_id, "workspace.created", {"tree_sha256": approved_tree})
             argv = VERIFICATION_COMMANDS[spec.raw["verification"]["command"]]
             if probe.ok:
-                baseline = sandbox.run(base.root, argv, spec.budget["exec_timeout_s"])
+                baseline = sandbox.run(base.root, argv, spec.budget["exec_timeout_s"],
+                                       cancelled=self._cancelled(mission_id))
                 self.store.append_event(mission_id, "verification.baseline",
                                         {"exit_code": baseline.exit_code, "timed_out": baseline.timed_out})
                 self.store.put_artifact(mission_id, "tests.before.txt", baseline.stdout + baseline.stderr)
@@ -236,7 +240,8 @@ class Engine:
         tests: dict[str, Any] = {"ran": False}
         if isolation_ok:
             try:
-                result = sandbox.run(work.root, argv, spec.budget["exec_timeout_s"])
+                result = sandbox.run(work.root, argv, spec.budget["exec_timeout_s"],
+                                     cancelled=self._cancelled(mission_id))
                 tests = {"ran": True, "exit_code": result.exit_code, "timed_out": result.timed_out}
                 self.store.put_artifact(mission_id, "tests.after.txt", result.stdout + result.stderr)
                 checks["tests_pass_in_sandbox"] = result.exit_code == 0 and not result.timed_out

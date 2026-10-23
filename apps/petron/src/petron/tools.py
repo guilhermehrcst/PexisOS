@@ -78,7 +78,9 @@ def _replace_in_file(ctx: MissionContext, args: dict) -> dict:
 
 def _run_tests(ctx: MissionContext, args: dict) -> dict:
     argv = VERIFICATION_COMMANDS[ctx.spec.raw["verification"]["command"]]
-    return ctx.sandbox.run(ctx.workspace.root, argv, ctx.spec.budget["exec_timeout_s"]).to_dict()
+    # An operator's cancel reaches the running container, not just the state column.
+    cancelled = lambda: ctx.store.state(ctx.spec.mission_id) is MissionState.CANCELLED  # noqa: E731
+    return ctx.sandbox.run(ctx.workspace.root, argv, ctx.spec.budget["exec_timeout_s"], cancelled=cancelled).to_dict()
 
 
 def _fabric(name: str) -> Callable[[MissionContext, dict], dict]:
