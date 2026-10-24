@@ -255,7 +255,9 @@ class AssetTests(unittest.TestCase):
         brain = (BRAIN_DIR / "brain.js").read_text()
         index = (BRAIN_DIR / "index.html").read_text()
         self.assertIn("const PALETTES = Object.freeze(['adaptive', 'spectrum', 'mono']);", brain)
-        self.assertIn("PALETTES.includes(requested) ? requested : 'adaptive'", brain)   # default adaptive
+        # default adaptive; a page may declare another default. The behavior itself is run in Node by
+        # test_brain_palette.py, so this line only guards that the fallback is still adaptive.
+        self.assertIn("PALETTES.includes(declared) ? declared : 'adaptive'", brain)
         for state in ("idle", "listening", "thinking", "working", "verifying", "awaiting_approval",
                       "success", "error", "disconnected", "confirming"):
             self.assertRegex(brain, rf"\n    {state}: (tone\(|SPECTRUM)", state)        # every mode has a look

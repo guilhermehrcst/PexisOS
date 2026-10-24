@@ -98,7 +98,10 @@
   });
   const canonical = (value) => (value === 'state' ? 'adaptive' : value);
   const requested = canonical(new URLSearchParams(window.location.search).get('palette'));
-  let palette = PALETTES.includes(requested) ? requested : 'adaptive';
+  // A page may declare its own default (<meta name="petron-palette" content="spectrum">), for a host that
+  // has no runtime to drive the adaptive colors. ?palette= still wins; with neither, the default is adaptive.
+  const declared = canonical((document.querySelector('meta[name="petron-palette"]') || {}).content);
+  let palette = PALETTES.includes(requested) ? requested : PALETTES.includes(declared) ? declared : 'adaptive';
   const lookFor = () => (palette === 'mono' ? MONOCHROME : palette === 'spectrum' ? SPECTRUM : ADAPTIVE[mode] || SPECTRUM);
   const copyLook = (l) => ({ stops: l.stops.map((c) => [...c]), tints: l.tints.map((c) => [...c]),
     amount: l.amount, chroma: l.chroma, base: l.base });
