@@ -1,17 +1,25 @@
-name: PexisOS Pages (Console demo)
+name: PexisOS Pages (Brain home + Console)
 
-# Publish only the offline/synthetic Console, never the PETRON local bridge.
+# Public site: the visual-only PETRON Brain at / and the offline/synthetic Smart Fan Console at /console/.
+# Never the PETRON bridge, runtime, commands, mission approval, event stream or any API: the Brain is a
+# fixed allowlist of four static files, assembled and verified by scripts/build_pages_site.py.
 # A PR builds and tests but cannot deploy; only main/explicit dispatch may deploy.
 on:
   pull_request:
     paths:
       - ".github/workflows/pages.yml"
       - "apps/console/**"
+      - "apps/petron/brain/**"
+      - "scripts/build_pages_site.py"
+      - "tests/test_pages_site.py"
   push:
     branches: [main]
     paths:
       - ".github/workflows/pages.yml"
       - "apps/console/**"
+      - "apps/petron/brain/**"
+      - "scripts/build_pages_site.py"
+      - "tests/test_pages_site.py"
   workflow_dispatch:
 
 permissions:
@@ -23,7 +31,7 @@ concurrency:
 
 jobs:
   build:
-    name: Verify and build static Console
+    name: Verify and build the static site (Brain home + Console)
     runs-on: ubuntu-latest
     timeout-minutes: 12
     defaults:
@@ -50,7 +58,7 @@ jobs:
         run: npm run build
       - name: Deny browser network APIs and external resources
         run: npm run check:offline
-      - name: Verify Pages artifact has a static entrypoint
+      - name: Verify the Console build has a static entrypoint
         run: |
           test -s dist/index.html
           test -d dist/assets
@@ -58,14 +66,23 @@ jobs:
             echo "::error::Absolute asset path is incompatible with project Pages"
             exit 1
           fi
+      - name: Test the site builder and its publication rules
+        working-directory: .
+        run: python3 -m unittest tests.test_pages_site -v
+      - name: Assemble the site (Brain at /, Console at /console/)
+        working-directory: .
+        run: python3 scripts/build_pages_site.py --console-dist apps/console/dist --out site
+      - name: Verify the assembled site (exact file set, no operational capability, resolvable paths)
+        working-directory: .
+        run: python3 scripts/build_pages_site.py --verify-only --out site
       - name: Upload Pages artifact (not on pull requests)
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
-          path: apps/console/dist
+          path: site
 
   deploy:
-    name: Deploy static Console to GitHub Pages
+    name: Deploy the static site to GitHub Pages
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     needs: build
     runs-on: ubuntu-latest
