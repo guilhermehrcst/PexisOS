@@ -43,8 +43,10 @@ The Brain's WebP texture and mask are still `review-required` in `docs/ip/OPEN-C
 (`ownership_review: pending`, `legal_signoff: not_recorded`). **Publishing them on the public site is an
 owner decision made while that review is pending; it is not an IP approval**, and nothing in the build or
 in this document changes the register. The files were already public in this repository; the site adds a
-display surface. If provenance review does not clear them, remove the four-file Brain from the allowlist
-(or replace the images) and redeploy.
+display surface. If provenance review does not clear them, replace the two images with cleared files of the
+same names and redeploy. Withdrawing the Brain altogether is not a one-line change: `verify()` requires the
+four Brain files and a root page, so it needs a builder change and a replacement `index.html` (the build
+stops with an error rather than publishing a site without a home).
 
 ## First activation (repository administrator)
 

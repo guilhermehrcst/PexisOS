@@ -156,6 +156,31 @@ class RefusalTests(SiteCase):
         shutil.rmtree(self.console)
         self.assertEqual(site.main(["--console-dist", str(self.console), "--out", str(self.out)]), 1)
 
+    def test_an_external_resource_in_either_page_is_refused(self):
+        for label, markup in {
+            "https image": '<img src="https://example.com/x.png" alt="">',
+            "http script": '<script src="http://example.com/x.js"></script>',
+            "protocol-relative": '<img src="//example.com/x.png" alt="">',
+            "css url": '<div style="background:url(https://example.com/x.png)"></div>',
+            "other scheme": '<a href="ftp://example.com/x">x</a>',
+        }.items():
+            with self.subTest(label, page="brain"):
+                shutil.copyfile(site.BRAIN_SOURCE / "index.html", self.brain / "index.html")
+                html = (self.brain / "index.html").read_text().replace("</main>", markup + "</main>")
+                (self.brain / "index.html").write_text(html)
+                with self.assertRaises(site.SiteError):
+                    self.build()
+            with self.subTest(label, page="console"):
+                (self.console / "index.html").write_text(CONSOLE_PAGE.replace("</body>", markup + "</body>"))
+                shutil.copyfile(site.BRAIN_SOURCE / "index.html", self.brain / "index.html")
+                with self.assertRaises(site.SiteError):
+                    self.build()
+
+    def test_a_data_uri_is_still_allowed_even_when_it_contains_a_url(self):
+        icon = '<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\'%3E%3C/svg%3E">'
+        (self.console / "index.html").write_text(CONSOLE_PAGE.replace("<title>", icon + "<title>"))
+        self.build()
+
     def test_two_brain_script_tags_are_refused(self):
         tag = '<script src="./brain.js" defer></script>'
         self.build()

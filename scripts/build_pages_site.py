@@ -103,16 +103,19 @@ def build(console_dist: Path, out: Path, brain_source: Path = BRAIN_SOURCE) -> N
 
 
 def _references(html: str) -> list[str]:
+    """Every src/href/url() target in the page except inline ``data:`` URIs (which carry no request)."""
     found = []
     for match in _REFERENCE.finditer(html):
         target = match.group(1) or match.group(2)
-        if target and not re.match(r"^(?:[a-z][a-z0-9+.-]*:|//|data:)", target, re.I):
+        if target and not re.match(r"^data:", target, re.I):
             found.append(target)
     return found
 
 
 def _check_references(root: Path, page: Path, html: str, label: str) -> None:
     for target in _references(html):
+        if re.match(r"^(?:[a-z][a-z0-9+.-]*:|//)", target, re.I):
+            raise SiteError(f"{label}: external reference {target!r}; the site may load only its own files")
         if target.startswith("/"):
             raise SiteError(f"{label}: absolute path {target!r} breaks under the /PexisOS/ subpath")
         resolved = (page.parent / target).resolve()
