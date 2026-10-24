@@ -23,8 +23,10 @@ The URL is **not live until GitHub Pages is enabled and a deployment succeeds**.
 
 - the Console build (`apps/console`, Vite, `base: "./"`) is copied to `/console/`; its relative paths keep
   CSS, JS and fonts working under the repository subpath `/PexisOS/`;
-- the Brain is a **fixed allowlist of four files** from `apps/petron/brain/`: `index.html`, `brain.js`,
-  `brain-texture.webp`, `brain-mask.webp`. Nothing else from `apps/petron` is copied.
+- the Brain is a **fixed allowlist of two files** from `apps/petron/brain/`: a static-only
+  `index.html` and the original procedural `brain.js`. The builder removes both stationary
+  texture layers and their CSS from the published HTML. The visual is formed exclusively by
+  animated Canvas particles. No WebP asset or other part of `apps/petron` is published.
 
 The published Brain page gets a Content-Security-Policy that denies all network access (`connect-src 'none'`,
 same-origin scripts and images only) and declares the full-color palette as its default, because the adaptive
@@ -39,14 +41,14 @@ to produce a site that contains one. The bridge is loopback-only and cannot run 
 
 ### Brain asset provenance (open decision)
 
-The Brain's WebP texture and mask are still `review-required` in `docs/ip/OPEN-CORE-IP-REGISTER.md`
-(`ownership_review: pending`, `legal_signoff: not_recorded`). **Publishing them on the public site is an
-owner decision made while that review is pending; it is not an IP approval**, and nothing in the build or
-in this document changes the register. The files were already public in this repository; the site adds a
-display surface. If provenance review does not clear them, replace the two images with cleared files of the
-same names and redeploy. Withdrawing the Brain altogether is not a one-line change: `verify()` requires the
-four Brain files and a root page, so it needs a builder change and a replacement `index.html` (the build
-stops with an error rather than publishing a site without a home).
+The original Brain WebP texture and mask remain `review-required` in
+`docs/ip/OPEN-CORE-IP-REGISTER.md` (`ownership_review: pending`,
+`legal_signoff: not_recorded`). **The Pages artifact no longer contains either
+image.** Its animated particle geometry and color are rendered directly by Canvas
+without a photographic texture. The local PETRON runtime still has its original
+HTML and assets, unchanged by this public-only adjustment. The source repository
+retains the previously public images, so their provenance still requires review
+for any other distribution. This is not a legal signoff.
 
 ## First activation (repository administrator)
 
@@ -89,6 +91,9 @@ may deploy to `github-pages`.
 
 - **404:** check Settings > Pages > Source = GitHub Actions, and check
   that the deploy workflow completed successfully.
+- **Static/photo appearance:** the public root should contain only `index.html`, `brain.js`,
+  `console/` and `.nojekyll`. If old images persist after deployment, check the GitHub Pages
+  workflow SHA and refresh the browser cache. The local PETRON prototype is unaffected.
 - **Assets missing:** confirm `base: "./"` in `apps/console/vite.config.ts`
   and that the Pages artifact contains `index.html` and `console/assets/`. Run
   `python scripts/build_pages_site.py --verify-only --out site` on the assembled site.
