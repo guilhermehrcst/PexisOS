@@ -47,6 +47,10 @@ _RASTER_TAGS = (
     '      <img class="brain-reference" src="./brain-texture.webp" alt="" aria-hidden="true">\n',
     '      <div class="brain-chroma" aria-hidden="true"></div>\n',
 )
+_RASTER_MOTION_CSS = (
+    "      @media (prefers-reduced-motion: reduce) { .brain-reference, "
+    ".brain-chroma { animation: none; } }\n"
+)
 
 # An empty inline icon: the browser asks for /favicon.ico on its own, which would be a 404 on Pages.
 BRAIN_ICON = '<link rel="icon" href="data:,">'
@@ -102,6 +106,9 @@ def _procedural_brain(html: str) -> str:
         if html.count(tag) != 1:
             raise SiteError("brain index.html: static image layer markup changed")
         html = html.replace(tag, "", 1)
+    if html.count(_RASTER_MOTION_CSS) != 1:
+        raise SiteError("brain index.html: static-layer reduced-motion CSS changed")
+    html = html.replace(_RASTER_MOTION_CSS, "", 1)
     return html
 
 
