@@ -48,7 +48,7 @@ class LayoutTests(SiteCase):
     def test_the_published_tree_is_exactly_the_brain_the_console_and_nojekyll(self):
         self.build()
         self.assertEqual({p.name for p in self.out.iterdir()},
-                         {"index.html", "brain.js", "brain-texture.webp", "brain-mask.webp", "console", ".nojekyll"})
+                         {"index.html", "brain.js", "console", ".nojekyll"})
         self.assertTrue((self.out / "console" / "index.html").is_file())
         self.assertTrue((self.out / "console" / "assets" / "app.js").is_file())
 
@@ -72,6 +72,35 @@ class LayoutTests(SiteCase):
         for capability in ("live.js", "petron-input", "petron-mode", "EventSource", "fetch(", "/api/"):
             self.assertNotIn(capability, page + (self.out / "brain.js").read_text(), capability)
 
+    def test_public_brain_is_procedural_without_still_image_layers(self):
+        self.assertIn("brain-texture.webp", (self.brain / "index.html").read_text())
+        self.build()
+        page = (self.out / "index.html").read_text()
+        self.assertEqual(page.count('<canvas id="brain"'), 1)
+        self.assertIn('<meta name="petron-palette" content="spectrum">', page)
+        for name in ("brain-texture.webp", "brain-mask.webp", "brain-reference", "brain-chroma"):
+            self.assertNotIn(name, page)
+        self.assertFalse(list(self.out.rglob("*.webp")), "no raster assets may be published")
+        self.assertEqual({p.name for p in self.out.iterdir()},
+                         {"index.html", "brain.js", "console", ".nojekyll"})
+
+    def test_verifier_rejects_reintroduced_photo_layer(self):
+        self.build()
+        page_path = self.out / "index.html"
+        page_path.write_text(page_path.read_text().replace(
+            '<canvas id="brain"',
+            '<img class="brain-reference" src="./brain-texture.webp" alt=""><canvas id="brain"',
+        ))
+        with self.assertRaises(site.SiteError) as caught:
+            site.verify(self.out)
+        self.assertIn("static raster", str(caught.exception))
+
+    def test_builder_refuses_unexpected_original_image_markup(self):
+        path = self.brain / "index.html"
+        html = path.read_text()
+        path.write_text(html.replace('class="brain-reference"', 'class="different-photo"'))
+        self.refuses("static image layer markup changed")
+
     def test_building_twice_gives_the_same_site(self):
         self.build()
         first = {str(p.relative_to(self.out)): p.read_bytes() for p in self.out.rglob("*") if p.is_file()}
@@ -90,7 +119,7 @@ class RefusalTests(SiteCase):
         self.refuses("console build not found")
 
     def test_a_missing_approved_brain_file_stops_the_build(self):
-        (self.brain / "brain-mask.webp").unlink()
+        (self.brain / "brain.js").unlink()
         self.refuses("approved Brain file missing")
 
     def test_a_brain_that_reaches_the_bridge_is_refused(self):

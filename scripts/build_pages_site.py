@@ -6,11 +6,12 @@
 
 Layout produced (served under /PexisOS/):
 
-    site/index.html, brain.js, brain-texture.webp, brain-mask.webp   the PETRON Brain, visual only
+    site/index.html, brain.js   the PETRON Brain, animated procedural particles only
     site/console/...                                                 the Smart Fan Console (Vite build)
     site/.nojekyll
 
-The public Brain is a fixed allowlist of four files. Nothing else from ``apps/petron`` is copied: not
+The public Brain has only two files. Static photo/mask layers are stripped from the public HTML;
+nothing else from ``apps/petron`` is copied: not
 ``live.js``, not the bridge, commands, runtime, tests or documentation. ``verify`` then checks the result
 instead of trusting the copy: the file set is exact, the pages carry no operational capability, every
 relative reference resolves, and a Content-Security-Policy that forbids network access is present.
@@ -27,7 +28,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 BRAIN_SOURCE = REPO / "apps" / "petron" / "brain"
-BRAIN_FILES = ("index.html", "brain.js", "brain-texture.webp", "brain-mask.webp")   # the whole public Brain
+BRAIN_FILES = ("index.html", "brain.js")   # the public Brain contains no raster assets
 ROOT_ENTRIES = frozenset(BRAIN_FILES) | {"console", ".nojekyll"}
 
 # A second, independent barrier behind the code checks: the browser itself refuses any request but
@@ -37,6 +38,16 @@ BRAIN_CSP = ("default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; 
 # The public page has no runtime to drive the adaptive colors (they follow mission state and would sit at calm
 # silver), so it declares the full-color palette as its default. ?palette=adaptive|mono still overrides it.
 PUBLIC_PALETTE = "spectrum"
+# Only for the Pages copy: the source HTML still includes two photo-like static
+# overlays for the local bridge. The public demo removes both, leaving Canvas
+# as the only visible sphere. Do not alter the local PETRON runtime page.
+_RASTER_CSS_START = "      /* Approved color layer:"
+_RASTER_CSS_END = "      canvas {"
+_RASTER_TAGS = (
+    '      <img class="brain-reference" src="./brain-texture.webp" alt="" aria-hidden="true">\n',
+    '      <div class="brain-chroma" aria-hidden="true"></div>\n',
+)
+
 # An empty inline icon: the browser asks for /favicon.ico on its own, which would be a 404 on Pages.
 BRAIN_ICON = '<link rel="icon" href="data:,">'
 _HEAD_MARKER = '<meta charset="utf-8">'
@@ -78,6 +89,22 @@ def _clean(out: Path, inputs: tuple[Path, ...]) -> None:
     out.mkdir(parents=True)
 
 
+def _procedural_brain(html: str) -> str:
+    """Remove both static image layers from the public HTML, never from local runtime."""
+    if html.count(_RASTER_CSS_START) != 1 or html.count(_RASTER_CSS_END) != 1:
+        raise SiteError("brain index.html: expected exactly one static-layer CSS region")
+    start = html.index(_RASTER_CSS_START)
+    end = html.index(_RASTER_CSS_END)
+    if start >= end:
+        raise SiteError("brain index.html: invalid static-layer CSS region")
+    html = html[:start] + html[end:]
+    for tag in _RASTER_TAGS:
+        if html.count(tag) != 1:
+            raise SiteError("brain index.html: static image layer markup changed")
+        html = html.replace(tag, "", 1)
+    return html
+
+
 def _with_csp(html: str) -> str:
     if html.count(_HEAD_MARKER) != 1 or "Content-Security-Policy" in html:
         raise SiteError("brain index.html: expected exactly one charset marker and no existing CSP")
@@ -96,7 +123,7 @@ def build(console_dist: Path, out: Path, brain_source: Path = BRAIN_SOURCE) -> N
     _clean(out, (console_dist, brain_source))
     for name in BRAIN_FILES:
         if name == "index.html":
-            (out / name).write_text(_with_csp((brain_source / name).read_text(encoding="utf-8")), encoding="utf-8")
+            (out / name).write_text(_with_csp(_procedural_brain((brain_source / name).read_text(encoding="utf-8"))), encoding="utf-8")
         else:
             shutil.copyfile(brain_source / name, out / name)
     shutil.copytree(console_dist, out / "console")
@@ -138,6 +165,11 @@ def verify(out: Path) -> None:
     # --- the Brain: static and visual only
     page = (out / "index.html").read_text(encoding="utf-8")
     script = (out / "brain.js").read_text(encoding="utf-8")
+    if any(token in page for token in ("brain-texture.webp", "brain-mask.webp",
+                                     "brain-reference", "brain-chroma")):
+        raise SiteError("public Brain must not contain static raster/photographic layers")
+    if page.count('<canvas id="brain"') != 1:
+        raise SiteError("public Brain must contain exactly one particle canvas")
     if BRAIN_CSP not in page or BRAIN_ICON not in page:
         raise SiteError("brain index.html: the network-denying Content-Security-Policy or the inline icon is missing")
     if f'<meta name="petron-palette" content="{PUBLIC_PALETTE}">' not in page:
