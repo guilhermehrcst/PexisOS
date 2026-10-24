@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def build_wheel(into: Path) -> Path:
     work = into / "src"
     work.mkdir()
-    for name in ("pyproject.toml", "LICENSE", "README.md", "src", "fixtures"):
+    for name in ("pyproject.toml", "LICENSE", "README.md", "src", "fixtures", "brain"):
         source = ROOT / name
         (shutil.copytree if source.is_dir() else shutil.copy)(source, work / name,
                                                               **({"ignore": shutil.ignore_patterns("__pycache__")}
@@ -58,6 +58,21 @@ class InstalledWheelTests(unittest.TestCase):
         for expected in ("petron/fixtures/e001/mission.json", "petron/fixtures/e001/project/calc/stats.py",
                          "petron/fixtures/e001/project/tests/test_stats.py"):
             self.assertIn(expected, self.names)
+
+    def test_brain_assets_are_packaged_and_readable_from_an_installed_wheel(self):
+        for expected in ("index.html", "brain.js", "live.js", "brain-texture.webp", "brain-mask.webp"):
+            self.assertIn("petron/brain_assets/" + expected, self.names)
+        script = (
+            "from petron.brain_bridge import BRAIN_DIR, _live_index; "
+            "assert all((BRAIN_DIR / n).is_file() for n in "
+            "('index.html', 'brain.js', 'live.js', 'brain-texture.webp', 'brain-mask.webp')); "
+            "assert 'live.js' in _live_index((BRAIN_DIR / 'index.html').read_text())"
+        )
+        env = {"PATH": os.environ.get("PATH", ""), "PYTHONPATH": str(self.installed),
+               "HOME": str(self.tmp), "PETRON_HOME": str(self.tmp / "home")}
+        done = subprocess.run([sys.executable, "-c", script], cwd=self.tmp, env=env,
+                              capture_output=True, text=True, timeout=20)
+        self.assertEqual(done.returncode, 0, done.stderr)
 
     def test_documented_e001_command_works_from_an_installed_copy_outside_the_repo(self):
         cwd = self.tmp / "elsewhere"

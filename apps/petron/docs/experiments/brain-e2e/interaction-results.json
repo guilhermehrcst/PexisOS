@@ -1,0 +1,181 @@
+{
+  "ok": true,
+  "provenance": {
+    "head": "0bf2015670647cfe8bec6b733c95f9ec057e1d30",
+    "dirty": false,
+    "generated_at": "2026-10-23T23:43:00Z"
+  },
+  "checks": {
+    "key_removed_from_address_bar": {
+      "ok": true
+    },
+    "still_only_the_brain_visible": {
+      "ok": true,
+      "detail": {
+        "visible": [
+          "img",
+          "div",
+          "canvas"
+        ],
+        "controls": 0
+      }
+    },
+    "tap_opens_listening_session": {
+      "ok": true
+    },
+    "typed_text_is_not_visible": {
+      "ok": true
+    },
+    "request_becomes_draft_awaiting_approval": {
+      "ok": true,
+      "detail": [
+        [
+          "brain-20261023234138-73674a",
+          "awaiting_approval"
+        ]
+      ]
+    },
+    "draft_not_approved_or_running": {
+      "ok": true,
+      "detail": "brain-20261023234138-73674a"
+    },
+    "hold_shows_confirming": {
+      "ok": true
+    },
+    "tap_and_short_hold_approve_nothing": {
+      "ok": true,
+      "detail": "awaiting_approval"
+    },
+    "full_hold_approves_and_runtime_completes": {
+      "ok": true,
+      "detail": {
+        "final_mode": "success",
+        "approval_channel": "brain-hold-gesture",
+        "mission": [
+          "brain-20261023234138-73674a",
+          "completed"
+        ]
+      }
+    },
+    "success_after_verification": {
+      "ok": true,
+      "detail": [
+        [
+          "running",
+          "verifying"
+        ],
+        [
+          "verifying",
+          "completed"
+        ]
+      ]
+    },
+    "tab_focuses_the_brain": {
+      "ok": true,
+      "detail": "brain"
+    },
+    "keyboard_opens_session": {
+      "ok": true
+    },
+    "escape_discards_draft": {
+      "ok": true,
+      "detail": {
+        "state": "cancelled",
+        "said_after": "PETRON: miss\u00e3o cancelada.",
+        "focus": "brain"
+      }
+    },
+    "space_hold_approves": {
+      "ok": true,
+      "detail": {
+        "state": "completed"
+      }
+    },
+    "palette_query_survives_key_removal": {
+      "ok": true,
+      "detail": [
+        "?palette=spectrum",
+        ""
+      ]
+    },
+    "external_cancel_reaches_the_page": {
+      "ok": true,
+      "detail": "cancelled"
+    },
+    "new_mission_possible_after_external_cancel": {
+      "ok": true,
+      "detail": "listening"
+    },
+    "lost_stream_is_shown_as_disconnected": {
+      "ok": true,
+      "detail": "disconnected"
+    },
+    "stream_returns_with_the_authoritative_state": {
+      "ok": true,
+      "detail": "idle"
+    },
+    "stale_draft_does_not_block_after_reconnect": {
+      "ok": true,
+      "detail": "listening"
+    },
+    "new_mission_created_after_reconnect": {
+      "ok": true,
+      "detail": [
+        [
+          "brain-20261023234229-8747ad",
+          "cancelled"
+        ],
+        [
+          "brain-20261023234235-2424f6",
+          "awaiting_approval"
+        ]
+      ]
+    },
+    "refused_run_ends_failed_with_an_auditable_event": {
+      "ok": true,
+      "detail": {
+        "mission": "failed",
+        "refusal": {
+          "code": "provider_error:unknown_policy",
+          "scope_sha256": "eee1ea021b0839cc67bfd290898ebc9646ff4fa2fcd6dfd31227d950e7aa1037"
+        }
+      }
+    },
+    "brain_never_shows_a_refused_run_as_running": {
+      "ok": true,
+      "detail": [
+        "listening",
+        "awaiting_approval",
+        "confirming",
+        "error"
+      ]
+    },
+    "terminal_failure_settles_to_calm": {
+      "ok": true,
+      "detail": "idle"
+    },
+    "new_mission_possible_after_a_refused_run": {
+      "ok": true,
+      "detail": "listening"
+    },
+    "page_without_key_cannot_open_input": {
+      "ok": true,
+      "detail": "error"
+    },
+    "post_without_key_refused": {
+      "ok": true,
+      "detail": 403
+    },
+    "no_page_errors": {
+      "ok": true,
+      "detail": []
+    },
+    "read_only_bridge_has_no_commands": {
+      "ok": true,
+      "detail": {
+        "mode": "error",
+        "post": 405
+      }
+    }
+  }
+}

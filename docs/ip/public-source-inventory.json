@@ -3,26 +3,143 @@
   "license_identifier": "Apache-2.0",
   "legal_signoff": "not_recorded",
   "rules": [
-    {"path": ".gitignore", "match": "exact", "classification": "repository-license", "ownership_review": "pending"},
-    {"path": "LICENSE", "match": "exact", "classification": "repository-license", "ownership_review": "pending"},
-    {"path": "README.md", "match": "exact", "classification": "repository-license", "ownership_review": "pending"},
-    {"path": "pyproject.toml", "match": "exact", "classification": "repository-license", "ownership_review": "pending"},
-    {"path": "examples/baseline.csv", "match": "exact", "classification": "review-required", "ownership_review": "pending"},
-    {"path": "examples/observations.csv", "match": "exact", "classification": "review-required", "ownership_review": "pending"},
-    {"path": "apps/console/package-lock.json", "match": "exact", "classification": "third-party-reference", "ownership_review": "pending"},
-    {"path": "apps/console/docs/console-v1-1440x900.png", "match": "exact", "classification": "review-required", "ownership_review": "pending"},
-    {"path": "apps/console/", "match": "prefix", "classification": "repository-license", "ownership_review": "pending"},
-    {"path": "apps/petron/docs/experiments/e001-evidence/", "match": "prefix", "classification": "review-required", "ownership_review": "pending"},
-    {"path": "apps/petron/docs/experiments/e002-evidence/", "match": "prefix", "classification": "review-required", "ownership_review": "pending"},
-    {"path": "apps/petron/fixtures/", "match": "prefix", "classification": "review-required", "ownership_review": "pending"},
-    {"path": "apps/petron/", "match": "prefix", "classification": "repository-license", "ownership_review": "pending"},
-    {"path": ".github/", "match": "prefix", "classification": "repository-license", "ownership_review": "pending"},
-    {"path": "docs/", "match": "prefix", "classification": "repository-license", "ownership_review": "pending"},
-    {"path": "examples/", "match": "prefix", "classification": "repository-license", "ownership_review": "pending"},
-    {"path": "reports/", "match": "prefix", "classification": "review-required", "ownership_review": "pending"},
-    {"path": "requirements/", "match": "prefix", "classification": "third-party-reference", "ownership_review": "pending"},
-    {"path": "scripts/", "match": "prefix", "classification": "repository-license", "ownership_review": "pending"},
-    {"path": "src/", "match": "prefix", "classification": "repository-license", "ownership_review": "pending"},
-    {"path": "tests/", "match": "prefix", "classification": "repository-license", "ownership_review": "pending"}
+    {
+      "path": ".gitignore",
+      "match": "exact",
+      "classification": "repository-license",
+      "ownership_review": "pending"
+    },
+    {
+      "path": "LICENSE",
+      "match": "exact",
+      "classification": "repository-license",
+      "ownership_review": "pending"
+    },
+    {
+      "path": "README.md",
+      "match": "exact",
+      "classification": "repository-license",
+      "ownership_review": "pending"
+    },
+    {
+      "path": "pyproject.toml",
+      "match": "exact",
+      "classification": "repository-license",
+      "ownership_review": "pending"
+    },
+    {
+      "path": "examples/baseline.csv",
+      "match": "exact",
+      "classification": "review-required",
+      "ownership_review": "pending"
+    },
+    {
+      "path": "examples/observations.csv",
+      "match": "exact",
+      "classification": "review-required",
+      "ownership_review": "pending"
+    },
+    {
+      "path": "apps/console/package-lock.json",
+      "match": "exact",
+      "classification": "third-party-reference",
+      "ownership_review": "pending"
+    },
+    {
+      "path": "apps/console/docs/console-v1-1440x900.png",
+      "match": "exact",
+      "classification": "review-required",
+      "ownership_review": "pending"
+    },
+    {
+      "path": "apps/console/",
+      "match": "prefix",
+      "classification": "repository-license",
+      "ownership_review": "pending"
+    },
+    {
+      "path": "apps/petron/docs/experiments/e001-evidence/",
+      "match": "prefix",
+      "classification": "review-required",
+      "ownership_review": "pending"
+    },
+    {
+      "path": "apps/petron/docs/experiments/e002-evidence/",
+      "match": "prefix",
+      "classification": "review-required",
+      "ownership_review": "pending"
+    },
+    {
+      "path": "apps/petron/fixtures/",
+      "match": "prefix",
+      "classification": "review-required",
+      "ownership_review": "pending"
+    },
+    {
+      "path": "apps/petron/brain/brain-mask.webp",
+      "match": "exact",
+      "classification": "review-required",
+      "ownership_review": "pending"
+    },
+    {
+      "path": "apps/petron/brain/brain-texture.webp",
+      "match": "exact",
+      "classification": "review-required",
+      "ownership_review": "pending"
+    },
+    {
+      "path": "apps/petron/",
+      "match": "prefix",
+      "classification": "repository-license",
+      "ownership_review": "pending"
+    },
+    {
+      "path": ".github/",
+      "match": "prefix",
+      "classification": "repository-license",
+      "ownership_review": "pending"
+    },
+    {
+      "path": "docs/",
+      "match": "prefix",
+      "classification": "repository-license",
+      "ownership_review": "pending"
+    },
+    {
+      "path": "examples/",
+      "match": "prefix",
+      "classification": "repository-license",
+      "ownership_review": "pending"
+    },
+    {
+      "path": "reports/",
+      "match": "prefix",
+      "classification": "review-required",
+      "ownership_review": "pending"
+    },
+    {
+      "path": "requirements/",
+      "match": "prefix",
+      "classification": "third-party-reference",
+      "ownership_review": "pending"
+    },
+    {
+      "path": "scripts/",
+      "match": "prefix",
+      "classification": "repository-license",
+      "ownership_review": "pending"
+    },
+    {
+      "path": "src/",
+      "match": "prefix",
+      "classification": "repository-license",
+      "ownership_review": "pending"
+    },
+    {
+      "path": "tests/",
+      "match": "prefix",
+      "classification": "repository-license",
+      "ownership_review": "pending"
+    }
   ]
 }

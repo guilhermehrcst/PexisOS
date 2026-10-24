@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+    <meta name="theme-color" content="#000000">
+    <meta name="color-scheme" content="dark">
+    <meta name="description" content="PETRON Brain. Uma única presença visual gerativa, sem controles aparentes.">
+    <title>PETRON</title>
+    <style>
+      :root { color-scheme: dark; background: #000; }
+      * { box-sizing: border-box; }
+      html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: #000; }
+      body { min-height: 100svh; overscroll-behavior: none; }
+      main { position: fixed; inset: 0; background: #000; overflow: hidden; }
+      /* Approved color layer: the spectrum, masked to the texture's alpha. brain.js sets the
+         stops (--c0..--c6) and the opacity per palette and state; defaults are the spectrum. */
+      .brain-chroma {
+        display: block; position: absolute; left: 50%; top: 50%;
+        width: min(97vmin, 1050px); height: min(97vmin, 1050px);
+        transform: translate(-50%, -50%);
+        pointer-events: none; user-select: none;
+        background: conic-gradient(from 205deg at 50% 50%,
+          var(--c0, #1f77f8) 0deg, var(--c1, #52ddfb) 68deg, var(--c2, #62cffe) 122deg,
+          var(--c3, #c982f7) 171deg, var(--c4, #ed64a4) 225deg, var(--c5, #ffb36b) 282deg,
+          var(--c6, #65ffd1) 326deg, var(--c0, #1f77f8) 360deg);
+        -webkit-mask: url('./brain-mask.webp') center / contain no-repeat;
+        mask: url('./brain-mask.webp') center / contain no-repeat;
+        opacity: .95;
+        animation: breathe 19s ease-in-out infinite alternate;
+      }
+      .brain-reference {
+        display: block; position: absolute; left: 50%; top: 50%;
+        width: min(97vmin, 1050px); height: min(97vmin, 1050px);
+        object-fit: contain; transform: translate(-50%, -50%);
+        opacity: 0.92; pointer-events: none; user-select: none;
+        animation: breathe 19s ease-in-out infinite alternate;
+      }
+      @keyframes breathe {
+        from { transform: translate(-50%, -50%) scale(0.987) rotate(-0.2deg); }
+        to { transform: translate(-50%, -50%) scale(1.025) rotate(0.3deg); }
+      }
+      canvas { display: block; position: absolute; width: 100%; height: 100%; inset: 0; touch-action: none; outline: none; }
+      /* Screen-reader-only status: never visible, always announced. */
+      .petron-status { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; border: 0;
+        overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; }
+      @media (prefers-reduced-motion: reduce) { .brain-reference, .brain-chroma { animation: none; } }
+    </style>
+  </head>
+  <body>
+    <main aria-label="PETRON: cérebro de partículas luminosas sobre fundo preto">
+      <img class="brain-reference" src="./brain-texture.webp" alt="" aria-hidden="true">
+      <div class="brain-chroma" aria-hidden="true"></div>
+      <canvas id="brain" role="img" tabindex="0" aria-label="Esfera tridimensional de partículas coloridas e brancas formando ondas orgânicas, centralizada em um fundo preto"></canvas>
+      <div id="petron-status" class="petron-status" role="status" aria-live="polite">PETRON em modo visual autônomo, sem conexão com o runtime.</div>
+    </main>
+    <script src="./brain.js" defer></script>
+  </body>
+</html>

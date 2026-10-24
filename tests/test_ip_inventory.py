@@ -97,6 +97,8 @@ class LiveManifestTests(unittest.TestCase):
             "apps/console/package-lock.json": "third-party-reference",
             "apps/console/docs/console-v1-1440x900.png": "review-required",
             "apps/petron/src/petron/engine.py": "repository-license",
+            "apps/petron/brain/brain-mask.webp": "review-required",
+            "apps/petron/brain/brain-texture.webp": "review-required",
             "apps/petron/docs/experiments/e001-evidence/report.json": "review-required",
             "apps/petron/docs/experiments/e002-evidence/report.json": "review-required",
             "apps/petron/fixtures/e002/mission.json": "review-required",
