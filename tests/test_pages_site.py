@@ -190,6 +190,15 @@ class RefusalTests(SiteCase):
             site.verify(self.out)
         self.assertIn("exactly one", str(caught.exception))
 
+    def test_a_script_tag_in_any_letter_case_counts_as_a_script(self):
+        self.build()
+        page = (self.out / "index.html").read_text()
+        extra = '<SCRIPT type="module" src="./console/assets/app.js"></SCRIPT>'
+        (self.out / "index.html").write_text(page.replace("</main>", extra + "</main>"))
+        with self.assertRaises(site.SiteError) as caught:
+            site.verify(self.out)
+        self.assertIn("exactly one", str(caught.exception))
+
     def test_a_reference_that_leaves_the_site_is_refused_even_if_the_file_exists_beside_it(self):
         self.build()
         (self.tmp / "README.md").write_text("outside the artifact")           # exists next to site/, not in it
@@ -246,6 +255,23 @@ class OutputDirectoryTests(SiteCase):
         with self.assertRaises(site.SiteError):
             site.build(self.console, stranger, brain_source=self.brain)
         self.assertTrue((stranger / "precious.txt").is_file())
+
+    def test_a_pages_directory_with_nojekyll_but_other_contents_is_not_ours_to_delete(self):
+        foreign = self.tmp / "foreign-pages"
+        foreign.mkdir()
+        (foreign / ".nojekyll").write_text("")
+        (foreign / "index.html").write_text("someone else's site")
+        (foreign / "precious.txt").write_text("not a build of ours")
+        with self.assertRaises(site.SiteError):
+            site.build(self.console, foreign, brain_source=self.brain)
+        self.assertTrue((foreign / "precious.txt").is_file())
+
+    def test_an_earlier_build_with_an_extra_file_is_refused_rather_than_trimmed(self):
+        site.build(self.console, Path("site"), brain_source=self.brain)
+        (self.repo / "site" / "notes.txt").write_text("added by hand")
+        with self.assertRaises(site.SiteError):
+            site.build(self.console, Path("site"), brain_source=self.brain)
+        self.assertTrue((self.repo / "site" / "notes.txt").is_file())
 
     def test_a_relative_output_name_and_an_earlier_build_are_still_accepted(self):
         site.build(self.console, Path("site"), brain_source=self.brain)

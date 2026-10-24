@@ -53,6 +53,7 @@ _FORBIDDEN_BRAIN = {
     "dynamic import": re.compile(r"\bimport\s*\("),
 }
 _REFERENCE = re.compile(r"""(?:src|href)\s*=\s*["']([^"'#?]+)|url\(\s*['"]?([^'")#?]+)""", re.I)
+_SCRIPT_TAG = re.compile(r"<script\b", re.I)
 _ABSOLUTE_ASSET = re.compile(r"""(?:src|href)\s*=\s*["']/(?!/)""", re.I)
 
 
@@ -63,15 +64,16 @@ class SiteError(Exception):
 def _clean(out: Path, inputs: tuple[Path, ...]) -> None:
     """Empty ``out`` for a fresh build. ``out`` and ``inputs`` are already resolved; nothing is deleted before
     every rule holds: never the checkout or a parent of it, never a directory that overlaps an input, and never
-    a non-empty directory that is not the output of an earlier build (it carries ``.nojekyll``)."""
+    a non-empty directory that is not the output of an earlier build (exactly the entries of a built site)."""
     if out == REPO or out in REPO.parents:
         raise SiteError(f"refusing to clean {out}: it is the repository or a parent of it")
     for source in inputs:
         if out == source or out in source.parents or source in out.parents:
             raise SiteError(f"refusing to clean {out}: it overlaps the build input {source}")
     if out.exists():
-        if not out.is_dir() or (any(out.iterdir()) and not (out / ".nojekyll").is_file()):
-            raise SiteError(f"refusing to clean {out}: it is not the output of an earlier build")
+        if not out.is_dir() or (any(out.iterdir()) and {path.name for path in out.iterdir()} != ROOT_ENTRIES):
+            raise SiteError(f"refusing to clean {out}: it is not the output of an earlier build "
+                            f"(expected exactly {sorted(ROOT_ENTRIES)}); remove it by hand if it is yours")
         shutil.rmtree(out)
     out.mkdir(parents=True)
 
@@ -144,7 +146,7 @@ def verify(out: Path) -> None:
         for name, text in (("index.html", page), ("brain.js", script)):
             if pattern.search(text):
                 raise SiteError(f"public Brain {name} carries an operational capability: {label}")
-    if page.count("<script") != 1 or page.count('<script src="./brain.js" defer></script>') != 1:
+    if len(_SCRIPT_TAG.findall(page)) != 1 or page.count('<script src="./brain.js" defer></script>') != 1:
         raise SiteError("brain index.html: exactly one script element is allowed, and it must be ./brain.js")
     _check_references(out, out / "index.html", page, "brain index.html")
     # --- the Console: a built single-page app at /console/
