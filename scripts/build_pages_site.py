@@ -60,10 +60,18 @@ class SiteError(Exception):
     """The site is not what it is meant to be; the message names the first violated rule."""
 
 
-def _clean(out: Path) -> None:
+def _clean(out: Path, inputs: tuple[Path, ...]) -> None:
+    """Empty ``out`` for a fresh build. ``out`` and ``inputs`` are already resolved; nothing is deleted before
+    every rule holds: never the checkout or a parent of it, never a directory that overlaps an input, and never
+    a non-empty directory that is not the output of an earlier build (it carries ``.nojekyll``)."""
+    if out == REPO or out in REPO.parents:
+        raise SiteError(f"refusing to clean {out}: it is the repository or a parent of it")
+    for source in inputs:
+        if out == source or out in source.parents or source in out.parents:
+            raise SiteError(f"refusing to clean {out}: it overlaps the build input {source}")
     if out.exists():
-        if out == REPO or REPO in out.parents and out.name in ("apps", "scripts", "docs", "src", ".git"):
-            raise SiteError(f"refusing to clean {out}")
+        if not out.is_dir() or (any(out.iterdir()) and not (out / ".nojekyll").is_file()):
+            raise SiteError(f"refusing to clean {out}: it is not the output of an earlier build")
         shutil.rmtree(out)
     out.mkdir(parents=True)
 
@@ -77,13 +85,13 @@ def _with_csp(html: str) -> str:
 
 
 def build(console_dist: Path, out: Path, brain_source: Path = BRAIN_SOURCE) -> None:
-    console_dist, out, brain_source = Path(console_dist), Path(out), Path(brain_source)
+    console_dist, out, brain_source = (Path(path).resolve() for path in (console_dist, out, brain_source))
     if not (console_dist / "index.html").is_file():
         raise SiteError(f"console build not found at {console_dist} (run `npm run build` in apps/console)")
     for name in BRAIN_FILES:
         if not (brain_source / name).is_file():
             raise SiteError(f"approved Brain file missing: {brain_source / name}")
-    _clean(out)
+    _clean(out, (console_dist, brain_source))
     for name in BRAIN_FILES:
         if name == "index.html":
             (out / name).write_text(_with_csp((brain_source / name).read_text(encoding="utf-8")), encoding="utf-8")
@@ -103,16 +111,19 @@ def _references(html: str) -> list[str]:
     return found
 
 
-def _check_references(page: Path, html: str, label: str) -> None:
+def _check_references(root: Path, page: Path, html: str, label: str) -> None:
     for target in _references(html):
         if target.startswith("/"):
             raise SiteError(f"{label}: absolute path {target!r} breaks under the /PexisOS/ subpath")
-        if not (page.parent / target).resolve().is_file():
+        resolved = (page.parent / target).resolve()
+        if not resolved.is_relative_to(root):
+            raise SiteError(f"{label}: reference {target!r} points outside the site")
+        if not resolved.is_file():
             raise SiteError(f"{label}: reference {target!r} does not resolve to a file in the site")
 
 
 def verify(out: Path) -> None:
-    out = Path(out)
+    out = Path(out).resolve()
     if not out.is_dir():
         raise SiteError(f"site directory not found: {out}")
     entries = {path.name for path in out.iterdir()}
@@ -130,9 +141,9 @@ def verify(out: Path) -> None:
         for name, text in (("index.html", page), ("brain.js", script)):
             if pattern.search(text):
                 raise SiteError(f"public Brain {name} carries an operational capability: {label}")
-    if "<script" in page.replace('<script src="./brain.js" defer></script>', ""):
-        raise SiteError("brain index.html: only ./brain.js may be loaded as a script")
-    _check_references(out / "index.html", page, "brain index.html")
+    if page.count("<script") != 1 or page.count('<script src="./brain.js" defer></script>') != 1:
+        raise SiteError("brain index.html: exactly one script element is allowed, and it must be ./brain.js")
+    _check_references(out, out / "index.html", page, "brain index.html")
     # --- the Console: a built single-page app at /console/
     console = out / "console"
     if not (console / "index.html").is_file() or not (console / "assets").is_dir():
@@ -140,7 +151,7 @@ def verify(out: Path) -> None:
     console_page = (console / "index.html").read_text(encoding="utf-8")
     if _ABSOLUTE_ASSET.search(console_page):
         raise SiteError("console index.html: absolute asset path is incompatible with the /PexisOS/ subpath")
-    _check_references(console / "index.html", console_page, "console index.html")
+    _check_references(out, console / "index.html", console_page, "console index.html")
     # --- nothing operational anywhere in the published tree
     for path in out.rglob("*"):
         if path.is_file() and (path.suffix in (".py", ".db", ".sqlite3", ".pyc", ".env", ".pem", ".key")

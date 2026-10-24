@@ -156,6 +156,77 @@ class RefusalTests(SiteCase):
         shutil.rmtree(self.console)
         self.assertEqual(site.main(["--console-dist", str(self.console), "--out", str(self.out)]), 1)
 
+    def test_two_brain_script_tags_are_refused(self):
+        tag = '<script src="./brain.js" defer></script>'
+        self.build()
+        page = (self.out / "index.html").read_text()
+        (self.out / "index.html").write_text(page.replace(tag, tag + tag))
+        with self.assertRaises(site.SiteError) as caught:
+            site.verify(self.out)
+        self.assertIn("exactly one", str(caught.exception))
+
+    def test_a_reference_that_leaves_the_site_is_refused_even_if_the_file_exists_beside_it(self):
+        self.build()
+        (self.tmp / "README.md").write_text("outside the artifact")           # exists next to site/, not in it
+        page = (self.out / "index.html").read_text().replace("</main>", '<a href="../README.md">x</a></main>')
+        (self.out / "index.html").write_text(page)
+        with self.assertRaises(site.SiteError) as caught:
+            site.verify(self.out)
+        self.assertIn("outside the site", str(caught.exception))
+
+
+class OutputDirectoryTests(SiteCase):
+    """`rmtree` runs on the --out directory, so it is resolved and checked before anything is deleted."""
+
+    def setUp(self):
+        super().setUp()
+        self.repo = self.tmp / "fake-repo"                      # stands in for the checkout the CLI runs from
+        for sub in ("apps", "scripts"):
+            (self.repo / sub).mkdir(parents=True)
+            (self.repo / sub / "keep.txt").write_text("source")
+        (self.repo / "README.md").write_text("source")
+        original_repo, original_cwd = site.REPO, Path.cwd()
+        site.REPO = self.repo.resolve()
+        self.addCleanup(lambda: setattr(site, "REPO", original_repo))
+        self.addCleanup(lambda: __import__("os").chdir(original_cwd))
+        __import__("os").chdir(self.repo)
+
+    def assert_refused_and_untouched(self, out):
+        with self.assertRaises(site.SiteError):
+            site.build(self.console, Path(out), brain_source=self.brain)
+        for kept in ("apps/keep.txt", "scripts/keep.txt", "README.md"):
+            self.assertTrue((self.repo / kept).is_file(), f"{kept} was deleted by --out {out}")
+
+    def test_a_relative_path_to_the_repository_root_is_refused_before_deleting(self):
+        self.assert_refused_and_untouched(".")
+
+    def test_a_relative_path_to_a_source_directory_is_refused_before_deleting(self):
+        self.assert_refused_and_untouched("apps")
+
+    def test_a_path_that_reaches_the_root_through_dotdot_is_refused(self):
+        self.assert_refused_and_untouched("apps/..")
+
+    def test_the_parent_of_the_repository_is_refused(self):
+        self.assert_refused_and_untouched("..")
+
+    def test_an_output_that_contains_the_console_build_is_refused(self):
+        with self.assertRaises(site.SiteError):
+            site.build(self.console, self.tmp, brain_source=self.brain)
+        self.assertTrue((self.console / "index.html").is_file())
+
+    def test_a_non_empty_directory_that_is_not_an_earlier_build_is_refused(self):
+        stranger = self.tmp / "stranger"
+        stranger.mkdir()
+        (stranger / "precious.txt").write_text("not a site")
+        with self.assertRaises(site.SiteError):
+            site.build(self.console, stranger, brain_source=self.brain)
+        self.assertTrue((stranger / "precious.txt").is_file())
+
+    def test_a_relative_output_name_and_an_earlier_build_are_still_accepted(self):
+        site.build(self.console, Path("site"), brain_source=self.brain)
+        site.build(self.console, Path("site"), brain_source=self.brain)        # rebuild over its own output
+        self.assertTrue((self.repo / "site" / "console" / "index.html").is_file())
+
 
 class WorkflowTests(unittest.TestCase):
     """The Pages workflow must publish the assembled site, build it with the checked script, and never from a PR."""
