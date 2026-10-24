@@ -64,8 +64,10 @@
     if (Number.isFinite(message.activity)) brain.setActivity(message.activity);
     // Success, and a terminal failure, are held briefly and then settle to calm idle. Other errors (a denied
     // action) are followed by further events and need no timer.
+    const terminalFailure = message.state === 'error' &&
+      (message.kind === 'mission.state' || (message.type === 'snapshot' && message.mission_state === 'failed'));
     const hold = message.state === 'success' ? SUCCESS_HOLD_MS
-      : (message.state === 'error' && message.kind === 'mission.state' ? ERROR_HOLD_MS : 0);
+      : (terminalFailure ? ERROR_HOLD_MS : 0);
     if (hold) {
       successTimer = window.setTimeout(() => {
         if (brain.getState().mode === message.state) { brain.setState('idle'); brain.setActivity(0.25); }

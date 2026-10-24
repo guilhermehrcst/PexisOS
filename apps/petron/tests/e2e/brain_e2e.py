@@ -23,6 +23,7 @@ from pathlib import Path
 
 from PIL import Image, ImageChops, ImageStat
 from playwright.sync_api import sync_playwright
+from brain_provenance import provenance as git_provenance
 
 PETRON = Path(__file__).resolve().parents[2]          # apps/petron
 FIXTURE = PETRON / "fixtures" / "e002"
@@ -38,14 +39,8 @@ def tint(path: Path) -> dict:
 
 
 def provenance() -> dict:
-    """Which code these results describe: the commit under test, and whether the tree had local edits."""
-    def git(*args):
-        return subprocess.run(["git", *args], cwd=PETRON, capture_output=True, text=True, timeout=30).stdout.strip()
-    try:
-        return {"head": git("rev-parse", "HEAD"), "dirty": bool(git("status", "--porcelain", "--", ".")),
-                "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
-    except (OSError, subprocess.SubprocessError):
-        return {"head": None, "dirty": None, "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+    """Identify the exact Git tree when possible; never claim clean on Git errors."""
+    return git_provenance(PETRON)
 
 
 def free_port() -> int:

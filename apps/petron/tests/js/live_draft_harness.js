@@ -270,6 +270,25 @@ scenario('a terminal failure is held briefly and then settles to calm idle', asy
   assert.equal(world.mode, 'idle', 'the error animation never ended');
 });
 
+scenario('a failed-mission reconnection snapshot settles to idle after 8 seconds', async () => {
+  const world = await ready();
+  world.snapshot({ type: 'snapshot', mission_id: 'm', mission_state: 'failed',
+    state: 'error', label: 'missão falhou' });
+  assert.equal(world.mode, 'error');
+  await world.tick(7999);
+  assert.equal(world.mode, 'error', 'terminal failure settled too early');
+  await world.tick(1);
+  assert.equal(world.mode, 'idle', 'reconnect snapshot error did not settle');
+});
+
+scenario('a non-terminal error snapshot never schedules a terminal reset', async () => {
+  const world = await ready();
+  world.snapshot({ type: 'snapshot', mission_id: 'm', mission_state: 'running',
+    state: 'error', label: 'ferramenta recusada' });
+  await world.tick(12000);
+  assert.equal(world.mode, 'error', 'non-terminal error was confused with a terminal failure');
+});
+
 scenario('a transient error (a denied action) does not reset the state by itself', async () => {
   const world = await ready();
   world.runtime({ mission_id: 'm', kind: 'tool.authorization', state: 'error' });

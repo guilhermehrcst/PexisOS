@@ -18,7 +18,7 @@ class LiveDraftTests(unittest.TestCase):
     def test_every_draft_scenario_passes(self):
         result = subprocess.run([NODE, str(HARNESS)], capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("15/15 scenarios passed", result.stdout)
+        self.assertIn("17/17 scenarios passed", result.stdout)
 
 
 if __name__ == "__main__":
